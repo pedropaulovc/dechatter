@@ -89,7 +89,8 @@ def record(
     With `speed_change_s`, the program stops before each new speed (manual spindle): the
     operator knocks the machine reaching for the dial, then the spindle idles at the new speed.
     `air_s` gives the seconds of spindle-only sound before each pass's cut, for a recording
-    that has to line up with a real program run; the default guesses 2 s of rapids.
+    that has to line up with a real program run; the default guesses 2 s of rapids. With
+    `air_s` there is no leading silence: the spindle is heard from the first sample.
     """
     rng = np.random.default_rng(seed)
     parts = [0.0005 * rng.standard_normal(0 if air_s is not None else 3 * RATE)]

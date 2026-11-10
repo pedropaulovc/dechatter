@@ -331,6 +331,7 @@ async function loadProgram(round) {
   busy = true;
   render();
   try {
+    // Capture has to be running before the job can start; the listener below does not wait.
     await mic.resume();
     const gcode = await engine('program', current, round.round);
     await new Promise((resolve, reject) => {
@@ -623,8 +624,13 @@ new ResizeObserver(() => {
 }).observe(document.body);
 
 // Browsers can hold audio capture back until the user interacts with the page, for instance
-// after a reload. Any click in the widget lets it run.
-document.addEventListener('pointerdown', () => mic.resume());
+// after a reload. Any click, tap or key in the widget lets it run. Touch only counts as
+// interaction when the finger lifts, hence pointerup as well.
+for (const type of ['pointerdown', 'pointerup', 'keydown']) {
+  document.addEventListener(type, () => {
+    mic.resume().catch((err) => console.warn(`dechatter: microphone did not resume: ${err.message}`));
+  });
+}
 
 // Leaving mid-recording loses the run: the samples are only in this page.
 window.addEventListener('beforeunload', (event) => {

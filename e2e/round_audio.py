@@ -4,8 +4,13 @@ Usage: uv run python e2e/round_audio.py <session export .zip> <out.wav>
 
 The widget's Export button produces the zip. Play the WAV into the widget with fake_mic.js,
 or through the speakers, starting when the job starts. The cuts are timed from the round's
-G-code the way fake_grbl.py runs it (G0 at 3000 mm/min, G1 at its feed, G4 for its seconds),
-so the sound lines up with the simulated machine's motion.
+G-code the way fake_grbl.py runs it at its default --rapid (G0 at 3000 mm/min, G1 at its feed,
+G4 for its seconds), so the sound follows the simulated machine's motion to within about a
+second: the simulator's 10 ms ticks add up over a round.
+
+Assumes every earlier round's program ran to completion on the same simulator, since that is
+where this round starts from. Manual-spindle programs are refused: their M0 stops last as
+long as the operator takes.
 """
 
 from __future__ import annotations
@@ -35,11 +40,16 @@ def run(program: str, start: tuple[float, float, float]) -> tuple[list[tuple[flo
     position = dict(zip("XYZ", start, strict=True))
     clock, feed, cuts = 0.0, 0.0, []
     for line in program.splitlines():
-        words = dict(WORD.findall(re.sub(r"\(.*?\)", "", line)))
+        code = re.sub(r"\(.*?\)", "", line).strip()
+        words = dict(WORD.findall(code))
+        if re.match(r"M0\b", code):
+            raise SystemExit("manual-spindle program: its M0 stops cannot be timed in advance")
         if words.get("G") == "4":
             clock += float(words["P"])
             continue
         if words.get("G") not in ("0", "1"):
+            if set(words) & set("XYZ"):
+                raise SystemExit(f"cannot time this move: {line}")
             continue
         feed = float(words.get("F", feed))
         target = {axis: float(words.get(axis, position[axis])) for axis in "XYZ"}
