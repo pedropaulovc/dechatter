@@ -190,7 +190,8 @@ def test_saved_setup_keeps_following_defaults_and_survives_unstorable_text(engin
     form["machine"]["name"] = "mill \x7f"
     engine.call("save_setup", NAME, json.dumps(form))
     written = path.read_text(encoding="utf-8")
-    assert "speed_sigma_fraction" not in written and "dwell_s" not in written
+    # Shown values are pinned even at their defaults; unlisted planner internals are not.
+    assert "speed_sigma_fraction" not in written and "safe_z_mm = 10.0" in written
     assert engine.call("setup_form", NAME)["values"] == form
 
     # Half an emoji, as pasted text cut mid-character arrives from the browser.
@@ -204,6 +205,12 @@ def test_saved_setup_keeps_following_defaults_and_survives_unstorable_text(engin
     zero["planner"]["round1_width_fractions"] = [0, 0.2]
     with pytest.raises(RuntimeError, match="round1_width_fractions"):
         engine.call("save_setup", NAME, json.dumps(zero))
+
+    scalar = json.loads(json.dumps(form))
+    scalar["planner"]["round1_width_fractions"] = 0.2
+    with pytest.raises(RuntimeError, match="must be a list of numbers"):
+        engine.call("save_setup", NAME, json.dumps(scalar))
+    assert path.read_text(encoding="utf-8") == written
 
 
 def test_session_names_cannot_escape_the_store(engine):
