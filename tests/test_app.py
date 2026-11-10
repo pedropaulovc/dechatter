@@ -9,6 +9,7 @@ import zipfile
 import numpy as np
 import pytest
 import synth
+from scipy import signal
 
 from dechatter import browser, session
 from dechatter.app import TIMELINE_FILE
@@ -16,6 +17,7 @@ from dechatter.plan import Plan
 
 MACHINE = synth.Machine()
 NAME = "al-10mm"
+BROWSER_RATE = 48000
 
 
 class Engine:
@@ -38,9 +40,11 @@ class Engine:
         """Record what the simulated machine sounds like cutting the round, as the mic would."""
         plan = Plan.load(session.round_dir(self.root / NAME, number) / session.PLAN_FILE)
         heard = synth.record(plan, seed=number, abort_in_pass=abort_in_pass) * gain
+        # Browsers capture at 48 kHz, far above the simulated machine's own bandwidth.
+        heard = signal.resample_poly(heard, BROWSER_RATE, synth.RATE).astype(np.float32)
         self.call("record_start", NAME, number)
         timeline = json.dumps([{"t": 1.0, "event": "workflow", "state": "running"}])
-        return self.call("record_stop", NAME, memoryview(heard), float(synth.RATE), timeline)
+        return self.call("record_stop", NAME, memoryview(heard), float(BROWSER_RATE), timeline)
 
 
 @pytest.fixture
@@ -128,6 +132,9 @@ def test_requests_out_of_order_are_refused(engine):
     engine.call("record_start", NAME, 1)
     with pytest.raises(RuntimeError, match="already recording"):
         engine.call("record_start", NAME, 1)
+    with pytest.raises(RuntimeError, match="delivered no audio"):
+        engine.call("record_stop", NAME, memoryview(np.zeros(0, np.float32)), 48000.0, "[]")
+    assert engine.call("state", NAME)["recording_round"] is None
 
 
 def test_invalid_setup_is_rejected_and_the_old_one_kept(engine):

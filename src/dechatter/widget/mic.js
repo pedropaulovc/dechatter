@@ -89,6 +89,13 @@ export class Mic {
     return samples;
   }
 
+  // Browsers may keep an audio context suspended until the user interacts with the page.
+  async resume() {
+    if (this.context?.state === 'suspended') {
+      await this.context.resume();
+    }
+  }
+
   async close() {
     this.stream?.getTracks().forEach((track) => track.stop());
     await this.context?.close();

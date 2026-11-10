@@ -189,7 +189,7 @@ async function openMic(deviceId) {
 function renderLevel() {
   const level = mic.open ? mic.levelDb : null;
   $('level').value = level ?? -100;
-  $('level-db').textContent = level === null ? '' : `${Math.round(level)} dB`;
+  $('level-db').textContent = level === null ? (mic.open ? 'no signal' : '') : `${Math.round(level)} dB`;
   if (mic.recording) {
     const clock = $('recording-clock');
     if (clock) {
@@ -319,6 +319,8 @@ async function loadProgram(round) {
   busy = true;
   render();
   try {
+    // This click is a user gesture: browsers that held the audio capture back until one let it run now.
+    await mic.resume();
     const gcode = await engine('program', current, round.round);
     await new Promise((resolve, reject) => {
       cnc.socket.emit('command', cnc.port, 'gcode:load', round.program, gcode, {}, (err) =>

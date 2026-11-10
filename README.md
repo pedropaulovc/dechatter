@@ -5,8 +5,9 @@ G-code program of test cuts, listens while the machine runs it, and decides from
 which cuts chattered. From that it either plans a finer round of cuts or reports the best
 stable speeds and widths.
 
-It runs as a widget inside [cncjs](https://cnc.js.org), recording with the microphone of the
-PC next to the mill, or from the command line with a recording made on a phone. The G-code is
+It runs as a widget inside [cncjs](https://cnc.js.org), entirely in the browser and recording
+with that computer's microphone, or from the command line with a recording made on a phone.
+The G-code is
 plain Grbl dialect (`G0`, `G1`, `G4`, `M3`, `M5`), written for FluidNC and usable on Grbl and
 grblHAL.
 
@@ -26,27 +27,35 @@ follows speed so the chip load stays put.
 ```sh
 uv tool install git+https://github.com/pedropaulovc/dechatter
 
-dechatter init al-10mm          # writes al-10mm/setup.toml
-$EDITOR al-10mm/setup.toml      # machine, tool, material, stock
-dechatter serve al-10mm         # widget at http://127.0.0.1:8765/
+dechatter widget ~/dechatter-widget            # writes a static folder, about 30 MB
+cncjs --mount /dechatter:$HOME/dechatter-widget
 ```
 
-In cncjs, open Manage Widgets, enable the Custom widget, and set its URL to
-`http://127.0.0.1:8765/` in the widget's settings. Then, in the widget:
+In cncjs, open Manage Widgets, enable the Custom widget, and set its URL to `/dechatter/` in
+the widget's settings. Open cncjs at `http://localhost:8000` or over HTTPS: browsers only give
+a page the microphone on those. Then, in the widget:
 
-1. Plan a round. Round 1 is a coarse grid of speeds and widths.
-2. Set the work zero at the left end of the stock, on its front face, at the top.
-3. Load the program into cncjs and press play in cncjs. The widget never starts the machine.
-4. Recording starts when the job starts and stops when it ends. The widget then shows each
+1. Create a session and fill in its setup: machine, tool, material, stock.
+2. Plan a round. Round 1 is a coarse grid of speeds and widths.
+3. Set the work zero at the left end of the stock, on its front face, at the top.
+4. Load the program into cncjs and press play in cncjs. The widget never starts the machine.
+5. Recording starts when the job starts and stops when it ends. The widget then shows each
    pass as stable or chatter, the stability map and the best cuts so far.
-5. If your ears disagree with a verdict, change it in the table. Plan the next round and
+6. If your ears disagree with a verdict, change it in the table. Plan the next round and
    repeat until the widget reports convergence.
 
-`dechatter serve` records on the machine it runs on, so run it on the PC by the mill, which
-need not be the machine cncjs runs on (use `--host` to listen beyond localhost). The widget
-shows the microphone's level before any cutting. `dechatter devices` lists the inputs and
-`--device N` picks one. Each round's `recording.wav` is written as it is recorded and kept
-beside the plan, with the job timeline cncjs reported in `timeline.json`.
+Everything runs in the browser tab. The same Python that the command line uses runs there
+under [Pyodide](https://pyodide.org), which `dechatter widget` downloads once and copies into
+the folder, so the shop PC needs no Python and no internet. The microphone is the browser's,
+on whichever computer shows cncjs, opened with echo cancellation, noise suppression and
+automatic gain switched off. The widget shows its level before any cutting and warns if the
+browser kept any of that processing on.
+
+Sessions are stored in that browser (IndexedDB), per cncjs address. Export saves one as a zip
+holding `setup.toml` and each round's plan, program, `recording.wav`, results and the job
+timeline cncjs reported. Import loads it in another browser, and unzipped it is a session
+folder the command line reads. Keep the tab open while a round runs: the recording lives in
+the page until the job ends.
 
 ## Use from the command line
 
@@ -110,8 +119,8 @@ in steel and aluminium on a Hurco VM20i, each labelled by two operators.
 
 | Operators say | Cuts | Detector agrees |
 |---|---|---|
-| chatter (both) | 169 | 147 (87%) |
-| no chatter (both) | 254 | 225 (89%) |
+| chatter (both) | 169 | 142 (84%) |
+| no chatter (both) | 254 | 233 (92%) |
 | slight, or they disagree | 160 | not scored |
 
 The 27 dB threshold was chosen on this same data, so these numbers are a fit and the detector
@@ -122,8 +131,9 @@ without that step the best achievable balanced accuracy on this data falls from 
 It has not yet been run on a real machine end to end. The planner and the audio pipeline are
 tested against a simulated machine with stability lobes (`tests/synth.py`), where a session
 converges in about three rounds and 27 cuts to within 10% of the true best removal rate. The
-widget was driven through that same session in a browser against cncjs 1.11.5 and a simulated
-Grbl (`e2e/`), with the simulated machine standing in for the microphone.
+widget was driven through that same session in Chrome against cncjs 1.11.5 and a simulated
+Grbl (`e2e/`), with the simulated machine's sound played into the widget in place of the
+microphone. Capture from a real webcam microphone was checked separately, without cutting.
 
 Known limits:
 

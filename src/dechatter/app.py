@@ -147,6 +147,11 @@ class App:
             raise SessionError("not recording")
         target = self._round(self.recording_round)
         self.recording_round = None
+        if len(samples) == 0:
+            raise SessionError(
+                "the microphone delivered no audio during the run; check that it shows a level, "
+                "then run the round again"
+            )
         recording = target.path / RECORDING_FILE
         audio.save_wav(recording, samples, rate)
         (target.path / TIMELINE_FILE).write_text(json.dumps(timeline), encoding="utf-8")
