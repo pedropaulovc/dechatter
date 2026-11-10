@@ -2,7 +2,11 @@
 // the setup file has them; on a machine in inches they are only shown and typed in inches.
 
 const MM_PER_INCH = 25.4;
-const LENGTH_UNITS = { length: { mm: 'mm', in: 'in' }, feed: { mm: 'mm/min', in: 'in/min' } };
+const LENGTH_UNITS = {
+  length: { mm: 'mm', in: 'in' },
+  lengths: { mm: 'mm', in: 'in' },
+  feed: { mm: 'mm/min', in: 'in/min' },
+};
 
 export const STEPS = [
   {
@@ -36,10 +40,11 @@ export const STEPS = [
   },
   {
     title: 'Cut',
-    hint: 'The test holds the depth and steps the spindle speed and the radial width.',
+    hint: 'Each depth is tested on its own, stepping the spindle speed and the radial width.',
     fields: [
       { at: 'cut.material', label: 'Work material', type: 'choice', options: 'materials' },
-      { at: 'cut.axial_depth_mm', label: 'Axial depth of cut', type: 'length' },
+      { at: 'cut.axial_depth_mm', label: 'Axial depth of cut', type: 'length', note: 'The deepest cut you want. It is tested first.' },
+      { at: 'cut.other_depths_mm', label: 'Shallower depths to compare', type: 'lengths', optional: true, placeholder: 'none', note: 'Separated by commas. Tested afterwards, starting from the widths that were stable.' },
       { at: 'cut.direction', label: 'Direction', type: 'choice', options: [['conventional', 'conventional'], ['climb', 'climb']] },
       { at: 'cut.width_max_mm', label: 'Widest radial cut to try', type: 'length', optional: true, placeholder: 'half the diameter' },
       { at: 'cut.chip_load_mm', label: 'Chip load per tooth', type: 'length', optional: true, placeholder: 'from the material' },
@@ -82,6 +87,9 @@ function shown(field, value, units) {
   if (value === null || value === undefined) {
     return '';
   }
+  if (field.type === 'lengths') {
+    return value.map((length) => (units === 'in' ? tidy(length / MM_PER_INCH) : length)).join(', ');
+  }
   if (field.type in LENGTH_UNITS && units === 'in') {
     return String(tidy(value / MM_PER_INCH));
   }
@@ -97,6 +105,10 @@ function typed(field, text, units) {
   }
   if (field.type === 'list') {
     return text.split(',').map((part) => Number(part.trim()));
+  }
+  if (field.type === 'lengths') {
+    const lengths = text.trim() === '' ? [] : text.split(',').map((part) => Number(part.trim()));
+    return lengths.map((length) => (units === 'in' ? tidy(length * MM_PER_INCH) : length));
   }
   if (text.trim() === '' || Number.isNaN(Number(text))) {
     return null;
@@ -123,7 +135,7 @@ function control(field, value, units, materials) {
   input.value = shown(field, value, units);
   input.required = !field.optional;
   input.placeholder = field.placeholder ?? '';
-  if (field.type === 'list') {
+  if (field.type === 'list' || field.type === 'lengths') {
     input.pattern = String.raw`\s*\d*\.?\d+(\s*,\s*\d*\.?\d+)*\s*`;
     input.title = 'Numbers separated by commas';
     return input;

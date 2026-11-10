@@ -29,6 +29,7 @@ PRIOR_AT_MAX_WIDTH = 0.05
 EXCLUSION_SIGMAS = 2.0
 SWEET_SPOT_POCKET = 0.25  # pocket half-width as a fraction of the spacing to the next lobe
 MODE_TOLERANCE = 0.02  # chatter frequencies this close together are the same mode
+RULED_OUT = 0.02  # a cut less likely than this to be stable is one the measurements exclude
 
 
 @dataclass(frozen=True)
@@ -160,7 +161,16 @@ class Proposal:
     expected_improvement: float  # of the most promising cut, as a fraction of the best MRR
 
 
-def propose(setup: Setup, env: Envelope, observations: list[Observation]) -> Proposal:
+def propose(
+    setup: Setup, env: Envelope, observations: list[Observation], target_mm3_min: float = 0.0
+) -> Proposal:
+    """The next batch of cuts at the setup's depth.
+
+    `target_mm3_min` is a removal rate already reached at another depth. Nothing is proposed
+    once the power cap and the measurements exclude every cut that would beat it: this depth
+    cannot win. Until then the search here climbs from its own best cut, since the first
+    cuts at a new depth are narrower than the ones that could win.
+    """
     cfg = setup.planner
     measured = build_map(setup, env, observations)
     assumed = measured.copy()
@@ -171,7 +181,10 @@ def propose(setup: Setup, env: Envelope, observations: list[Observation]) -> Pro
     best = ranked[0][0] if ranked else float(mrr[-1, 0])
     improvement = p_measured * np.clip(mrr / best - 1, 0, None)
 
-    allowed = (mrr <= env.mrr_limit_mm3_min) & (p_measured >= cfg.probability_floor)
+    within_power = mrr <= env.mrr_limit_mm3_min
+    if not np.any(within_power & (p_measured > RULED_OUT) & (mrr > target_mm3_min)):
+        return Proposal([], 0.0)
+    allowed = within_power & (p_measured >= cfg.probability_floor)
     for obs in observations:
         allowed[measured.speed_index(obs.rpm), measured.width_index(obs.width_mm)] = False
 

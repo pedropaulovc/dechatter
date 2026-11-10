@@ -43,11 +43,16 @@ class Engine:
         abort_in_pass: int | None = None,
         gain: float = 1.0,
         speed_change_s: float = 0.0,
+        machine: synth.Machine = MACHINE,
     ):
         """Record what the simulated machine sounds like cutting the round, as the mic would."""
         plan = Plan.load(session.round_dir(self.root / NAME, number) / session.PLAN_FILE)
         heard = synth.record(
-            plan, seed=number, abort_in_pass=abort_in_pass, speed_change_s=speed_change_s
+            plan,
+            machine,
+            seed=number,
+            abort_in_pass=abort_in_pass,
+            speed_change_s=speed_change_s,
         )
         heard = heard * gain
         # Browsers capture at 48 kHz, far above the simulated machine's own bandwidth.
@@ -64,9 +69,9 @@ def engine(tmp_path) -> Engine:
     return engine
 
 
-def converge(engine, setup, **run) -> dict:
+def converge(engine, setup, machine: synth.Machine = MACHINE, **run) -> dict:
     """Plan and run rounds until the planner stops, checking every verdict against the machine."""
-    for _ in range(10):
+    for _ in range(16):
         state = engine.call("plan", NAME, "fresh")
         number = state["rounds"][-1]["round"]
         assert state["next"] == "run"
@@ -76,17 +81,17 @@ def converge(engine, setup, **run) -> dict:
             gcode.RESTORE_INCH,
             "M30",
         ]
-        state = engine.run_round(number, **run)
+        state = engine.run_round(number, machine=machine, **run)
         latest = state["rounds"][-1]
         assert latest["analysed"]
         for p in latest["passes"]:
             if p["kind"] != "test":
                 continue
-            truth = MACHINE.chatters(p["rpm"], p["width_mm"], setup.tool.flutes)
+            truth = machine.chatters(p["rpm"], p["width_mm"], setup.tool.flutes, latest["depth_mm"])
             assert p["verdict"] == ("unstable" if truth else "stable")
         if state["next"] == "converged":
             return state
-    pytest.fail("did not converge in 10 rounds")
+    pytest.fail("did not converge in 16 rounds")
 
 
 def test_session_runs_to_convergence(engine, setup):
@@ -110,6 +115,49 @@ def test_manual_spindle_session_converges_despite_the_stops_to_change_speed(engi
 
     state = converge(engine, setup, speed_change_s=12.0)
     assert state["best"][0]["mrr_cm3_min"] > 12
+
+
+def test_a_shallower_depth_is_tried_from_the_stable_widths_and_wins_where_the_machine_allows(
+    engine, setup
+):
+    form = engine.call("setup_form", NAME)["values"]
+    form["cut"]["other_depths_mm"] = [4.0]
+    engine.call("save_setup", NAME, json.dumps(form))
+    deep = form["cut"]["axial_depth_mm"]
+    # On this machine a shallower cut can be much wider before it chatters.
+    machine = synth.Machine(reference_depth_mm=deep)
+
+    state = converge(engine, setup, machine)
+
+    order = [r["depth_mm"] for r in state["rounds"]]
+    assert order == sorted(order, reverse=True) and set(order) == {deep, 4.0}
+    tests = lambda depth: [  # noqa: E731
+        p
+        for r in state["rounds"]
+        if r["depth_mm"] == depth
+        for p in r["passes"]
+        if p["kind"] == "test"
+    ]
+    stable_deep = {(p["rpm"], p["width_mm"]) for p in tests(deep) if p["verdict"] == "stable"}
+    # Nothing already known to be stable is cut again, and the search starts where it left off.
+    assert not stable_deep & {(p["rpm"], p["width_mm"]) for p in tests(4.0)}
+    assert min(p["width_mm"] for p in tests(4.0)) > machine.floor_mm
+    best = state["best"][0]
+    assert best["depth_mm"] == 4.0
+    assert best["mrr_cm3_min"] > max(
+        b["mrr_cm3_min"] for b in state["best"] if b["depth_mm"] == deep
+    )
+
+
+def test_a_deeper_cut_is_refused_on_a_block_whose_face_is_only_flat_higher_up(engine):
+    engine.call("plan", NAME, "same")
+    engine.run_round(1)
+    form = engine.call("setup_form", NAME)["values"]
+    form["cut"]["axial_depth_mm"] = 8.0
+    engine.call("save_setup", NAME, json.dumps(form))
+    with pytest.raises(RuntimeError, match="only flat down to 5 mm"):
+        engine.call("plan", NAME, "same")
+    assert engine.call("plan", NAME, "fresh")["rounds"][-1]["depth_mm"] == 8.0
 
 
 def test_operator_verdict_overrules_the_detector_and_feeds_the_planner(engine):

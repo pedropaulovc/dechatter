@@ -575,11 +575,16 @@ function renderStep() {
     stock.onchange = () => {
       stockChoice = stock.value;
     };
-    const plan = button(first ? 'Plan round 1' : `Plan round ${state.rounds.length + 1}`, async () => {
+    const shallower = !first && state.next_depth_mm !== state.depth_mm;
+    const label = `Plan round ${state.rounds.length + 1}${shallower ? ` at ${state.next_depth_mm} mm depth` : ''}`;
+    const plan = button(label, async () => {
       await act('plan', first ? 'same' : stockChoice);
       stockChoice = 'same';
     }, { className: 'primary' });
-    step.append(el('p', {}, first ? 'Plan a coarse grid of test cuts.' : 'Plan the next cuts from what was measured.'));
+    const next = shallower
+      ? `${state.depth_mm} mm depth is settled. Next come cuts ${state.next_depth_mm} mm deep, starting from the widths that were stable.`
+      : 'Plan the next cuts from what was measured.';
+    step.append(el('p', {}, first ? 'Plan a coarse grid of test cuts.' : next));
     step.append(el('p', {}, plan, ...(first ? [] : [' on the ', stock])));
     return;
   }
@@ -590,7 +595,7 @@ function renderStep() {
   const ready = cnc.link === 'ready' && cnc.workflow === 'idle' && mic.open;
   const load = button(loaded ? 'Reload program' : 'Load into cncjs', () => loadProgram(round), { className: loaded ? '' : 'primary', disabled: !ready });
   step.append(
-    el('p', {}, `Round ${round.round}: ${tests} test cuts, about ${minutes(round.run_time_s)} plus rapids. The front face ends at Y${round.face_y_end_mm}.`),
+    el('p', {}, `Round ${round.round}: ${tests} test cuts ${round.depth_mm} mm deep, about ${minutes(round.run_time_s)} plus rapids. The front face ends at Y${round.face_y_end_mm}.`),
     el('ol', {},
       el('li', {}, 'Zero X at the left end of the stock, Y on its front face, Z on top.'),
       el('li', {}, load, mic.open ? '' : ' (enable the microphone first)'),
@@ -627,7 +632,7 @@ function renderRound() {
   if (!round) {
     return;
   }
-  $('round-title').textContent = `Round ${round.round}${round.analysed ? ' results' : ''}`;
+  $('round-title').textContent = `Round ${round.round}${round.analysed ? ' results' : ''}, ${round.depth_mm} mm deep`;
   $('passes').replaceChildren(
     ...round.passes.map((p) =>
       el('tr', { className: p.kind === 'test' ? '' : 'prep' },
@@ -643,10 +648,12 @@ function renderRound() {
 }
 
 function renderMap() {
-  $('map-section').hidden = editing !== null || !state || state.observations.length === 0;
+  // A depth that has no cuts of its own yet still has a map: what deeper cuts showed stable.
+  $('map-section').hidden = editing !== null || !state || !state.rounds.some((r) => r.analysed);
   if ($('map-section').hidden) {
     return;
   }
+  $('map-title').textContent = `Stability map at ${state.depth_mm} mm depth`;
   const { speeds, widths, p } = state.map;
   const canvas = $('map');
   const ctx = canvas.getContext('2d');
@@ -704,6 +711,7 @@ function renderBest() {
       el('tr', {},
         el('td', {}, String(b.rpm)),
         el('td', {}, `${b.width_mm.toFixed(2)} mm`),
+        el('td', {}, `${b.depth_mm} mm`),
         el('td', {}, String(b.feed_mm_min)),
         el('td', {}, b.mrr_cm3_min.toFixed(2)),
       ),

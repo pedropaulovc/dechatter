@@ -58,7 +58,8 @@ class Tool:
 @dataclass(frozen=True)
 class Cut:
     material: str
-    axial_depth_mm: float
+    axial_depth_mm: float  # the deepest cut; the session settles speed and width here first
+    other_depths_mm: tuple[float, ...] = ()  # shallower depths to compare afterwards
     width_max_mm: float | None = None
     chip_load_mm: float | None = None
     speed_min_rpm: int | None = None
@@ -211,6 +212,13 @@ def _validate(setup: Setup) -> None:
         raise ConfigError("[cut] width_max_mm must be within (0, tool diameter]")
     if machine.min_rpm >= machine.max_rpm:
         raise ConfigError("[machine] min_rpm must be below max_rpm")
+    depths = cut.other_depths_mm
+    if not isinstance(depths, tuple) or not all(
+        type(d) in (int, float) and 0 < d < cut.axial_depth_mm for d in depths
+    ):
+        raise ConfigError(
+            "[cut] other_depths_mm must list depths above 0 and shallower than axial_depth_mm"
+        )
     fractions = setup.planner.round1_width_fractions
     if (
         not isinstance(fractions, tuple)
@@ -244,7 +252,8 @@ material = "carbide"     # carbide | hss
 
 [cut]
 material = "aluminum-6061"   # see `dechatter materials`
-axial_depth_mm = 5.0         # held constant; the test steps speed and radial width
+axial_depth_mm = 5.0         # the deepest cut; the test steps speed and radial width at it
+# other_depths_mm = [2.5]    # shallower depths to compare once that one is settled
 direction = "conventional"   # conventional | climb
 # width_max_mm = 4.7         # default: half the tool diameter
 # chip_load_mm = 0.05        # default: from the material table, derated by machine weight
