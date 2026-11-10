@@ -129,7 +129,10 @@ def _build[T](cls: type[T], section: str, data: dict) -> T:
 
 
 def load_setup(path: Path) -> Setup:
-    data = tomllib.loads(path.read_text(encoding="utf-8"))
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(f"{path.name} is not valid TOML: {exc}") from exc
     sections = {f.name: f for f in dataclasses.fields(Setup)}
     unknown = set(data) - set(sections)
     if unknown:
@@ -149,7 +152,12 @@ def _toml_value(value: object) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, str):
-        return json.dumps(str(value), ensure_ascii=False)
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ConfigError("text contains a broken character; retype it") from exc
+        # JSON string escapes are TOML's too, except that TOML also forbids a raw DEL.
+        return json.dumps(str(value), ensure_ascii=False).replace("\x7f", "\\u007f")
     if isinstance(value, list | tuple):
         return f"[{', '.join(_toml_value(item) for item in value)}]"
     if isinstance(value, int | float):
@@ -162,14 +170,32 @@ def setup_values(setup: Setup) -> dict:
     return dataclasses.asdict(setup)
 
 
+def _is_default(section: str, key: str, value: object) -> bool:
+    cls = typing.get_type_hints(Setup).get(section)
+    known = {f.name: f for f in dataclasses.fields(cls)} if cls else {}
+    if key not in known or known[key].default is dataclasses.MISSING:
+        return False
+    default = known[key].default
+    return value == (list(default) if isinstance(default, tuple) else default)
+
+
 def dump_setup(values: dict) -> str:
-    """Setup file text for sections of values. Entries left empty (None) take their default."""
+    """Setup file text for sections of values.
+
+    Entries left empty (None) or equal to their default are not written, so a setup saved
+    from a form keeps following the defaults it never changed.
+    """
     blocks = []
     for section, entries in values.items():
         if not isinstance(entries, dict):
             raise ConfigError(f"[{section}] must be a section of values")
-        lines = [f"{key} = {_toml_value(v)}" for key, v in entries.items() if v is not None]
-        blocks.append("\n".join([f"[{section}]", *lines]))
+        lines = [
+            f"{key} = {_toml_value(v)}"
+            for key, v in entries.items()
+            if v is not None and not _is_default(section, key, v)
+        ]
+        if lines:
+            blocks.append("\n".join([f"[{section}]", *lines]))
     return "\n\n".join(blocks) + "\n"
 
 
@@ -181,6 +207,8 @@ def _validate(setup: Setup) -> None:
         raise ConfigError("[cut] width_max_mm must be within (0, tool diameter]")
     if machine.min_rpm >= machine.max_rpm:
         raise ConfigError("[machine] min_rpm must be below max_rpm")
+    if not all(0 < fraction <= 1 for fraction in setup.planner.round1_width_fractions):
+        raise ConfigError("[planner] round1_width_fractions must each be within (0, 1]")
     if not 0 < setup.planner.probability_floor <= setup.planner.min_probability < 1:
         raise ConfigError("[planner] need 0 < probability_floor <= min_probability < 1")
 

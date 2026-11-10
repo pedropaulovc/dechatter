@@ -114,7 +114,7 @@ async function newSession() {
     current = name.trim();
     localStorage.setItem(SESSION_KEY, current);
     state = null;
-    editing = { ...(await engine('setup_form', current)), step: 0 };
+    await openWizard();
     showError('');
   } catch (err) {
     showError(err.message);
@@ -122,9 +122,16 @@ async function newSession() {
   render();
 }
 
+// Start the wizard on the session's stored setup. The form is redrawn even when it last
+// showed this same step, so nothing typed into an earlier wizard is left on screen.
+async function openWizard() {
+  editing = { ...(await engine('setup_form', current)), step: 0 };
+  $('setup-form').dataset.key = '';
+}
+
 async function editSetup() {
   try {
-    editing = { ...(await engine('setup_form', current)), step: 0 };
+    await openWizard();
   } catch (err) {
     showError(err.message);
   }

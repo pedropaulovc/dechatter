@@ -167,7 +167,9 @@ export function read(form, step, values, units) {
   for (const field of step.fields) {
     const [section, key] = field.at.split('.');
     const input = form.elements[field.at];
-    if (input.value === input.dataset.shown) {
+    // Back and the units switch read a step without validating it: a half-typed or invalid
+    // entry is dropped there, never stored.
+    if (input.value === input.dataset.shown || !input.checkValidity()) {
       continue;
     }
     values[section][key] = typed(field, input.value, units);

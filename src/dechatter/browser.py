@@ -71,15 +71,15 @@ class Sessions:
 
     def save_setup(self, name: str, values_json: str) -> dict:
         """Replace the setup if it is valid; an invalid one leaves the session untouched."""
-        text = dump_setup(json.loads(values_json))
+        text = dump_setup(json.loads(values_json)).encode("utf-8")
         path = self._dir(name) / session.SETUP_FILE
-        previous = path.read_text(encoding="utf-8")
-        path.write_text(text, encoding="utf-8")
+        previous = path.read_bytes()
         self._apps.pop(name, None)
         try:
+            path.write_bytes(text)
             return self._app(name).state()
         except Exception:
-            path.write_text(previous, encoding="utf-8")
+            path.write_bytes(previous)
             self._apps.pop(name, None)
             raise
 
