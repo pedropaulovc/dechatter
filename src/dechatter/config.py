@@ -1,0 +1,199 @@
+"""Setup file (`setup.toml`): the machine, the tool assembly under test, and planner knobs."""
+
+from __future__ import annotations
+
+import dataclasses
+import tomllib
+import typing
+from dataclasses import dataclass, field
+from enum import StrEnum
+from pathlib import Path
+
+
+class ConfigError(ValueError):
+    pass
+
+
+class Direction(StrEnum):
+    CONVENTIONAL = "conventional"
+    CLIMB = "climb"
+
+
+class Coolant(StrEnum):
+    NONE = "none"
+    FLOOD = "flood"
+    MIST = "mist"
+
+
+class ToolMaterial(StrEnum):
+    CARBIDE = "carbide"
+    HSS = "hss"
+
+
+@dataclass(frozen=True)
+class Machine:
+    max_rpm: int
+    spindle_power_w: float
+    weight_kg: float
+    min_rpm: int = 500
+    name: str = ""
+
+
+@dataclass(frozen=True)
+class Tool:
+    diameter_mm: float
+    flutes: int
+    stickout_mm: float
+    holder: str = ""
+    material: ToolMaterial = ToolMaterial.CARBIDE
+
+
+@dataclass(frozen=True)
+class Cut:
+    material: str
+    axial_depth_mm: float
+    width_max_mm: float | None = None
+    chip_load_mm: float | None = None
+    speed_min_rpm: int | None = None
+    speed_max_rpm: int | None = None
+    direction: Direction = Direction.CONVENTIONAL
+
+
+@dataclass(frozen=True)
+class Stock:
+    length_mm: float
+    width_mm: float
+
+
+@dataclass(frozen=True)
+class Program:
+    dwell_s: float = 4.0
+    clearance_mm: float = 3.0
+    safe_z_mm: float = 10.0
+    plunge_feed_mm_min: float = 150.0
+    truing_width_mm: float = 0.2
+    coolant: Coolant = Coolant.NONE
+
+
+@dataclass(frozen=True)
+class Planner:
+    round1_speeds: int = 5
+    round1_width_fractions: tuple[float, ...] = (0.1, 0.2, 0.35)
+    batch_size: int = 8
+    min_probability: float = 0.8
+    probability_floor: float = 0.5
+    stop_improvement: float = 0.05
+    speed_step_rpm: int = 10
+    width_step_mm: float = 0.1
+    speed_sigma_fraction: float = 0.015
+    misclassification: float = 0.05
+    sweet_spot_trust: float = 0.5
+    power_fraction: float = 0.6
+
+
+@dataclass(frozen=True)
+class Setup:
+    machine: Machine
+    tool: Tool
+    cut: Cut
+    stock: Stock
+    program: Program = field(default_factory=Program)
+    planner: Planner = field(default_factory=Planner)
+
+
+def _coerce(hint: object, value: object) -> object:
+    for candidate in typing.get_args(hint) or (hint,):
+        if isinstance(candidate, type) and issubclass(candidate, StrEnum):
+            return candidate(value)
+    if typing.get_origin(hint) is tuple and isinstance(value, list):
+        return tuple(value)
+    return value
+
+
+def _build[T](cls: type[T], section: str, data: dict) -> T:
+    hints = typing.get_type_hints(cls)
+    unknown = set(data) - set(hints)
+    if unknown:
+        raise ConfigError(f"[{section}] unknown keys: {', '.join(sorted(unknown))}")
+    try:
+        return cls(**{key: _coerce(hints[key], value) for key, value in data.items()})
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"[{section}] {exc}") from exc
+
+
+def load_setup(path: Path) -> Setup:
+    data = tomllib.loads(path.read_text(encoding="utf-8"))
+    sections = {f.name: f for f in dataclasses.fields(Setup)}
+    unknown = set(data) - set(sections)
+    if unknown:
+        raise ConfigError(f"unknown sections: {', '.join(sorted(unknown))}")
+    built = {}
+    for name, f in sections.items():
+        if name not in data and f.default_factory is dataclasses.MISSING:
+            raise ConfigError(f"missing section [{name}]")
+        cls = typing.get_type_hints(Setup)[name]
+        built[name] = _build(cls, name, data.get(name, {}))
+    setup = Setup(**built)
+    _validate(setup)
+    return setup
+
+
+def _validate(setup: Setup) -> None:
+    tool, cut, machine = setup.tool, setup.cut, setup.machine
+    if tool.diameter_mm <= 0 or tool.flutes < 1:
+        raise ConfigError("[tool] diameter_mm and flutes must be positive")
+    if cut.width_max_mm is not None and not 0 < cut.width_max_mm <= tool.diameter_mm:
+        raise ConfigError("[cut] width_max_mm must be within (0, tool diameter]")
+    if machine.min_rpm >= machine.max_rpm:
+        raise ConfigError("[machine] min_rpm must be below max_rpm")
+    if not 0 < setup.planner.probability_floor <= setup.planner.min_probability < 1:
+        raise ConfigError("[planner] need 0 < probability_floor <= min_probability < 1")
+
+
+TEMPLATE = """\
+# dechatter setup: one file per tool assembly (machine + holder + cutter + stickout).
+# Change any of those four and the stability map no longer applies: start a new session.
+
+[machine]
+name = "PM-30MV"
+max_rpm = 5000
+min_rpm = 500
+spindle_power_w = 1500   # rated spindle motor power
+weight_kg = 250          # derates the starting chip load on light machines
+
+[tool]
+diameter_mm = 9.525
+flutes = 3
+stickout_mm = 30.0       # recorded for traceability; shifts chatter frequencies
+holder = "ER32"
+material = "carbide"     # carbide | hss
+
+[cut]
+material = "aluminum-6061"   # see `dechatter materials`
+axial_depth_mm = 5.0         # held constant; the test steps speed and radial width
+direction = "conventional"   # conventional | climb
+# width_max_mm = 4.7         # default: half the tool diameter
+# chip_load_mm = 0.05        # default: from the material table, derated by machine weight
+# speed_min_rpm = 1250       # default: a quarter of the top test speed
+# speed_max_rpm = 5000       # default: min(machine max, material surface-speed limit)
+
+[stock]
+length_mm = 60.0   # along X: every pass cuts the full length
+width_mm = 30.0    # along Y: material the test may consume from the front face
+
+[program]
+dwell_s = 4.0            # spindle-at-speed pause before each pass; also the air-cut reference
+clearance_mm = 3.0
+safe_z_mm = 10.0
+plunge_feed_mm_min = 150.0
+truing_width_mm = 0.2
+coolant = "none"         # none | flood | mist (coolant noise hurts detection)
+
+[planner]
+round1_speeds = 5
+round1_width_fractions = [0.1, 0.2, 0.35]   # of width_max
+batch_size = 8
+min_probability = 0.8      # each cut is this likely stable, if the cut before it passes
+probability_floor = 0.5    # ... and this likely stable on measured data alone
+stop_improvement = 0.05    # converged when no cut promises this much more removal rate
+"""
