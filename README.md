@@ -29,8 +29,9 @@ tells which your machine prefers. List shallower depths in the wizard's Cut step
 `other_depths_mm` in `setup.toml`) and the session continues with them once the deepest depth
 is settled, deepest first. A width that was stable in a deeper cut is taken as stable in a
 shallower one, so each further depth starts from those widths and only looks for how much
-wider it can go. A depth is skipped when the power cap and the measurements leave it no cut
-that would beat the best one found. The results list the best cuts of all depths together.
+wider it can go. A depth is left once no cut within the power cap that would beat the best
+one found keeps a fair chance of being stable. The results list the best cuts of all depths
+together.
 
 The depths run deepest first because a shallower cut leaves the face flat only above its own
 depth. Planning a deeper cut on such a block is refused: mount fresh stock for it.
