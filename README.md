@@ -40,7 +40,7 @@ depth. Planning a deeper cut on such a block is refused: mount fresh stock for i
 
 ```sh
 npm install dechatter
-cncjs --mount /dechatter:$(npm root)/dechatter/web
+cncjs --mount "/dechatter:$(npm root)/dechatter/web"   # PowerShell or a POSIX shell
 ```
 
 The npm package is the widget as a static folder, about 30 MB. To build that folder from
