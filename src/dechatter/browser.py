@@ -64,8 +64,9 @@ class Sessions:
 
     def setup_form(self, name: str) -> dict:
         """What the widget's setup wizard needs: the current values and the material choices."""
+        self._app(name)  # the session must exist and its setup must load
         return {
-            "values": setup_values(self._app(name).setup),
+            "values": setup_values(self._dir(name) / session.SETUP_FILE),
             "materials": sorted(materials.MATERIALS),
         }
 
