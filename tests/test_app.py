@@ -99,8 +99,9 @@ def test_session_runs_to_convergence(engine, setup):
 
 
 def test_manual_spindle_session_converges_despite_the_stops_to_change_speed(engine, setup):
-    text = engine.call("setup_text", NAME).replace('spindle = "program"', 'spindle = "manual"')
-    assert engine.call("save_setup", NAME, text)["spindle"] == "manual"
+    form = engine.call("setup_form", NAME)["values"]
+    form["machine"]["spindle"] = "manual"
+    assert engine.call("save_setup", NAME, json.dumps(form))["spindle"] == "manual"
 
     state = converge(engine, setup, speed_change_s=12.0)
     assert state["best"][0]["mrr_cm3_min"] > 12
@@ -159,14 +160,50 @@ def test_requests_out_of_order_are_refused(engine):
     assert engine.call("state", NAME)["recording_round"] is None
 
 
-def test_invalid_setup_is_rejected_and_the_old_one_kept(engine):
-    good = engine.call("setup_text", NAME)
-    with pytest.raises(RuntimeError, match="unknown material"):
-        engine.call("save_setup", NAME, good.replace("aluminum-6061", "unobtainium"))
-    assert engine.call("setup_text", NAME) == good
+def test_setup_form_round_trips_and_an_invalid_one_keeps_the_old_setup(engine):
+    form = engine.call("setup_form", NAME)
+    assert "aluminum-6061" in form["materials"]
+    good = form["values"]
+    assert good["cut"]["width_max_mm"] is None, "unset limits reach the form as empty"
 
-    state = engine.call("save_setup", NAME, good.replace("flutes = 3", "flutes = 2"))
+    bad = json.loads(json.dumps(good))
+    bad["cut"]["material"] = "unobtainium"
+    with pytest.raises(RuntimeError, match="unknown material"):
+        engine.call("save_setup", NAME, json.dumps(bad))
+    assert engine.call("setup_form", NAME)["values"] == good
+
+    edited = json.loads(json.dumps(good))
+    edited["tool"]["flutes"] = 2
+    edited["tool"]["holder"] = 'ER32 "short" 🔧'
+    edited["cut"]["width_max_mm"] = 3.5
+    state = engine.call("save_setup", NAME, json.dumps(edited))
     assert "2 flutes" in state["summary"]
+    assert engine.call("setup_form", NAME)["values"] == edited
+
+    with pytest.raises(RuntimeError, match="unknown keys: rpm"):
+        engine.call("save_setup", NAME, json.dumps({**good, "machine": {"rpm": 1}}))
+
+
+def test_saved_setup_keeps_following_defaults_and_survives_unstorable_text(engine):
+    path = engine.root / NAME / session.SETUP_FILE
+    form = engine.call("setup_form", NAME)["values"]
+    form["machine"]["name"] = "mill \x7f"
+    engine.call("save_setup", NAME, json.dumps(form))
+    written = path.read_text(encoding="utf-8")
+    assert "speed_sigma_fraction" not in written and "dwell_s" not in written
+    assert engine.call("setup_form", NAME)["values"] == form
+
+    # Half an emoji, as pasted text cut mid-character arrives from the browser.
+    broken = json.loads(json.dumps(form))
+    broken["tool"]["holder"] = "ER32 \ud83d"
+    with pytest.raises(RuntimeError, match="broken character"):
+        engine.call("save_setup", NAME, json.dumps(broken))
+    assert path.read_text(encoding="utf-8") == written
+
+    zero = json.loads(json.dumps(form))
+    zero["planner"]["round1_width_fractions"] = [0, 0.2]
+    with pytest.raises(RuntimeError, match="round1_width_fractions"):
+        engine.call("save_setup", NAME, json.dumps(zero))
 
 
 def test_session_names_cannot_escape_the_store(engine):

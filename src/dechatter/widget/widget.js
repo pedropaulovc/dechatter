@@ -3,6 +3,7 @@
 // and analysis are dechatter's Python running in a worker (engine.js).
 
 import { Mic } from './mic.js';
+import { STEPS, draw, read } from './wizard.js';
 
 const params = new URLSearchParams(location.search);
 const token = params.get('token') ?? '';
@@ -12,6 +13,7 @@ const TIMELINE_LIMIT = 5000;
 const LEVEL_MS = 250;
 const SESSION_KEY = 'dechatter.session';
 const DEVICE_KEY = 'dechatter.microphone';
+const UNITS_KEY = 'dechatter.units';
 const $ = (id) => document.getElementById(id);
 
 const cnc = {
@@ -28,7 +30,8 @@ let fatal = ''; // why the engine could not start; nothing works without it
 let names = []; // sessions stored in this browser
 let current = localStorage.getItem(SESSION_KEY) ?? '';
 let state = null; // the current session, as the engine last reported it
-let editing = null; // setup text being edited, or null
+let editing = null; // { values, materials, step } while the setup wizard is open, else null
+let units = localStorage.getItem(UNITS_KEY) ?? 'mm'; // how the wizard shows lengths: mm | in
 let timeline = []; // what cncjs reported since the job last started; saved with the recording
 let busy = false; // an engine request is in flight
 let stockChoice = 'same'; // survives redraws: planning on the wrong face position cuts air or too deep
@@ -106,12 +109,12 @@ async function newSession() {
     return;
   }
   try {
-    const template = await engine('create', name.trim());
+    await engine('create', name.trim());
     names = await engine('names');
     current = name.trim();
     localStorage.setItem(SESSION_KEY, current);
     state = null;
-    editing = template;
+    await openWizard();
     showError('');
   } catch (err) {
     showError(err.message);
@@ -119,22 +122,56 @@ async function newSession() {
   render();
 }
 
+// Start the wizard on the session's stored setup. The form is redrawn even when it last
+// showed this same step, so nothing typed into an earlier wizard is left on screen.
+async function openWizard() {
+  editing = { ...(await engine('setup_form', current)), step: 0 };
+  $('setup-form').dataset.key = '';
+}
+
 async function editSetup() {
   try {
-    editing = await engine('setup_text', current);
+    await openWizard();
   } catch (err) {
     showError(err.message);
   }
   render();
 }
 
-async function saveSetup() {
-  const text = $('setup-text').value;
-  editing = text;
-  await act('save_setup', text);
-  if ($('error').hidden) {
-    editing = null;
+function keepStep() {
+  read($('setup-form'), STEPS[editing.step], editing.values, units);
+}
+
+async function nextStep() {
+  if (!$('setup-form').reportValidity()) {
+    return;
   }
+  keepStep();
+  if (editing.step < STEPS.length - 1) {
+    editing.step += 1;
+    render();
+    return;
+  }
+  const wizard = editing;
+  await act('save_setup', JSON.stringify(wizard.values));
+  if (editing !== wizard) {
+    return; // cancelled, or another session opened, while the save was in flight
+  }
+  // On a refusal the reason is shown and the wizard stays open on what was typed.
+  editing = $('error').hidden ? null : wizard;
+  render();
+}
+
+function previousStep() {
+  keepStep();
+  editing.step -= 1;
+  render();
+}
+
+function changeUnits(next) {
+  keepStep();
+  units = next;
+  localStorage.setItem(UNITS_KEY, units);
   render();
 }
 
@@ -397,12 +434,22 @@ function minutes(seconds) {
 
 function renderSetup() {
   $('setup').hidden = editing === null;
-  if (editing !== null && $('setup-text').dataset.session !== current) {
-    $('setup-text').value = editing;
-    $('setup-text').dataset.session = current;
-  }
   if (editing === null) {
-    $('setup-text').dataset.session = '';
+    $('setup-form').dataset.key = '';
+    return;
+  }
+  const step = STEPS[editing.step];
+  $('setup-title').textContent = `Setup ${editing.step + 1} of ${STEPS.length}: ${step.title}`;
+  $('setup-hint').textContent = step.hint;
+  $('setup-back').hidden = editing.step === 0;
+  $('setup-next').textContent = editing.step === STEPS.length - 1 ? 'Save' : 'Next';
+  $('setup-next').disabled = busy;
+  $('units').value = units;
+  // Redraw the fields only when the step or units change, so typing is never interrupted.
+  const key = `${current}|${editing.step}|${units}`;
+  if ($('setup-form').dataset.key !== key) {
+    draw($('setup-form'), step, editing.values, units, editing.materials);
+    $('setup-form').dataset.key = key;
   }
 }
 
@@ -599,7 +646,12 @@ function render() {
 $('sessions').onchange = () => openSession($('sessions').value);
 $('new-session').onclick = newSession;
 $('edit-setup').onclick = editSetup;
-$('save-setup').onclick = saveSetup;
+$('setup-back').onclick = previousStep;
+$('units').onchange = () => changeUnits($('units').value);
+$('setup-form').onsubmit = (event) => {
+  event.preventDefault();
+  nextStep();
+};
 $('cancel-setup').onclick = () => {
   editing = null;
   showError('');

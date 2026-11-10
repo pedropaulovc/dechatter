@@ -14,14 +14,19 @@ header select { flex: 1 1 110px; min-width: 0; }
 header button { padding: 4px 6px; }
 #summary { flex-basis: 100%; }
 #device { max-width: 150px; }
-textarea {
-  box-sizing: border-box;
-  width: 100%;
-  font: 12px/1.35 Menlo, Consolas, monospace;
-  border: 1px solid #ccc;
-  border-radius: 3px;
-  white-space: pre;
+#setup-form label {
+  display: grid;
+  grid-template-columns: 1fr 96px 44px;
+  gap: 2px 6px;
+  align-items: center;
+  margin-bottom: 6px;
 }
+#setup-form input, #setup-form select { box-sizing: border-box; width: 100%; padding: 3px 4px; }
+#setup-form small { color: #777; }
+#setup-form em { grid-column: 1 / -1; color: #777; font-size: 12px; font-style: normal; }
+#setup-form input:invalid { border: 1px solid #c9302c; }
+.wizard-buttons { display: flex; gap: 4px; align-items: center; }
+.wizard-buttons select { margin-left: auto; }
 h2 { margin: 14px 0 6px; font-size: 13px; }
 .muted { color: #777; }
 .legend { margin: 4px 0 0; font-size: 12px; }

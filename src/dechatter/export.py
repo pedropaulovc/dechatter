@@ -28,7 +28,15 @@ MODULES = {LOADER: "pyodide.js", RUNTIME: "pyodide.asm.js"}
 CORE = (LOADER, RUNTIME, "pyodide.asm.wasm", "python_stdlib.zip", LOCK)
 PACKAGES = ("numpy", "scipy")
 SOURCE_ZIP = "dechatter.zip"
-WIDGET_FILES = ("index.html", "widget.js", "widget.css", "engine.js", "mic.js", "mic-worklet.js")
+WIDGET_FILES = (
+    "index.html",
+    "widget.js",
+    "widget.css",
+    "engine.js",
+    "mic.js",
+    "mic-worklet.js",
+    "wizard.js",
+)
 
 Fetch = Callable[[str, Path], None]
 
