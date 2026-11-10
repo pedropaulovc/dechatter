@@ -1,5 +1,5 @@
-// Setup wizard: the session's setup as four short forms. Values are kept in millimetres, as
-// the setup file has them; with inch units chosen they are only shown and typed in inches.
+// Setup wizard: the session's setup as five short forms. Values are kept in millimetres, as
+// the setup file has them; on a machine in inches they are only shown and typed in inches.
 
 const MM_PER_INCH = 25.4;
 const LENGTH_UNITS = { length: { mm: 'mm', in: 'in' }, feed: { mm: 'mm/min', in: 'in/min' } };
@@ -167,7 +167,7 @@ export function read(form, step, values, units) {
   for (const field of step.fields) {
     const [section, key] = field.at.split('.');
     const input = form.elements[field.at];
-    // Back and the units switch read a step without validating it: a half-typed or invalid
+    // Back and a change of units read a step without validating it: a half-typed or invalid
     // entry is dropped there, never stored.
     if (input.value === input.dataset.shown || !input.checkValidity()) {
       continue;

@@ -13,9 +13,15 @@ const TIMELINE_LIMIT = 5000;
 const LEVEL_MS = 250;
 const SESSION_KEY = 'dechatter.session';
 const DEVICE_KEY = 'dechatter.microphone';
-const UNITS_KEY = 'dechatter.units';
 const $ = (id) => document.getElementById(id);
 
+const MACHINE_UNITS = { G20: 'in', G21: 'mm' };
+const UNITS_TEXT = {
+  mm: 'Lengths in mm: the machine is in G21.',
+  in: 'Lengths in inches: the machine is in G20.',
+  unknown: 'Lengths in mm. With the machine connected they follow its G20/G21 mode.',
+  kept: 'Lengths in inches, as before the job. The machine is now in G21: send G20 to put it back in inches.',
+};
 const cnc = {
   socket: null,
   link: 'connecting', // connecting | no-port | ready | offline
@@ -23,6 +29,10 @@ const cnc = {
   workflow: null, // idle | running | paused; null until cncjs reports it
   program: '', // name of the G-code file cncjs has loaded
   pause: null, // { text, settled } while the program waits at an M0, else null
+  units: null, // mm | in: how the wizard shows lengths; null until the machine's mode is known
+  reported: null, // mm | in: the machine's G21/G20 mode as cncjs last reported it
+  keep: null, // in from the start of a job on an inch machine until it is back in G20
+  lines: { received: 0, total: 0 }, // how far cncjs got through the loaded program
 };
 const mic = new Mic();
 let boot = 'Starting'; // what the engine is loading; null once it is ready
@@ -31,7 +41,6 @@ let names = []; // sessions stored in this browser
 let current = localStorage.getItem(SESSION_KEY) ?? '';
 let state = null; // the current session, as the engine last reported it
 let editing = null; // { values, materials, step } while the setup wizard is open, else null
-let units = localStorage.getItem(UNITS_KEY) ?? 'mm'; // how the wizard shows lengths: mm | in
 let timeline = []; // what cncjs reported since the job last started; saved with the recording
 let busy = false; // an engine request is in flight
 let stockChoice = 'same'; // survives redraws: planning on the wrong face position cuts air or too deep
@@ -138,8 +147,13 @@ async function editSetup() {
   render();
 }
 
+// Lengths are shown in the machine's units; millimetres until cncjs has reported them.
+function units() {
+  return cnc.units ?? 'mm';
+}
+
 function keepStep() {
-  read($('setup-form'), STEPS[editing.step], editing.values, units);
+  read($('setup-form'), STEPS[editing.step], editing.values, units());
 }
 
 async function nextStep() {
@@ -165,13 +179,6 @@ async function nextStep() {
 function previousStep() {
   keepStep();
   editing.step -= 1;
-  render();
-}
-
-function changeUnits(next) {
-  keepStep();
-  units = next;
-  localStorage.setItem(UNITS_KEY, units);
   render();
 }
 
@@ -257,7 +264,39 @@ function note(event, detail) {
 function setPort(port) {
   cnc.port = port;
   cnc.link = port ? 'ready' : 'no-port';
+  if (!port) {
+    cnc.reported = null;
+    cnc.keep = null;
+    showIn(null);
+  }
   render();
+}
+
+function showIn(next) {
+  if (next === cnc.units) {
+    return;
+  }
+  if (editing) {
+    keepStep();
+  }
+  cnc.units = next;
+}
+
+// The machine's G20/G21 mode decides how the wizard shows lengths. Programs run in G21 and
+// put an inch machine back in G20 as their last step, so a job that ran to its end changes
+// nothing. A job stopped part-way leaves G21 behind, which is not the operator's choice: an
+// inch machine then stays in inches here until it reports going back to G20.
+function followMachine() {
+  if (!cnc.reported || cnc.workflow !== 'idle') {
+    return;
+  }
+  if (cnc.keep && cnc.lines.total > 0 && cnc.lines.received >= cnc.lines.total) {
+    cnc.keep = null;
+  }
+  if (cnc.keep) {
+    return;
+  }
+  showIn(cnc.reported);
 }
 
 async function connectCncjs() {
@@ -299,6 +338,8 @@ async function connectCncjs() {
   });
   socket.on('sender:status', (status) => {
     cnc.program = status.name ?? cnc.program;
+    cnc.lines = { received: status.received, total: status.total };
+    followMachine();
     note('sender', { sent: status.sent, received: status.received, total: status.total });
     // A manual-spindle program stops at "M0 (set the spindle to N rpm, then resume)". cncjs
     // reports the pause as soon as it sends the line; the machine has only stopped once
@@ -315,10 +356,21 @@ async function connectCncjs() {
   socket.on('workflow:state', (workflow) => {
     if (workflow === 'running' && cnc.workflow !== 'paused') {
       timeline = [];
+      cnc.keep = cnc.units === 'in' ? 'in' : null;
     }
     cnc.workflow = workflow;
+    followMachine();
     note('workflow', { state: workflow });
     syncRecording();
+    render();
+  });
+  socket.on('controller:state', (_type, controller) => {
+    const reported = MACHINE_UNITS[controller?.parserstate?.modal?.units] ?? cnc.reported;
+    if (reported === cnc.keep && cnc.reported !== reported) {
+      cnc.keep = null; // back in the units it had before the stopped job
+    }
+    cnc.reported = reported;
+    followMachine();
     render();
   });
 }
@@ -370,7 +422,7 @@ async function loadProgram(round) {
   try {
     // Capture has to be running before the job can start; the listener below does not wait.
     await mic.resume();
-    const gcode = await engine('program', current, round.round);
+    const gcode = await engine('program', current, round.round, units());
     await new Promise((resolve, reject) => {
       cnc.socket.emit('command', cnc.port, 'gcode:load', round.program, gcode, {}, (err) =>
         err ? reject(new Error(`cncjs could not load the program: ${err.message ?? err}`)) : resolve(),
@@ -444,11 +496,13 @@ function renderSetup() {
   $('setup-back').hidden = editing.step === 0;
   $('setup-next').textContent = editing.step === STEPS.length - 1 ? 'Save' : 'Next';
   $('setup-next').disabled = busy;
-  $('units').value = units;
-  // Redraw the fields only when the step or units change, so typing is never interrupted.
-  const key = `${current}|${editing.step}|${units}`;
+  const kept = cnc.keep && cnc.reported !== cnc.keep && cnc.workflow === 'idle';
+  $('units').textContent = UNITS_TEXT[kept ? 'kept' : (cnc.units ?? 'unknown')];
+  // Redraw the fields only when the step or the machine's units change, so typing is not
+  // interrupted otherwise. A change of units drops an entry that is only half typed.
+  const key = `${current}|${editing.step}|${units()}`;
   if ($('setup-form').dataset.key !== key) {
-    draw($('setup-form'), step, editing.values, units, editing.materials);
+    draw($('setup-form'), step, editing.values, units(), editing.materials);
     $('setup-form').dataset.key = key;
   }
 }
@@ -647,7 +701,6 @@ $('sessions').onchange = () => openSession($('sessions').value);
 $('new-session').onclick = newSession;
 $('edit-setup').onclick = editSetup;
 $('setup-back').onclick = previousStep;
-$('units').onchange = () => changeUnits($('units').value);
 $('setup-form').onsubmit = (event) => {
   event.preventDefault();
   nextStep();

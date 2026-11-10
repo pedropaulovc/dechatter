@@ -346,7 +346,8 @@ class Grbl:
                 self.coolant = m
             elif m in ("M2", "M30"):
                 self.spindle, self.coolant = "M5", "M9"
-                self.motion, self.absolute, self.units_mm = "G1", True, True
+                # Grbl's program end resets motion, plane and distance mode; not units.
+                self.motion, self.absolute, self.plane = "G1", True, "G17"
                 self.log("program end")
 
         if dwell is not None:
