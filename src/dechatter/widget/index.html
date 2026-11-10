@@ -35,12 +35,17 @@
     <p id="mic-warning" class="error" hidden></p>
 
     <section id="setup" hidden>
-      <h2>Setup</h2>
-      <p class="muted">One session per tool assembly: machine, holder, cutter and stickout.</p>
-      <textarea id="setup-text" spellcheck="false" rows="24"></textarea>
-      <p>
-        <button id="save-setup" class="primary">Save</button>
+      <h2 id="setup-title"></h2>
+      <p id="setup-hint" class="muted"></p>
+      <form id="setup-form"></form>
+      <p class="wizard-buttons">
+        <button id="setup-back">Back</button>
+        <button id="setup-next" class="primary">Next</button>
         <button id="cancel-setup">Cancel</button>
+        <select id="units" aria-label="Units">
+          <option value="mm">mm</option>
+          <option value="in">inch</option>
+        </select>
       </p>
     </section>
 

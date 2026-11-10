@@ -16,10 +16,10 @@ from pathlib import Path
 
 import numpy as np
 
-from . import session
+from . import materials, session
 from .app import App
 from .audio import AudioError
-from .config import TEMPLATE, ConfigError
+from .config import TEMPLATE, ConfigError, dump_setup, setup_values
 from .detect import Thresholds, Verdict
 from .plan import PlanError
 from .session import SessionError, Stock
@@ -60,14 +60,18 @@ class Sessions:
             raise SessionError(f"session {name!r} already exists")
         target.mkdir()
         (target / session.SETUP_FILE).write_text(TEMPLATE, encoding="utf-8")
-        return TEMPLATE
+        return name
 
-    def setup_text(self, name: str) -> str:
-        self._app(name)
-        return (self._dir(name) / session.SETUP_FILE).read_text(encoding="utf-8")
+    def setup_form(self, name: str) -> dict:
+        """What the widget's setup wizard needs: the current values and the material choices."""
+        return {
+            "values": setup_values(self._app(name).setup),
+            "materials": sorted(materials.MATERIALS),
+        }
 
-    def save_setup(self, name: str, text: str) -> dict:
+    def save_setup(self, name: str, values_json: str) -> dict:
         """Replace the setup if it is valid; an invalid one leaves the session untouched."""
+        text = dump_setup(json.loads(values_json))
         path = self._dir(name) / session.SETUP_FILE
         previous = path.read_text(encoding="utf-8")
         path.write_text(text, encoding="utf-8")

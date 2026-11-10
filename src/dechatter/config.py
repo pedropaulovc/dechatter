@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import tomllib
 import typing
 from dataclasses import dataclass, field
@@ -142,6 +143,34 @@ def load_setup(path: Path) -> Setup:
     setup = Setup(**built)
     _validate(setup)
     return setup
+
+
+def _toml_value(value: object) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, str):
+        return json.dumps(str(value))
+    if isinstance(value, list | tuple):
+        return f"[{', '.join(_toml_value(item) for item in value)}]"
+    if isinstance(value, int | float):
+        return repr(value)
+    raise ConfigError(f"cannot store a value of type {type(value).__name__}")
+
+
+def setup_values(setup: Setup) -> dict:
+    """The setup as plain sections of values, for a form to edit."""
+    return dataclasses.asdict(setup)
+
+
+def dump_setup(values: dict) -> str:
+    """Setup file text for sections of values. Entries left empty (None) take their default."""
+    blocks = []
+    for section, entries in values.items():
+        if not isinstance(entries, dict):
+            raise ConfigError(f"[{section}] must be a section of values")
+        lines = [f"{key} = {_toml_value(v)}" for key, v in entries.items() if v is not None]
+        blocks.append("\n".join([f"[{section}]", *lines]))
+    return "\n\n".join(blocks) + "\n"
 
 
 def _validate(setup: Setup) -> None:
