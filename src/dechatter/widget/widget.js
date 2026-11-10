@@ -20,9 +20,10 @@ const UNITS_TEXT = {
   mm: 'Lengths in mm: the machine is in G21.',
   in: 'Lengths in inches: the machine is in G20.',
   unknown: 'Lengths in mm. With the machine connected they follow its G20/G21 mode.',
-  kept: 'Lengths in inches, as before the job. The machine is now in G21: send G20 to put it back in inches.',
+  kept: 'Lengths in inches, as before the stopped job. The machine is now in G21: send G20 to put it back in inches.',
 };
 const KEEP_UNITS_KEY = 'dechatter.keep-units';
+const OWN_PROGRAM = /^dechatter-.*\.nc$/; // the names the engine gives its programs
 const cnc = {
   socket: null,
   link: 'connecting', // connecting | no-port | ready | offline
@@ -32,9 +33,10 @@ const cnc = {
   pause: null, // { text, settled } while the program waits at an M0, else null
   units: null, // mm | in: how the wizard shows lengths; null until the machine's mode is known
   reported: null, // mm | in: the machine's G21/G20 mode as cncjs last reported it
+  settled: null, // mm | in: the last report taken while no job ran; null until there is one
   // in from the start of one of this widget's jobs on an inch machine until the machine is
-  // back in G20; stored, so a reload after a stopped job does not forget it
-  keep: localStorage.getItem(KEEP_UNITS_KEY),
+  // back in G20. Stored per machine, so a reload after a stopped job does not forget it.
+  keep: null,
   lines: { received: 0, total: 0 }, // how far cncjs got through the loaded program
 };
 const mic = new Mic();
@@ -267,22 +269,26 @@ function note(event, detail) {
 function setPort(port) {
   cnc.port = port;
   cnc.link = port ? 'ready' : 'no-port';
+  cnc.keep = port ? localStorage.getItem(keepKey()) : null;
   if (!port) {
-    // The hold after a stopped job stays: cncjs reports no port for a moment on every
-    // page load, and the machine is still in G21 when the port comes back.
     cnc.reported = null;
+    cnc.settled = null;
     showIn(null);
   }
   render();
 }
 
+function keepKey() {
+  return `${KEEP_UNITS_KEY}|${cncjsOrigin}|${cnc.port}`;
+}
+
 function hold(units) {
   cnc.keep = units;
   if (units) {
-    localStorage.setItem(KEEP_UNITS_KEY, units);
+    localStorage.setItem(keepKey(), units);
     return;
   }
-  localStorage.removeItem(KEEP_UNITS_KEY);
+  localStorage.removeItem(keepKey());
 }
 
 function showIn(next) {
@@ -295,17 +301,33 @@ function showIn(next) {
   cnc.units = next;
 }
 
+// The stopped job left G21 behind and the machine has not gone back to G20 since.
+function keptFromStoppedJob() {
+  return cnc.keep !== null && cnc.workflow === 'idle' && cnc.reported !== null && cnc.reported !== cnc.keep;
+}
+
 // The machine's G20/G21 mode decides how the wizard shows lengths. Programs run in G21 and
 // put an inch machine back in G20 as their last step, so a job that ran to its end changes
 // nothing. A job stopped part-way leaves G21 behind, which is not the operator's choice: an
-// inch machine then stays in inches here until it reports going back to G20.
+// inch machine then stays in inches here until it goes back to G20 or the operator says
+// to follow the machine.
 function followMachine() {
-  if (!cnc.reported || cnc.workflow !== 'idle') {
+  if (!cnc.reported || cnc.workflow === null) {
     return;
   }
-  if (cnc.keep && cnc.lines.total > 0 && cnc.lines.received >= cnc.lines.total) {
+  if (cnc.workflow !== 'idle') {
+    // cncjs does not refresh the mode during a job; what it repeats right after one is
+    // still this value, and must not pass for the machine going back to G20.
+    cnc.settled = cnc.reported;
+    return;
+  }
+  // Only one of this widget's programs ends by restoring G20.
+  const finished = OWN_PROGRAM.test(cnc.program) && cnc.lines.total > 0 && cnc.lines.received >= cnc.lines.total;
+  const wentBack = cnc.reported === cnc.keep && cnc.settled !== cnc.reported;
+  if (cnc.keep && (finished || wentBack)) {
     hold(null);
   }
+  cnc.settled = cnc.reported;
   showIn(cnc.keep ?? cnc.reported);
 }
 
@@ -367,10 +389,10 @@ async function connectCncjs() {
     if (workflow === 'running' && cnc.workflow !== 'paused') {
       timeline = [];
     }
-    // Only this widget's programs switch the machine to G21. A start replayed to a reloaded
-    // widget (no workflow known yet) is not a new job and keeps what was stored.
-    if (workflow === 'running' && cnc.workflow === 'idle') {
-      hold(cnc.units === 'in' && cnc.program === plannedRound()?.program ? 'in' : null);
+    // Only this widget's programs switch the machine to G21. Another job starting changes
+    // nothing: the machine is still in the G21 a stopped job left.
+    if (workflow === 'running' && cnc.workflow === 'idle' && cnc.units === 'in' && OWN_PROGRAM.test(cnc.program)) {
+      hold('in');
     }
     cnc.workflow = workflow;
     followMachine();
@@ -379,11 +401,7 @@ async function connectCncjs() {
     render();
   });
   socket.on('controller:state', (_type, controller) => {
-    const reported = MACHINE_UNITS[controller?.parserstate?.modal?.units] ?? cnc.reported;
-    if (cnc.reported && reported === cnc.keep && cnc.reported !== reported) {
-      hold(null); // back in the units it had before the stopped job
-    }
-    cnc.reported = reported;
+    cnc.reported = MACHINE_UNITS[controller?.parserstate?.modal?.units] ?? cnc.reported;
     followMachine();
     render();
   });
@@ -510,8 +528,9 @@ function renderSetup() {
   $('setup-back').hidden = editing.step === 0;
   $('setup-next').textContent = editing.step === STEPS.length - 1 ? 'Save' : 'Next';
   $('setup-next').disabled = busy;
-  const kept = cnc.keep && cnc.reported !== cnc.keep && cnc.workflow === 'idle';
+  const kept = keptFromStoppedJob();
   $('units').textContent = UNITS_TEXT[kept ? 'kept' : (cnc.units ?? 'unknown')];
+  $('follow-machine').hidden = !kept;
   // Redraw the fields only when the step or the machine's units change, so typing is not
   // interrupted otherwise. A change of units drops an entry that is only half typed.
   const key = `${current}|${editing.step}|${units()}`;
@@ -718,6 +737,11 @@ $('setup-back').onclick = previousStep;
 $('setup-form').onsubmit = (event) => {
   event.preventDefault();
   nextStep();
+};
+$('follow-machine').onclick = () => {
+  hold(null);
+  followMachine();
+  render();
 };
 $('cancel-setup').onclick = () => {
   editing = null;
