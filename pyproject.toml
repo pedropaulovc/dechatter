@@ -1,6 +1,6 @@
 [project]
 name = "dechatter"
-version = "0.1.0"
+version = "0.1.1"
 description = "Find chatter-free milling parameters from test cuts and a phone recording"
 readme = "README.md"
 license = "MIT"
