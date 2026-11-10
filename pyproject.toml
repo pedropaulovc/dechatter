@@ -1,0 +1,32 @@
+[project]
+name = "dechatter"
+version = "0.1.0"
+description = "Find chatter-free milling parameters from test cuts and a phone recording"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12"
+authors = [{ name = "Pedro Paulo Vezza Campos", email = "pedro@vezza.com.br" }]
+dependencies = [
+    "numpy>=2.0",
+    "scipy>=1.14",
+    "soundfile>=0.12",
+]
+
+[project.scripts]
+dechatter = "dechatter.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.7"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
