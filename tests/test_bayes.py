@@ -119,7 +119,7 @@ def test_session_converges_near_the_true_optimum_from_recordings_alone(tmp_path,
         pytest.fail("did not converge in 10 rounds")
 
     env = envelope(setup)
-    cuts = session.observations(session.load_rounds(work))
+    cuts = session.observations(session.load_rounds(work), setup.cut.axial_depth_mm)
     for obs in cuts:
         truth = MACHINE.chatters(obs.rpm, obs.width_mm, setup.tool.flutes)
         assert (obs.verdict is Verdict.UNSTABLE) == truth

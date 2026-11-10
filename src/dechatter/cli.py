@@ -42,17 +42,24 @@ def cmd_materials(_: argparse.Namespace) -> int:
     return 0
 
 
-def _print_best(setup: Setup, env: Envelope, observations: list[bayes.Observation]) -> None:
-    ranked = bayes.best_stable(setup, env, observations)
+def _print_known(setup: Setup, env: Envelope, rounds: list[session.Round]) -> None:
+    """The stability map of each depth that was cut, then the best cuts of them all."""
+    for depth in sorted({r.plan.axial_depth_mm for r in rounds}, reverse=True):
+        stability = bayes.build_map(
+            session.at_depth(setup, depth), env, session.evidence(rounds, depth)
+        )
+        print(f"depth {depth:g} mm:")
+        _print_map(stability, session.observations(rounds, depth))
+    ranked = session.best_cuts(setup, env, rounds)
     if not ranked:
         print("no stable cut measured yet")
         return
     print("best stable cuts measured:")
-    for mrr, obs in ranked[:TOP_RESULTS]:
-        feed = env.chip_load_mm * setup.tool.flutes * obs.rpm
+    for cut in ranked[:TOP_RESULTS]:
+        feed = env.chip_load_mm * setup.tool.flutes * cut.rpm
         print(
-            f"  S{obs.rpm:.0f}  width {obs.width_mm:.2f} mm  depth {setup.cut.axial_depth_mm:g} mm"
-            f"  F{feed:.0f} mm/min  {mrr / 1000:.2f} cm3/min"
+            f"  S{cut.rpm:.0f}  width {cut.width_mm:.2f} mm  depth {cut.depth_mm:g} mm"
+            f"  F{feed:.0f} mm/min  {cut.mrr_mm3_min / 1000:.2f} cm3/min"
         )
 
 
@@ -82,7 +89,8 @@ def _print_map(stability: bayes.StabilityMap, observations: list[bayes.Observati
 def _print_round(session_dir: Path, plan: Plan) -> None:
     tests = [p for p in plan.passes if p.kind is PassKind.TEST]
     print(
-        f"round {plan.round}: {len(tests)} test cuts, about {plan.run_time_s / 60:.0f} min, "
+        f"round {plan.round}, {plan.axial_depth_mm:g} mm deep: {len(tests)} test cuts, "
+        f"about {plan.run_time_s / 60:.0f} min, "
         f"uses {plan.consumed_mm:.1f} mm of stock width"
     )
     for p in tests:
@@ -95,12 +103,11 @@ def _print_round(session_dir: Path, plan: Plan) -> None:
 def cmd_plan(args: argparse.Namespace) -> int:
     setup = load_setup(args.session / session.SETUP_FILE)
     env = envelope(setup)
-    observations = session.observations(session.load_rounds(args.session))
+    rounds = session.load_rounds(args.session)
     stock = Stock.FRESH if args.new_stock else Stock.SAME
     planned = session.plan_next(args.session, setup, env, stock)
-    if observations:
-        _print_map(bayes.build_map(setup, env, observations), observations)
-        _print_best(setup, env, observations)
+    if any(r.results is not None for r in rounds):
+        _print_known(setup, env, rounds)
     if planned.plan is None:
         print(
             f"converged: no further cut is expected to add {setup.planner.stop_improvement:.0%} "
@@ -152,14 +159,13 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 def cmd_report(args: argparse.Namespace) -> int:
     setup = load_setup(args.session / session.SETUP_FILE)
     env = envelope(setup)
-    observations = session.observations(session.load_rounds(args.session))
+    rounds = session.load_rounds(args.session)
     print(
         f"envelope: {env.speed_min_rpm}..{env.speed_max_rpm} rpm, width up to "
         f"{env.width_max_mm:.2f} mm, {env.chip_load_mm} mm/tooth, "
         f"power cap {env.mrr_limit_mm3_min / 1000:.1f} cm3/min"
     )
-    _print_map(bayes.build_map(setup, env, observations), observations)
-    _print_best(setup, env, observations)
+    _print_known(setup, env, rounds)
     return 0
 
 

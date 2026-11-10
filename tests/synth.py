@@ -22,16 +22,24 @@ class Machine:
     pocket_width: float = 0.12  # as a fraction of lobe spacing
     rpm_error: float = -0.02  # actual speed vs commanded
     whine_hz: float = 4127.0  # drive whine: a loud tone that is not chatter
+    # With a reference depth, cutting shallower widens the limit: (reference / depth) ** power.
+    reference_depth_mm: float | None = None
+    depth_power: float = 1.5
 
-    def limit_mm(self, rpm: float, flutes: int) -> float:
+    def limit_mm(self, rpm: float, flutes: int, depth_mm: float | None = None) -> float:
         lobes = 60 * self.natural_hz / (flutes * rpm)
         offset = abs(lobes - round(lobes))
-        return self.floor_mm * (
+        limit = self.floor_mm * (
             1 + self.pocket_gain * np.exp(-0.5 * (offset / self.pocket_width) ** 2)
         )
+        if self.reference_depth_mm is None or depth_mm is None:
+            return limit
+        return limit * (self.reference_depth_mm / depth_mm) ** self.depth_power
 
-    def chatters(self, rpm: float, width_mm: float, flutes: int) -> bool:
-        return width_mm > self.limit_mm(rpm, flutes)
+    def chatters(
+        self, rpm: float, width_mm: float, flutes: int, depth_mm: float | None = None
+    ) -> bool:
+        return width_mm > self.limit_mm(rpm, flutes, depth_mm)
 
 
 DEFAULT_MACHINE = Machine()
@@ -104,7 +112,7 @@ def record(
         air = rapid_s + plan.dwell_s + p.lead_in_s if air_s is None else air_s[index]
         parts.append(_air(air, spindle_hz, machine, rng))
         seconds = p.expected_cut_s * (0.4 if index == abort_in_pass else 1.0)
-        chatter = machine.chatters(p.rpm, p.width_mm, plan.flutes)
+        chatter = machine.chatters(p.rpm, p.width_mm, plan.flutes, plan.axial_depth_mm)
         parts.append(_cut(seconds, spindle_hz, plan.flutes, p.width_mm, chatter, machine, rng))
         if index == abort_in_pass:
             break

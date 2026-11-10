@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 from dataclasses import asdict, dataclass
@@ -14,7 +15,16 @@ from . import audio, bayes, detect, gcode
 from .bayes import Observation
 from .config import Setup
 from .detect import Thresholds, Verdict
-from .plan import Envelope, PassKind, Plan, PlannerKind, assemble, grid_tests
+from .plan import (
+    Envelope,
+    PassKind,
+    Plan,
+    PlanError,
+    PlannerKind,
+    assemble,
+    grid_tests,
+    mrr_mm3_min,
+)
 
 log = logging.getLogger(__name__)
 
@@ -105,14 +115,109 @@ def load_rounds(session: Path) -> list[Round]:
     return rounds
 
 
-def observations(rounds: list[Round]) -> list[Observation]:
+DEPTH_TOLERANCE_MM = 1e-6
+
+
+def _cuts(rounds: list[Round], wanted) -> list[Observation]:
+    """Classified test cuts of the rounds whose depth `wanted` accepts."""
     return [
         Observation(p.rpm, p.width_mm, p.verdict, p.chatter_hz)
         for r in rounds
-        if r.results is not None
+        if r.results is not None and wanted(r.plan.axial_depth_mm)
         for p in r.results.passes
         if p.kind is PassKind.TEST and p.verdict is not None
     ]
+
+
+def observations(rounds: list[Round], depth_mm: float) -> list[Observation]:
+    """The test cuts made at one depth."""
+    return _cuts(rounds, lambda depth: abs(depth - depth_mm) <= DEPTH_TOLERANCE_MM)
+
+
+def evidence(rounds: list[Round], depth_mm: float) -> list[Observation]:
+    """What is known at one depth: the cuts made there, and the stable cuts made deeper.
+
+    A width that was stable in a deeper cut is stable in a shallower one. Chatter in a
+    deeper cut says nothing here, so those cuts are left out.
+    """
+    deeper = _cuts(rounds, lambda depth: depth > depth_mm + DEPTH_TOLERANCE_MM)
+    carried = [
+        Observation(o.rpm, o.width_mm, o.verdict) for o in deeper if o.verdict is Verdict.STABLE
+    ]
+    return [*observations(rounds, depth_mm), *carried]
+
+
+def depths(setup: Setup) -> list[float]:
+    """The depths a session works through: the setup's own, then the others, deepest first.
+
+    Deepest first, because a shallower cut leaves the face flat only above its own depth.
+    """
+    return [setup.cut.axial_depth_mm, *sorted(set(setup.cut.other_depths_mm), reverse=True)]
+
+
+def at_depth(setup: Setup, depth_mm: float) -> Setup:
+    return dataclasses.replace(setup, cut=dataclasses.replace(setup.cut, axial_depth_mm=depth_mm))
+
+
+@dataclass(frozen=True)
+class StableCut:
+    mrr_mm3_min: float
+    depth_mm: float
+    rpm: float
+    width_mm: float
+
+
+def best_cuts(setup: Setup, env: Envelope, rounds: list[Round]) -> list[StableCut]:
+    """Every stable test cut of the session, at whatever depth, highest removal rate first."""
+    cut_depths = sorted({r.plan.axial_depth_mm for r in rounds}, reverse=True)
+    found = [
+        StableCut(
+            float(mrr_mm3_min(at_depth(setup, depth), env, o.rpm, o.width_mm)),
+            depth,
+            o.rpm,
+            o.width_mm,
+        )
+        for depth in cut_depths
+        for o in observations(rounds, depth)
+        if o.verdict is Verdict.STABLE
+    ]
+    return sorted(found, key=lambda cut: -cut.mrr_mm3_min)
+
+
+@dataclass(frozen=True)
+class Stage:
+    """The depth to cut at next and the test cuts wanted there; no tests: nothing is left."""
+
+    depth_mm: float
+    planner: PlannerKind
+    tests: list
+    expected_improvement: float
+
+
+def next_stage(setup: Setup, env: Envelope, rounds: list[Round]) -> Stage:
+    """The first depth, in session order, that still has a cut worth making."""
+    base = setup.cut.axial_depth_mm
+    if not rounds:
+        return Stage(base, PlannerKind.GRID, grid_tests(setup, env), 0.0)
+    found = best_cuts(setup, env, rounds)
+    target = found[0].mrr_mm3_min if found else 0.0
+    stage = Stage(base, PlannerKind.BAYES, [], 0.0)
+    for depth in depths(setup):
+        proposal = bayes.propose(at_depth(setup, depth), env, evidence(rounds, depth), target)
+        stage = Stage(depth, PlannerKind.BAYES, proposal.tests, proposal.expected_improvement)
+        if stage.tests:
+            return stage
+    return stage
+
+
+def _shallowest_on_block(rounds: list[Round]) -> float:
+    """The shallowest depth cut since the block now mounted was fresh."""
+    shallowest = float("inf")
+    for r in reversed(rounds):
+        shallowest = min(shallowest, r.plan.axial_depth_mm)
+        if r.plan.face_y_start_mm == 0:
+            break
+    return shallowest
 
 
 def face_after(last: Round) -> tuple[float, float]:
@@ -223,22 +328,23 @@ class Planned:
 def plan_next(session: Path, setup: Setup, env: Envelope, stock: Stock) -> Planned:
     """Plan the next round and write its directory, or report convergence."""
     rounds = load_rounds(session)
-    if not rounds:
-        plan = assemble(setup, env, 1, PlannerKind.GRID, 0.0, 0.0, grid_tests(setup, env))
-        _write_round(session, setup, plan)
-        return Planned(plan, 0.0)
-
-    face, remnant = face_after(rounds[-1])
+    face, remnant = face_after(rounds[-1]) if rounds else (0.0, 0.0)
     if stock is Stock.FRESH:
         face, remnant = 0.0, 0.0
-    proposal = bayes.propose(setup, env, observations(rounds))
-    if not proposal.tests:
-        return Planned(None, proposal.expected_improvement)
-    plan = assemble(
-        setup, env, rounds[-1].plan.round + 1, PlannerKind.BAYES, face, remnant, proposal.tests
-    )
-    _write_round(session, setup, plan)
-    return Planned(plan, proposal.expected_improvement)
+    stage = next_stage(setup, env, rounds)
+    if not stage.tests:
+        return Planned(None, stage.expected_improvement)
+    number = rounds[-1].plan.round + 1 if rounds else 1
+    shallowest = _shallowest_on_block(rounds)
+    if face > 0 and stage.depth_mm > shallowest + DEPTH_TOLERANCE_MM:
+        raise PlanError(
+            f"round {number} would cut {stage.depth_mm:g} mm deep, but this block's face is "
+            f"only flat down to {shallowest:g} mm. Mount fresh stock and plan with new stock."
+        )
+    at = at_depth(setup, stage.depth_mm)
+    plan = assemble(at, env, number, stage.planner, face, remnant, stage.tests)
+    _write_round(session, at, plan)
+    return Planned(plan, stage.expected_improvement)
 
 
 def _write_round(session: Path, setup: Setup, plan: Plan) -> None:

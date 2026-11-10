@@ -54,8 +54,12 @@ class App:
 
     def state(self) -> dict:
         rounds = session.load_rounds(self.session_dir)
-        observations = session.observations(rounds)
-        stability = bayes.build_map(self.setup, self.env, observations)
+        # What is shown belongs to the depth of the latest round: the one planned or just cut.
+        depth = rounds[-1].plan.axial_depth_mm if rounds else self.setup.cut.axial_depth_mm
+        observations = session.observations(rounds, depth)
+        stability = bayes.build_map(
+            session.at_depth(self.setup, depth), self.env, session.evidence(rounds, depth)
+        )
         speeds = np.unique(
             np.linspace(0, len(stability.speeds) - 1, MAP_SPEEDS).round().astype(int)
         )
@@ -63,24 +67,28 @@ class App:
             np.linspace(0, len(stability.widths) - 1, MAP_WIDTHS).round().astype(int)
         )
 
-        upcoming = Next.PLAN
+        upcoming, next_depth = Next.PLAN, self.setup.cut.axial_depth_mm
         if rounds and rounds[-1].results is None:
-            upcoming = Next.RUN
+            upcoming, next_depth = Next.RUN, depth
         if rounds and rounds[-1].results is not None:
-            proposal = bayes.propose(self.setup, self.env, observations)
-            upcoming = Next.PLAN if proposal.tests else Next.CONVERGED
+            stage = session.next_stage(self.setup, self.env, rounds)
+            upcoming = Next.PLAN if stage.tests else Next.CONVERGED
+            next_depth = stage.depth_mm
 
         tool, cut = self.setup.tool, self.setup.cut
         manual = self.setup.machine.spindle is SpindleControl.MANUAL
+        all_depths = ", ".join(f"{d:g}" for d in session.depths(self.setup))
         return {
             "session": self.session_dir.resolve().name,
             "summary": (
                 f"D{tool.diameter_mm:g} mm, {tool.flutes} flutes, {cut.material}, "
-                f"depth {cut.axial_depth_mm:g} mm, {self.env.chip_load_mm:g} mm/tooth"
+                f"depth {all_depths} mm, {self.env.chip_load_mm:g} mm/tooth"
                 f"{', manual spindle' if manual else ''}"
             ),
             "spindle": self.setup.machine.spindle,
             "next": upcoming,
+            "next_depth_mm": next_depth,
+            "depth_mm": depth,
             "recording_round": self.recording_round,
             "rounds": [self._round_json(r) for r in rounds],
             "observations": [
@@ -88,12 +96,13 @@ class App:
             ],
             "best": [
                 {
-                    "rpm": o.rpm,
-                    "width_mm": o.width_mm,
-                    "feed_mm_min": round(feed_mm_min(self.setup, self.env, o.rpm)),
-                    "mrr_cm3_min": round(mrr / 1000, 2),
+                    "rpm": best.rpm,
+                    "width_mm": best.width_mm,
+                    "depth_mm": best.depth_mm,
+                    "feed_mm_min": round(feed_mm_min(self.setup, self.env, best.rpm)),
+                    "mrr_cm3_min": round(best.mrr_mm3_min / 1000, 2),
                 }
-                for mrr, o in bayes.best_stable(self.setup, self.env, observations)[:TOP_RESULTS]
+                for best in session.best_cuts(self.setup, self.env, rounds)[:TOP_RESULTS]
             ],
             "map": {
                 "speeds": stability.speeds[speeds].tolist(),
@@ -123,6 +132,7 @@ class App:
             )
         return {
             "round": r.plan.round,
+            "depth_mm": r.plan.axial_depth_mm,
             "planner": r.plan.planner,
             "program": self.program_name(r.plan.round),
             "run_time_s": round(r.plan.run_time_s),

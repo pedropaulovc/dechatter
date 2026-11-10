@@ -22,6 +22,19 @@ Each round holds chip load and axial depth constant and varies spindle speed and
 one pass per combination, cutting along the front face of a block held in the vise. Feed
 follows speed so the chip load stays put.
 
+### Comparing depths
+
+A deep, narrow cut and a shallower, wider one can remove the same amount, and only cutting
+tells which your machine prefers. List shallower depths in the wizard's Cut step (or
+`other_depths_mm` in `setup.toml`) and the session continues with them once the deepest depth
+is settled, deepest first. A width that was stable in a deeper cut is taken as stable in a
+shallower one, so each further depth starts from those widths and only looks for how much
+wider it can go. A depth is skipped when the power cap and the measurements leave it no cut
+that would beat the best one found. The results list the best cuts of all depths together.
+
+The depths run deepest first because a shallower cut leaves the face flat only above its own
+depth. Planning a deeper cut on such a block is refused: mount fresh stock for it.
+
 ## Use in cncjs
 
 ```sh
