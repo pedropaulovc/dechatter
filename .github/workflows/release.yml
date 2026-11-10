@@ -1,7 +1,10 @@
 name: release
 
-# Pushing a tag vX.Y.Z publishes the widget to npm and creates the GitHub release. npm
-# trusts this workflow through OIDC, so there is no token to store.
+# Pushing a tag vX.Y.Z on a commit of main publishes the widget to npm and creates the
+# GitHub release. npm trusts this workflow through OIDC, so there is no token to store.
+# That trust is registered on the package (`npm trust github dechatter --file release.yml
+# --repo pedropaulovc/dechatter`), which is why 0.1.0 was published by hand first.
+# Re-running a release that failed part-way is safe: steps already done are skipped.
 
 on:
   push:
@@ -9,19 +12,36 @@ on:
       - 'v*'
 
 permissions:
-  contents: write
-  id-token: write
+  contents: read
 
 concurrency:
   group: npm-publish
   cancel-in-progress: false
 
 jobs:
-  release:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run pytest -q
+
+  publish:
+    needs: test
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
     steps:
       - uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           persist-credentials: false
       - uses: astral-sh/setup-uv@v6
       - uses: actions/setup-node@v6
@@ -31,23 +51,34 @@ jobs:
           package-manager-cache: false
       - run: uv sync --locked
 
+      - name: Check that the tagged commit is on main
+        run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+
       - name: Check that the tag, package.json and pyproject.toml agree on the version
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: uv run python .github/release_version.py "$RELEASE_TAG"
 
-      - run: uv run ruff check .
-      - run: uv run pytest -q
+      # prepack builds web/ with `dechatter widget`: it downloads Pyodide and checks the
+      # numpy and scipy wheels against the hashes in Pyodide's lock file.
+      - name: Build the package once
+        run: npm pack
 
-      # prepack builds web/ with `dechatter widget`, downloading and verifying Pyodide.
-      - name: Check package contents
-        run: npm run pack:check
+      - name: Publish that package to npm, unless this version is already there
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          if npm view "dechatter@$version" version > /dev/null 2>&1; then
+            echo "dechatter@$version is already on npm"
+            exit 0
+          fi
+          npm publish "dechatter-$version.tgz"
 
-      - name: Publish to npm
-        run: npm publish
-
-      - name: Create GitHub release
+      - name: Create the GitHub release, unless it exists
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
-        run: gh release create "$RELEASE_TAG" --title "$RELEASE_TAG" --generate-notes --verify-tag
+        run: |
+          gh release view "$RELEASE_TAG" > /dev/null 2>&1 && exit 0
+          gh release create "$RELEASE_TAG" --title "$RELEASE_TAG" --generate-notes --verify-tag

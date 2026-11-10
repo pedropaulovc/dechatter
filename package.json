@@ -32,8 +32,7 @@
     "access": "public"
   },
   "scripts": {
-    "build": "uv run --locked dechatter widget web",
-    "prepack": "npm run build",
-    "pack:check": "npm pack --dry-run"
+    "build": "node .github/build_widget.mjs",
+    "prepack": "npm run build"
   }
 }
