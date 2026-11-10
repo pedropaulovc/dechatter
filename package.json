@@ -1,0 +1,39 @@
+{
+  "name": "dechatter",
+  "version": "0.1.0",
+  "description": "CNCjs custom widget that finds chatter-free milling speeds, widths and depths from test cuts heard through the microphone.",
+  "keywords": [
+    "cncjs",
+    "cnc",
+    "chatter",
+    "milling",
+    "stability-lobes",
+    "grbl",
+    "widget"
+  ],
+  "license": "MIT",
+  "author": "Pedro Paulo Vezza Campos <pedro@vezza.com.br>",
+  "homepage": "https://github.com/pedropaulovc/dechatter#readme",
+  "bugs": {
+    "url": "https://github.com/pedropaulovc/dechatter/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pedropaulovc/dechatter.git"
+  },
+  "exports": {
+    "./index.html": "./web/index.html",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "web"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "uv run --locked dechatter widget web",
+    "prepack": "npm run build",
+    "pack:check": "npm pack --dry-run"
+  }
+}
