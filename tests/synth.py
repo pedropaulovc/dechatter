@@ -80,12 +80,22 @@ def record(
     seed: int = 0,
     abort_in_pass: int | None = None,
     rapid_s: float = 2.0,
+    speed_change_s: float = 0.0,
 ) -> np.ndarray:
-    """The recording of running `plan`: silence, then per pass rapid, dwell, lead-in, cut."""
+    """The recording of running `plan`: silence, then per pass rapid, dwell, lead-in, cut.
+
+    With `speed_change_s`, the program stops before each new speed (manual spindle): the
+    operator knocks the machine reaching for the dial, then the spindle idles at the new speed.
+    """
     rng = np.random.default_rng(seed)
     parts = [0.0005 * rng.standard_normal(3 * RATE)]
+    previous_rpm = None
     for index, p in enumerate(plan.passes):
         spindle_hz = p.rpm * (1 + machine.rpm_error) / 60
+        if speed_change_s and p.rpm != previous_rpm:
+            parts.append(0.3 * rng.standard_normal(int(0.3 * RATE)))
+            parts.append(_air(speed_change_s, spindle_hz, machine, rng))
+        previous_rpm = p.rpm
         parts.append(_air(rapid_s + plan.dwell_s + p.lead_in_s, spindle_hz, machine, rng))
         seconds = p.expected_cut_s * (0.4 if index == abort_in_pass else 1.0)
         chatter = machine.chatters(p.rpm, p.width_mm, plan.flutes)

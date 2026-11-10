@@ -20,6 +20,7 @@ const cnc = {
   port: '',
   workflow: null, // idle | running | paused; null until cncjs reports it
   program: '', // name of the G-code file cncjs has loaded
+  pause: null, // { text, settled } while the program waits at an M0, else null
 };
 const mic = new Mic();
 let boot = 'Starting'; // what the engine is loading; null once it is ready
@@ -262,6 +263,17 @@ async function connectCncjs() {
   socket.on('sender:status', (status) => {
     cnc.program = status.name ?? cnc.program;
     note('sender', { sent: status.sent, received: status.received, total: status.total });
+    // A manual-spindle program stops at "M0 (set the spindle to N rpm, then resume)". cncjs
+    // reports the pause as soon as it sends the line; the machine has only stopped once
+    // everything sent was acknowledged.
+    const reason = status.hold ? status.holdReason : null;
+    const pause = reason?.data === 'M0'
+      ? { text: /\(([^)]*)\)/.exec(reason.msg ?? '')?.[1] ?? 'program pause', settled: status.received >= status.sent }
+      : null;
+    if (JSON.stringify(pause) !== JSON.stringify(cnc.pause)) {
+      cnc.pause = pause;
+      render();
+    }
   });
   socket.on('workflow:state', (workflow) => {
     if (workflow === 'running' && cnc.workflow !== 'paused') {
@@ -407,6 +419,7 @@ function renderStep() {
     step.append(
       el('p', { className: 'recording' }, `Recording round ${state.recording_round ?? ''}: `, el('span', { id: 'recording-clock' }, '0 s')),
       el('p', {}, 'Feed-hold and stop the job in cncjs if a cut gets violent. The passes that ran still count.'),
+      ...(cnc.pause ? [el('p', { className: 'instruction' }, cnc.pause.settled ? `Now ${cnc.pause.text} in cncjs.` : 'Wait for the machine to stop.')] : []),
     );
     return;
   }
@@ -438,6 +451,7 @@ function renderStep() {
   }
 
   const tests = round.passes.filter((p) => p.kind === 'test').length;
+  const speedChanges = (r) => r.passes.filter((p, i) => i === 0 || p.rpm !== r.passes[i - 1].rpm).length;
   const loaded = cnc.program === round.program;
   const ready = cnc.link === 'ready' && cnc.workflow === 'idle' && mic.open;
   const load = button(loaded ? 'Reload program' : 'Load into cncjs', () => loadProgram(round), { className: loaded ? '' : 'primary', disabled: !ready });
@@ -447,6 +461,7 @@ function renderStep() {
       el('li', {}, 'Zero X at the left end of the stock, Y on its front face, Z on top.'),
       el('li', {}, load, mic.open ? '' : ' (enable the microphone first)'),
       el('li', {}, loaded ? 'Press play in cncjs. Recording starts and stops with the job. Keep this tab open.' : 'Press play in cncjs.'),
+      ...(state.spindle === 'manual' ? [el('li', {}, `The program pauses before each of its ${speedChanges(round)} spindle speeds. Set the speed shown here, then resume in cncjs.`)] : []),
     ),
   );
   if (round.has_recording) {

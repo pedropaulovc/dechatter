@@ -30,6 +30,11 @@ class ToolMaterial(StrEnum):
     HSS = "hss"
 
 
+class SpindleControl(StrEnum):
+    PROGRAM = "program"  # the G-code starts the spindle and sets its speed
+    MANUAL = "manual"  # the operator does, at a program pause before each speed
+
+
 @dataclass(frozen=True)
 class Machine:
     max_rpm: int
@@ -37,6 +42,7 @@ class Machine:
     weight_kg: float
     min_rpm: int = 500
     name: str = ""
+    spindle: SpindleControl = SpindleControl.PROGRAM
 
 
 @dataclass(frozen=True)
@@ -159,6 +165,8 @@ name = "PM-30MV"
 max_rpm = 5000
 min_rpm = 500
 spindle_power_w = 1500   # rated spindle motor power
+spindle = "program"      # program: the G-code sets the speed (M3 S) | manual: the program
+                         # pauses (M0) before each speed and you set it on the machine
 weight_kg = 250          # derates the starting chip load on light machines
 
 [tool]

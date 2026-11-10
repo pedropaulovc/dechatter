@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 
 from . import materials
-from .config import Setup
+from .config import Setup, SpindleControl
 
 SCHEMA = 1
 SPINDLE_EFFICIENCY = 0.8
@@ -194,6 +194,12 @@ def assemble(
             f"stock exhausted: {setup.stock.width_mm - face_y_mm:.1f} mm left of "
             f"{setup.stock.width_mm:.1f} mm. Mount fresh stock and rerun with --new-stock."
         )
+
+    if setup.machine.spindle is SpindleControl.MANUAL:
+        # Every speed change is a stop at the machine: run each speed's cuts together,
+        # lightest first, and prepare the face at the first of those speeds.
+        kept.sort(key=lambda t: (t[0], t[1]))
+        prep = [(kept[0][0], width) for _, width in prep]
 
     passes = []
     for rpm, width in prep[:-1]:

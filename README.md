@@ -57,6 +57,19 @@ timeline cncjs reported. Import loads it in another browser, and unzipped it is 
 folder the command line reads. Keep the tab open while a round runs: the recording lives in
 the page until the job ends.
 
+### Manual spindle
+
+If the spindle is started and set by hand, put `spindle = "manual"` under `[machine]` in the
+setup. The program then never commands the spindle. It stops with `M0` before each speed, with
+the cutter clear of the work, and the widget (and cncjs) shows the speed to set. Set it and
+press resume in cncjs. Cuts are grouped by speed, lightest first, so a round has one stop per
+speed: five in round 1. The first stop is where you start the spindle, and you stop it yourself
+after the program ends.
+
+Set the speed within 5% of what is asked; the detector finds the actual speed inside that
+range. The stability map is built on the requested speeds, so a dial that reads off by a
+constant amount shifts the whole map by that amount.
+
 ## Use from the command line
 
 Without cncjs, record on a phone and run the same session by hand:

@@ -8,6 +8,7 @@ body {
 }
 
 [hidden] { display: none !important; }
+.instruction { padding: 6px 8px; font-weight: bold; background: #fcf8e3; border: 1px solid #f0ad4e; border-radius: 3px; }
 header { margin-bottom: 8px; display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
 header select { flex: 1 1 110px; min-width: 0; }
 header button { padding: 4px 6px; }
