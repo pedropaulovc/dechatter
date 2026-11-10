@@ -147,6 +147,9 @@ async function nextStep() {
   }
   const wizard = editing;
   await act('save_setup', JSON.stringify(wizard.values));
+  if (editing !== wizard) {
+    return; // cancelled, or another session opened, while the save was in flight
+  }
   // On a refusal the reason is shown and the wizard stays open on what was typed.
   editing = $('error').hidden ? null : wizard;
   render();
@@ -636,7 +639,6 @@ function render() {
 $('sessions').onchange = () => openSession($('sessions').value);
 $('new-session').onclick = newSession;
 $('edit-setup').onclick = editSetup;
-$('setup-next').onclick = nextStep;
 $('setup-back').onclick = previousStep;
 $('units').onchange = () => changeUnits($('units').value);
 $('setup-form').onsubmit = (event) => {

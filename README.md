@@ -35,8 +35,9 @@ In cncjs, open Manage Widgets, enable the Custom widget, and set its URL to `/de
 the widget's settings. Open cncjs at `http://localhost:8000` or over HTTPS: browsers only give
 a page the microphone on those. Then, in the widget:
 
-1. Create a session. A four-step wizard asks for the machine, the tool, the cut and the stock,
-   in millimetres or inches.
+1. Create a session. A short wizard asks for the machine, the tool, the cut and the stock, in
+   millimetres or inches; its last step holds the planner's settings, which rarely need
+   changing. Saving from the wizard rewrites the session's setup file without comments.
 2. Plan a round. Round 1 is a coarse grid of speeds and widths.
 3. Set the work zero at the left end of the stock, on its front face, at the top.
 4. Load the program into cncjs and press play in cncjs. The widget never starts the machine.

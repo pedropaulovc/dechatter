@@ -61,9 +61,22 @@ export const STEPS = [
       { at: 'program.truing_width_mm', label: 'Truing pass width', type: 'length' },
     ],
   },
+  {
+    title: 'Planner',
+    hint: 'How boldly the next cuts are chosen. The defaults suit most sessions.',
+    fields: [
+      { at: 'planner.round1_speeds', label: 'Speeds in round 1', type: 'int' },
+      { at: 'planner.round1_width_fractions', label: 'Round 1 widths', type: 'list', note: 'Fractions of the widest radial cut, separated by commas.' },
+      { at: 'planner.batch_size', label: 'Most cuts in a later round', type: 'int' },
+      { at: 'planner.min_probability', label: 'Chance of being stable a cut needs', type: 'number', note: 'Assuming the cut before it passes. Between 0 and 1.' },
+      { at: 'planner.probability_floor', label: 'The same, on measured cuts alone', type: 'number' },
+      { at: 'planner.stop_improvement', label: 'Stop when a cut would add less than', type: 'number', note: 'As a fraction of the best removal rate so far.' },
+    ],
+  },
 ];
 
-const tidy = (number) => Number(number.toFixed(4));
+// Enough decimals that a hundred-thousandth of an inch survives the trip to millimetres.
+const tidy = (number) => Number(number.toFixed(5));
 
 function shown(field, value, units) {
   if (value === null || value === undefined) {
@@ -72,12 +85,18 @@ function shown(field, value, units) {
   if (field.type in LENGTH_UNITS && units === 'in') {
     return String(tidy(value / MM_PER_INCH));
   }
+  if (field.type === 'list') {
+    return value.join(', ');
+  }
   return String(value);
 }
 
 function typed(field, text, units) {
   if (field.type === 'text' || field.type === 'choice') {
     return text.trim();
+  }
+  if (field.type === 'list') {
+    return text.split(',').map((part) => Number(part.trim()));
   }
   if (text.trim() === '' || Number.isNaN(Number(text))) {
     return null;
@@ -104,6 +123,11 @@ function control(field, value, units, materials) {
   input.value = shown(field, value, units);
   input.required = !field.optional;
   input.placeholder = field.placeholder ?? '';
+  if (field.type === 'list') {
+    input.pattern = String.raw`\s*\d*\.?\d+(\s*,\s*\d*\.?\d+)*\s*`;
+    input.title = 'Numbers separated by commas';
+    return input;
+  }
   if (field.type === 'text') {
     return input;
   }
@@ -120,6 +144,9 @@ export function draw(form, step, values, units, materials) {
       const [section, key] = field.at.split('.');
       const input = control(field, values[section][key], units, materials);
       input.name = field.at;
+      // What the user was shown. Only a field they change is written back: a length
+      // shown rounded in inches must not come back as a slightly different length.
+      input.dataset.shown = input.value;
       const row = document.createElement('label');
       const unit = LENGTH_UNITS[field.type]?.[units] ?? field.unit ?? '';
       row.append(
@@ -139,6 +166,11 @@ export function draw(form, step, values, units, materials) {
 export function read(form, step, values, units) {
   for (const field of step.fields) {
     const [section, key] = field.at.split('.');
-    values[section][key] = typed(field, form.elements[field.at].value, units);
+    const input = form.elements[field.at];
+    if (input.value === input.dataset.shown) {
+      continue;
+    }
+    values[section][key] = typed(field, input.value, units);
+    input.dataset.shown = input.value;
   }
 }

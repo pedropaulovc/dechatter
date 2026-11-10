@@ -149,7 +149,7 @@ def _toml_value(value: object) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, str):
-        return json.dumps(str(value))
+        return json.dumps(str(value), ensure_ascii=False)
     if isinstance(value, list | tuple):
         return f"[{', '.join(_toml_value(item) for item in value)}]"
     if isinstance(value, int | float):
