@@ -90,5 +90,5 @@ def for_machine(program: str, units: Units) -> str:
         return program
     body, end, tail = program.rpartition(PROGRAM_END)
     if not end:
-        return f"{program}{RESTORE_INCH}\n"
+        return f"{program.rstrip()}\n{RESTORE_INCH}\n"
     return f"{body}{RESTORE_INCH}\n{end}{tail}"
