@@ -176,18 +176,18 @@ UNLISTED_PLANNER = (
 )
 
 
-def setup_values(setup: Setup) -> dict:
-    """The setup as plain sections of values, for a form to edit and hand back.
+def setup_values(path: Path) -> dict:
+    """The setup file as plain sections of values, for a form to edit and hand back.
 
     Everything a form shows is included, so saving pins what the user saw even where it
     equals today's default: a safe height someone confirmed must not move with a later
-    release. The unlisted planner settings are left out while they are at their defaults,
-    so those keep following the defaults.
+    release. The unlisted planner settings are included only where the file sets them, so
+    one written by hand survives a save and the rest keep following the defaults.
     """
-    values = dataclasses.asdict(setup)
-    defaults = Planner()
+    values = dataclasses.asdict(load_setup(path))
+    written = tomllib.loads(path.read_text(encoding="utf-8")).get("planner", {})
     for key in UNLISTED_PLANNER:
-        if values["planner"][key] == getattr(defaults, key):
+        if key not in written:
             del values["planner"][key]
     return values
 
@@ -212,10 +212,12 @@ def _validate(setup: Setup) -> None:
     if machine.min_rpm >= machine.max_rpm:
         raise ConfigError("[machine] min_rpm must be below max_rpm")
     fractions = setup.planner.round1_width_fractions
-    if not isinstance(fractions, tuple) or not all(
-        isinstance(f, int | float) and 0 < f <= 1 for f in fractions
+    if (
+        not isinstance(fractions, tuple)
+        or not fractions
+        or not all(type(f) in (int, float) and 0 < f <= 1 for f in fractions)
     ):
-        raise ConfigError("[planner] round1_width_fractions must be a list of numbers in (0, 1]")
+        raise ConfigError("[planner] round1_width_fractions must list numbers in (0, 1]")
     if not 0 < setup.planner.probability_floor <= setup.planner.min_probability < 1:
         raise ConfigError("[planner] need 0 < probability_floor <= min_probability < 1")
 

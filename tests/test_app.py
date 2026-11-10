@@ -184,32 +184,32 @@ def test_setup_form_round_trips_and_an_invalid_one_keeps_the_old_setup(engine):
         engine.call("save_setup", NAME, json.dumps({**good, "machine": {"rpm": 1}}))
 
 
-def test_saved_setup_keeps_following_defaults_and_survives_unstorable_text(engine):
+def test_saved_setup_pins_shown_values_and_survives_unstorable_text(engine):
     path = engine.root / NAME / session.SETUP_FILE
+    with path.open("a", encoding="utf-8") as setup_file:
+        setup_file.write("power_fraction = 0.6   # pinned by hand, at today's default\n")
     form = engine.call("setup_form", NAME)["values"]
     form["machine"]["name"] = "mill \x7f"
     engine.call("save_setup", NAME, json.dumps(form))
     written = path.read_text(encoding="utf-8")
-    # Shown values are pinned even at their defaults; unlisted planner internals are not.
-    assert "speed_sigma_fraction" not in written and "safe_z_mm = 10.0" in written
+    # Shown values are pinned even at their defaults. Of the planner internals no form
+    # shows, only the one the file set by hand is kept.
+    assert "safe_z_mm = 10.0" in written and "power_fraction = 0.6" in written
+    assert "speed_sigma_fraction" not in written
     assert engine.call("setup_form", NAME)["values"] == form
+
+    for unusable in ([], [True], [0, 0.2], 0.2):
+        bad = json.loads(json.dumps(form))
+        bad["planner"]["round1_width_fractions"] = unusable
+        with pytest.raises(RuntimeError, match="must list numbers"):
+            engine.call("save_setup", NAME, json.dumps(bad))
+        assert path.read_text(encoding="utf-8") == written
 
     # Half an emoji, as pasted text cut mid-character arrives from the browser.
     broken = json.loads(json.dumps(form))
     broken["tool"]["holder"] = "ER32 \ud83d"
     with pytest.raises(RuntimeError, match="broken character"):
         engine.call("save_setup", NAME, json.dumps(broken))
-    assert path.read_text(encoding="utf-8") == written
-
-    zero = json.loads(json.dumps(form))
-    zero["planner"]["round1_width_fractions"] = [0, 0.2]
-    with pytest.raises(RuntimeError, match="round1_width_fractions"):
-        engine.call("save_setup", NAME, json.dumps(zero))
-
-    scalar = json.loads(json.dumps(form))
-    scalar["planner"]["round1_width_fractions"] = 0.2
-    with pytest.raises(RuntimeError, match="must be a list of numbers"):
-        engine.call("save_setup", NAME, json.dumps(scalar))
     assert path.read_text(encoding="utf-8") == written
 
 
