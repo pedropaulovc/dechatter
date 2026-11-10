@@ -95,6 +95,16 @@ def test_nothing_proposed_once_the_width_limit_is_reached_at_top_speed(setup):
     assert bayes.propose(setup, env, [top]).tests == []
 
 
+def test_a_depth_is_left_once_no_likely_cut_would_beat_what_another_depth_reached(setup):
+    env = envelope(setup)
+    here = [Observation(4600, 3.0, Verdict.STABLE)]
+    widest = env.widths(setup.planner.width_step_mm)[-1]
+    within_reach = mrr_mm3_min(setup, env, 4600, 3.4)
+    out_of_reach = 0.95 * mrr_mm3_min(setup, env, 4600, widest)
+    assert bayes.propose(setup, env, here, within_reach).tests
+    assert bayes.propose(setup, env, here, out_of_reach).tests == []
+
+
 def true_optimum(setup, env) -> float:
     flutes = setup.tool.flutes
     return max(
