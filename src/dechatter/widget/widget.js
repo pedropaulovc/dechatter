@@ -190,7 +190,7 @@ async function openMic(deviceId) {
 function renderLevel() {
   const level = mic.open ? mic.levelDb : null;
   $('level').value = level ?? -100;
-  $('level-db').textContent = level === null ? (mic.open ? 'no signal' : '') : `${Math.round(level)} dB`;
+  $('level-db').textContent = level === null ? (mic.open ? 'no signal: click anywhere in this panel' : '') : `${Math.round(level)} dB`;
   if (mic.recording) {
     const clock = $('recording-clock');
     if (clock) {
@@ -331,7 +331,6 @@ async function loadProgram(round) {
   busy = true;
   render();
   try {
-    // This click is a user gesture: browsers that held the audio capture back until one let it run now.
     await mic.resume();
     const gcode = await engine('program', current, round.round);
     await new Promise((resolve, reject) => {
@@ -622,6 +621,10 @@ new ResizeObserver(() => {
   const { scrollHeight, scrollWidth } = document.body;
   window.parent.postMessage({ token, action: { type: 'resize', payload: { scrollHeight, scrollWidth } } }, '*');
 }).observe(document.body);
+
+// Browsers can hold audio capture back until the user interacts with the page, for instance
+// after a reload. Any click in the widget lets it run.
+document.addEventListener('pointerdown', () => mic.resume());
 
 // Leaving mid-recording loses the run: the samples are only in this page.
 window.addEventListener('beforeunload', (event) => {
