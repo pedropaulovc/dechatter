@@ -39,9 +39,17 @@ depth. Planning a deeper cut on such a block is refused: mount fresh stock for i
 ## Use in cncjs
 
 ```sh
+npm install dechatter
+cncjs --mount /dechatter:node_modules/dechatter/web
+```
+
+The npm package is the widget as a static folder, about 30 MB. To build that folder from
+source instead:
+
+```sh
 uv tool install git+https://github.com/pedropaulovc/dechatter
 
-dechatter widget ~/dechatter-widget            # writes a static folder, about 30 MB
+dechatter widget ~/dechatter-widget
 cncjs --mount /dechatter:$HOME/dechatter-widget
 ```
 
@@ -214,6 +222,12 @@ uv run validation/purdue.py ~/purdue-cache   # downloads about 370 MB once
 
 `e2e/` runs real cncjs against a simulated Grbl inside WSL, for driving the widget without a
 machine. See `e2e/README.md`.
+
+To release, set the same version in `pyproject.toml` and `package.json`, merge to `main`, and
+push a tag `vX.Y.Z` on that commit. The `release` workflow tests on Linux and Windows, builds
+the widget once and publishes that build to npm. npm trusts the workflow itself, so no token
+is stored; version 0.1.0 was published by hand, because that trust can only be registered
+for a package that exists.
 
 ## Related work
 
