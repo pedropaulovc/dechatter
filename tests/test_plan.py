@@ -102,6 +102,17 @@ def test_dwell_precedes_every_cut(setup):
 MANUAL = {"s": ('spindle = "program"', 'spindle = "manual"')}
 
 
+def test_an_inch_machine_is_put_back_in_inches_even_by_a_program_without_m30():
+    restore = gcode.RESTORE_INCH
+    assert gcode.for_machine("G21\nG0 X1\nM30\n", gcode.Units.MM) == "G21\nG0 X1\nM30\n"
+    assert (
+        gcode.for_machine("G21\nG0 X1\nM30\n", gcode.Units.INCH) == f"G21\nG0 X1\n{restore}\nM30\n"
+    )
+    # Hand-edited: no M30, and a last line that would swallow anything glued onto it.
+    assert gcode.for_machine("G21\n; end", gcode.Units.INCH) == f"G21\n; end\n{restore}\n"
+    assert gcode.for_machine("G21\nG0 X1\n\n\n", gcode.Units.INCH) == f"G21\nG0 X1\n{restore}\n"
+
+
 def test_manual_spindle_pauses_once_per_speed_and_never_commands_the_spindle(write_setup):
     manual = load_setup(write_setup(**MANUAL))
     plan = round1(manual)
