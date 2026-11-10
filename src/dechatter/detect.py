@@ -64,17 +64,22 @@ def _psd(samples: np.ndarray, rate: int, window: int) -> tuple[np.ndarray, np.nd
     return signal.welch(samples, rate, window="hann", nperseg=window, noverlap=window // 2)
 
 
-def _spindle_hz(freqs: np.ndarray, psd: np.ndarray, nominal_hz: float, flutes: int) -> float:
+def _spindle_hz(
+    freqs: np.ndarray, psd: np.ndarray, band: np.ndarray, nominal_hz: float, flutes: int
+) -> float:
     """Actual rotation frequency: the candidate with the most tooth-passing harmonics present.
 
     Each harmonic's score saturates, so one huge tone (chatter) landing on a single harmonic
-    of a wrong candidate cannot outvote the many harmonics of the right one.
+    of a wrong candidate cannot outvote the many harmonics of the right one. Levels are taken
+    against the floor of the analysis band only: a recording at 48 kHz whose microphone or
+    codec passes nothing above 10 kHz has a near-zero median over its full spectrum, against
+    which every candidate saturates and none wins.
     """
     orders = np.arange(1, min(MAX_TOOTH_ORDERS, int(BAND_HZ[1] / (nominal_hz * flutes))) + 1)
     if len(orders) == 0:
         return nominal_hz
     candidates = nominal_hz * (1 + np.linspace(-RPM_TOLERANCE, RPM_TOLERANCE, RPM_SEARCH_STEPS))
-    level_db = 10 * np.log10(psd / np.median(psd[freqs >= BAND_HZ[0]]) + 1e-30)
+    level_db = 10 * np.log10(psd / np.median(psd[band]) + 1e-30)
     harmonics = np.outer(candidates * flutes, orders)
     score = np.clip(np.interp(harmonics, freqs, level_db), 0, HARMONIC_SCORE_CAP_DB).sum(axis=1)
     return float(candidates[np.argmax(score)])
@@ -105,7 +110,7 @@ def classify(
     freqs, psd = _psd(cut, rate, window)
     band = (freqs >= BAND_HZ[0]) & (freqs <= min(BAND_HZ[1], 0.45 * rate))
 
-    spindle_hz = _spindle_hz(freqs, psd, rpm / 60, flutes)
+    spindle_hz = _spindle_hz(freqs, psd, band, rpm / 60, flutes)
     comb = _on_comb(freqs, spindle_hz)
     candidates = band & ~comb
     excess_ratio = None

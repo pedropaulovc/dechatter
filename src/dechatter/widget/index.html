@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>dechatter</title>
+  <link rel="stylesheet" href="widget.css">
+</head>
+<body>
+  <p id="error" class="error" hidden></p>
+  <p id="boot" class="muted">Starting.</p>
+
+  <div id="main" hidden>
+    <header>
+      <select id="sessions" aria-label="Session"></select>
+      <button id="new-session">New</button>
+      <button id="edit-setup" disabled>Setup</button>
+      <button id="export" disabled>Export</button>
+      <button id="import">Import</button>
+      <input id="import-file" type="file" accept=".zip" hidden>
+      <div id="summary" class="muted"></div>
+    </header>
+
+    <dl id="links">
+      <dt>cncjs</dt>
+      <dd id="cncjs">connecting</dd>
+      <dt>Microphone</dt>
+      <dd>
+        <button id="enable-mic" hidden>Enable microphone</button>
+        <select id="device" aria-label="Microphone" hidden></select>
+        <meter id="level" min="-100" max="0" low="-70" high="-6" optimum="-30" value="-100" hidden></meter>
+        <span id="level-db" class="muted"></span>
+      </dd>
+    </dl>
+    <p id="mic-warning" class="error" hidden></p>
+
+    <section id="setup" hidden>
+      <h2>Setup</h2>
+      <p class="muted">One session per tool assembly: machine, holder, cutter and stickout.</p>
+      <textarea id="setup-text" spellcheck="false" rows="24"></textarea>
+      <p>
+        <button id="save-setup" class="primary">Save</button>
+        <button id="cancel-setup">Cancel</button>
+      </p>
+    </section>
+
+    <section id="step" hidden></section>
+
+    <section id="round" hidden>
+      <h2 id="round-title"></h2>
+      <table>
+        <thead>
+          <tr><th>#</th><th>rpm</th><th>width</th><th>feed</th><th>P</th><th>result</th></tr>
+        </thead>
+        <tbody id="passes"></tbody>
+      </table>
+    </section>
+
+    <section id="map-section" hidden>
+      <h2>Stability map</h2>
+      <canvas id="map" width="320" height="180"></canvas>
+      <p class="muted legend">
+        Green is likely stable, red likely chatter. Dots are stable cuts, crosses chatter.
+      </p>
+    </section>
+
+    <section id="best-section" hidden>
+      <h2>Best stable cuts</h2>
+      <table>
+        <thead><tr><th>rpm</th><th>width</th><th>feed</th><th>cm³/min</th></tr></thead>
+        <tbody id="best"></tbody>
+      </table>
+    </section>
+  </div>
+
+  <script type="module" src="widget.js"></script>
+</body>
+</html>

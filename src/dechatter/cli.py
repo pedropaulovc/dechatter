@@ -9,12 +9,13 @@ from pathlib import Path
 
 import numpy as np
 
-from . import audio, bayes, gcode, materials, session
+from . import audio, bayes, materials, session
 from .audio import AudioError
 from .config import TEMPLATE, ConfigError, Setup, load_setup
 from .detect import Thresholds, Verdict
-from .plan import Envelope, PassKind, PlanError, PlannerKind, assemble, envelope, grid_tests
-from .session import PassStatus, SessionError
+from .export import ExportError, export
+from .plan import Envelope, PassKind, Plan, PlanError, envelope
+from .session import PassStatus, SessionError, Stock
 
 TOP_RESULTS = 5
 MAP_COLUMNS = 16
@@ -78,11 +79,7 @@ def _print_map(stability: bayes.StabilityMap, observations: list[bayes.Observati
     print("        | " + " ".join(f"{stability.speeds[c]:<4.0f}" for c in columns))
 
 
-def _write_round(session_dir: Path, setup: Setup, plan) -> None:
-    target = session.round_dir(session_dir, plan.round)
-    target.mkdir()
-    plan.save(target / session.PLAN_FILE)
-    (target / session.PROGRAM_FILE).write_text(gcode.render(plan, setup), encoding="ascii")
+def _print_round(session_dir: Path, plan: Plan) -> None:
     tests = [p for p in plan.passes if p.kind is PassKind.TEST]
     print(
         f"round {plan.round}: {len(tests)} test cuts, about {plan.run_time_s / 60:.0f} min, "
@@ -91,39 +88,26 @@ def _write_round(session_dir: Path, setup: Setup, plan) -> None:
     for p in tests:
         chance = "" if p.p_stable is None else f"  P(stable) {p.p_stable:.2f}"
         print(f"  pass {p.id:2d}: S{p.rpm} width {p.width_mm:.2f} mm F{p.feed_mm_min:.0f}{chance}")
-    print(f"wrote {target / session.PROGRAM_FILE}")
+    print(f"wrote {session.round_dir(session_dir, plan.round) / session.PROGRAM_FILE}")
     print(f"run it while recording, then: dechatter analyze {session_dir} <recording>")
 
 
 def cmd_plan(args: argparse.Namespace) -> int:
     setup = load_setup(args.session / session.SETUP_FILE)
     env = envelope(setup)
-    rounds = session.load_rounds(args.session)
-    if not rounds:
-        _write_round(
-            args.session,
-            setup,
-            assemble(setup, env, 1, PlannerKind.GRID, 0.0, 0.0, grid_tests(setup, env)),
-        )
-        return 0
-
-    face, remnant = session.face_after(rounds[-1])
-    if args.new_stock:
-        face, remnant = 0.0, 0.0
-    observations = session.observations(rounds)
-    proposal = bayes.propose(setup, env, observations)
-    _print_map(bayes.build_map(setup, env, observations), observations)
-    _print_best(setup, env, observations)
-    if not proposal.tests:
+    observations = session.observations(session.load_rounds(args.session))
+    stock = Stock.FRESH if args.new_stock else Stock.SAME
+    planned = session.plan_next(args.session, setup, env, stock)
+    if observations:
+        _print_map(bayes.build_map(setup, env, observations), observations)
+        _print_best(setup, env, observations)
+    if planned.plan is None:
         print(
             f"converged: no further cut is expected to add {setup.planner.stop_improvement:.0%} "
-            f"removal rate (best candidate {proposal.expected_improvement:.1%})"
+            f"removal rate (best candidate {planned.expected_improvement:.1%})"
         )
         return 0
-    plan = assemble(
-        setup, env, rounds[-1].plan.round + 1, PlannerKind.BAYES, face, remnant, proposal.tests
-    )
-    _write_round(args.session, setup, plan)
+    _print_round(args.session, planned.plan)
     return 0
 
 
@@ -137,13 +121,12 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         raise SessionError(f"round {number} does not exist")
     target = by_number[number]
 
-    samples, rate = audio.load(args.recording)
     manual = audio.read_segments(args.segments) if args.segments else None
     thresholds = Thresholds(args.prominence_db, args.excess_db)
-    results = session.analyze(target.plan, samples, rate, args.recording.name, thresholds, manual)
-    results.save(target.path / session.RESULTS_FILE)
+    results = session.analyze_recording(target, args.recording, thresholds, manual)
 
-    print(f"round {number}: {args.recording.name}, {len(samples) / rate:.0f} s at {rate} Hz")
+    print(f"round {number}: {args.recording.name}")
+
     print(" pass kind       rpm  width  status    verdict   peak Hz  prom  vs air")
     for p in results.passes:
         if p.status is PassStatus.MISSING:
@@ -177,6 +160,15 @@ def cmd_report(args: argparse.Namespace) -> int:
     )
     _print_map(bayes.build_map(setup, env, observations), observations)
     _print_best(setup, env, observations)
+    return 0
+
+
+def cmd_widget(args: argparse.Namespace) -> int:
+    export(args.folder)
+    folder = args.folder.resolve()
+    print(f"wrote the widget to {folder}")
+    print(f"start cncjs with:  cncjs --mount /dechatter:{folder}")
+    print("then enable the Custom widget in cncjs and set its URL to /dechatter/")
     return 0
 
 
@@ -214,6 +206,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     listing = commands.add_parser("materials", help="list the built-in material table")
     listing.set_defaults(run=cmd_materials)
+
+    widget = commands.add_parser("widget", help="write the cncjs widget as a static folder")
+    widget.add_argument("folder", type=Path)
+    widget.set_defaults(run=cmd_widget)
     return parser
 
 
@@ -224,7 +220,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     try:
         return args.run(args)
-    except (ConfigError, PlanError, SessionError, AudioError, FileNotFoundError) as exc:
+    except (
+        ConfigError,
+        PlanError,
+        SessionError,
+        AudioError,
+        ExportError,
+        FileNotFoundError,
+    ) as exc:
         print(f"dechatter: {exc}", file=sys.stderr)
         return 1
 

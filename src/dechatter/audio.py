@@ -8,11 +8,11 @@ import math
 import shutil
 import subprocess
 import tempfile
+import wave
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-import soundfile
 from scipy import signal
 
 from .plan import PassKind, Plan
@@ -43,12 +43,42 @@ class Segment:
 
 
 def load(path: Path) -> tuple[np.ndarray, int]:
-    """Mono float samples and sample rate. Formats libsndfile lacks (m4a, aac) go through ffmpeg."""
+    """Mono float samples and sample rate.
+
+    16-bit WAV is read with the standard library, which is all the browser build has. Other
+    formats go through libsndfile, and what that lacks (m4a, aac) through ffmpeg.
+    """
+    if path.suffix.lower() == ".wav":
+        try:
+            return _load_wav16(path)
+        except wave.Error:
+            pass
+    import soundfile
+
     try:
         samples, rate = soundfile.read(path, dtype="float32", always_2d=True)
     except soundfile.LibsndfileError:
         samples, rate = _load_via_ffmpeg(path)
     return samples.mean(axis=1), rate
+
+
+def _load_wav16(path: Path) -> tuple[np.ndarray, int]:
+    with wave.open(str(path), "rb") as wav:
+        if wav.getsampwidth() != 2:
+            raise wave.Error("not 16-bit PCM")
+        frames = np.frombuffer(wav.readframes(wav.getnframes()), dtype="<i2")
+        samples = frames.reshape(-1, wav.getnchannels()).astype(np.float32) / 32768
+        return samples.mean(axis=1), wav.getframerate()
+
+
+def save_wav(path: Path, samples: np.ndarray, rate: int) -> None:
+    """Mono 16-bit WAV."""
+    pcm = (np.clip(samples, -1.0, 1.0) * 32767).astype("<i2")
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(rate)
+        wav.writeframes(pcm.tobytes())
 
 
 def _load_via_ffmpeg(path: Path) -> tuple[np.ndarray, int]:
@@ -64,6 +94,8 @@ def _load_via_ffmpeg(path: Path) -> tuple[np.ndarray, int]:
         )
         if done.returncode != 0:
             raise AudioError(f"ffmpeg could not decode {path.name}: {done.stderr.strip()}")
+        import soundfile
+
         return soundfile.read(wav, dtype="float32", always_2d=True)
 
 
@@ -163,8 +195,8 @@ def find_cuts(samples: np.ndarray, rate: int, plan: Plan) -> Alignment:
     )
     if not alignments[chosen].matches:
         raise AudioError(
-            "no cut in the recording matches the plan's pass durations; "
-            "pass --segments with start,end times per cut"
+            "no cut in the recording matches the plan's pass durations; check the microphone "
+            "level, or mark the cuts yourself (`dechatter analyze --segments`)"
         )
     return alignments[chosen]
 

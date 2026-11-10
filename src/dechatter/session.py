@@ -10,10 +10,11 @@ from pathlib import Path
 
 import numpy as np
 
-from . import audio, detect
+from . import audio, bayes, detect, gcode
 from .bayes import Observation
+from .config import Setup
 from .detect import Thresholds, Verdict
-from .plan import PassKind, Plan
+from .plan import Envelope, PassKind, Plan, PlannerKind, assemble, grid_tests
 
 log = logging.getLogger(__name__)
 
@@ -206,3 +207,63 @@ def analyze(
             )
         )
     return Results(plan.round, recording, thresholds, tuple(results))
+
+
+class Stock(StrEnum):
+    SAME = "same"  # the block from the previous round is still mounted
+    FRESH = "fresh"  # a new block: the front face is back at Y0
+
+
+@dataclass(frozen=True)
+class Planned:
+    plan: Plan | None  # None: converged, nothing left worth cutting
+    expected_improvement: float
+
+
+def plan_next(session: Path, setup: Setup, env: Envelope, stock: Stock) -> Planned:
+    """Plan the next round and write its directory, or report convergence."""
+    rounds = load_rounds(session)
+    if not rounds:
+        plan = assemble(setup, env, 1, PlannerKind.GRID, 0.0, 0.0, grid_tests(setup, env))
+        _write_round(session, setup, plan)
+        return Planned(plan, 0.0)
+
+    face, remnant = face_after(rounds[-1])
+    if stock is Stock.FRESH:
+        face, remnant = 0.0, 0.0
+    proposal = bayes.propose(setup, env, observations(rounds))
+    if not proposal.tests:
+        return Planned(None, proposal.expected_improvement)
+    plan = assemble(
+        setup, env, rounds[-1].plan.round + 1, PlannerKind.BAYES, face, remnant, proposal.tests
+    )
+    _write_round(session, setup, plan)
+    return Planned(plan, proposal.expected_improvement)
+
+
+def _write_round(session: Path, setup: Setup, plan: Plan) -> None:
+    target = round_dir(session, plan.round)
+    target.mkdir()
+    plan.save(target / PLAN_FILE)
+    (target / PROGRAM_FILE).write_text(gcode.render(plan, setup), encoding="ascii")
+    log.info("planned round %d: %d passes", plan.round, len(plan.passes))
+
+
+def analyze_recording(
+    target: Round,
+    recording: Path,
+    thresholds: Thresholds,
+    manual: list[audio.Segment] | None = None,
+) -> Results:
+    """Classify a round's passes from its recording and save the results beside the plan."""
+    samples, rate = audio.load(recording)
+    results = analyze(target.plan, samples, rate, recording.name, thresholds, manual)
+    results.save(target.path / RESULTS_FILE)
+    log.info(
+        "analysed round %d from %s: %.0f s at %d Hz",
+        target.plan.round,
+        recording.name,
+        len(samples) / rate,
+        rate,
+    )
+    return results

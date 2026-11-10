@@ -1,0 +1,79 @@
+/* Matches the cncjs widget chrome: 13px Arial, flat greys, Bootstrap-3 buttons. */
+body {
+  margin: 0;
+  padding: 10px;
+  font: 13px/1.4 "Helvetica Neue", Helvetica, Arial, sans-serif;
+  color: #222;
+  background: #fff;
+}
+
+[hidden] { display: none !important; }
+header { margin-bottom: 8px; display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+header select { flex: 1 1 110px; min-width: 0; }
+header button { padding: 4px 6px; }
+#summary { flex-basis: 100%; }
+#device { max-width: 150px; }
+textarea {
+  box-sizing: border-box;
+  width: 100%;
+  font: 12px/1.35 Menlo, Consolas, monospace;
+  border: 1px solid #ccc;
+  border-radius: 3px;
+  white-space: pre;
+}
+h2 { margin: 14px 0 6px; font-size: 13px; }
+.muted { color: #777; }
+.legend { margin: 4px 0 0; font-size: 12px; }
+
+dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; margin: 0 0 10px; }
+dt { color: #777; }
+dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+meter { width: 70px; height: 10px; vertical-align: middle; }
+
+.error {
+  margin: 0 0 10px;
+  padding: 6px 8px;
+  color: #a94442;
+  background: #f2dede;
+  border: 1px solid #ebccd1;
+  border-radius: 3px;
+}
+
+#step {
+  padding: 8px 10px;
+  background: #f7f7f7;
+  border: 1px solid #ddd;
+  border-radius: 3px;
+}
+#step p { margin: 0 0 8px; }
+#step p:last-child { margin-bottom: 0; }
+#step ol { margin: 0 0 8px; padding-left: 18px; }
+
+button, select {
+  font: inherit;
+  padding: 4px 10px;
+  color: #222;
+  background: #fff;
+  border: 1px solid #ccc;
+  border-radius: 3px;
+}
+button { cursor: pointer; }
+button:hover:not(:disabled) { background: #e6e6e6; }
+button:disabled { color: #999; cursor: not-allowed; }
+button.primary { color: #fff; background: #337ab7; border-color: #2e6da4; }
+button.primary:hover:not(:disabled) { background: #286090; }
+button.primary:disabled { color: #fff; opacity: 0.55; }
+td select { padding: 1px 2px; }
+
+.recording { color: #c9302c; font-weight: bold; }
+.recording::before { content: "\25CF  "; }
+
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+th, td { padding: 2px 4px; text-align: right; border-bottom: 1px solid #eee; }
+th { color: #777; font-weight: normal; }
+th:last-child, td:last-child { text-align: left; }
+tr.prep td { color: #999; }
+td.stable { color: #3c763d; }
+td.unstable { color: #a94442; font-weight: bold; }
+
+canvas { display: block; width: 100%; max-width: 420px; }

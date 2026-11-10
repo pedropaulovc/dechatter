@@ -54,6 +54,7 @@ class Plan:
     chip_load_mm: float
     face_y_start_mm: float
     dwell_s: float
+    plunge_s: float  # feed move from the clearance plane down to depth, beside the stock
     passes: tuple[Pass, ...]
     schema: int = SCHEMA
 
@@ -63,7 +64,9 @@ class Plan:
 
     @property
     def run_time_s(self) -> float:
-        return sum(self.dwell_s + p.lead_in_s + p.expected_cut_s for p in self.passes)
+        """Feed moves and dwells. Rapids come on top and depend on the machine."""
+        per_pass = self.dwell_s + self.plunge_s
+        return sum(per_pass + p.lead_in_s + p.expected_cut_s for p in self.passes)
 
     def save(self, path: Path) -> None:
         path.write_text(json.dumps(asdict(self), indent=2) + "\n", encoding="utf-8")
@@ -207,6 +210,12 @@ def assemble(
         chip_load_mm=env.chip_load_mm,
         face_y_start_mm=round(face_y_mm, 3),
         dwell_s=setup.program.dwell_s,
+        plunge_s=round(
+            (setup.program.clearance_mm + setup.cut.axial_depth_mm)
+            / setup.program.plunge_feed_mm_min
+            * 60,
+            2,
+        ),
         passes=tuple(passes),
     )
 
