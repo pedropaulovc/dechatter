@@ -39,8 +39,9 @@ a page the microphone on those. Then, in the widget:
    shows lengths in inches when the machine is in G20 and in millimetres when it is in G21,
    or with no machine connected. Its last step holds the planner's settings, which rarely
    need changing. Saving from the wizard rewrites the session's setup file without comments.
-   Programs are always in millimetres (G21); one loaded on an inch machine switches it back
-   to G20 before it ends, but a job you stop part-way leaves the machine in G21.
+   Programs are always in millimetres (G21); one run on an inch machine switches it back to
+   G20 before it ends. A job you stop part-way leaves the machine in G21: the wizard keeps
+   showing inches and tells you to send G20.
 2. Plan a round. Round 1 is a coarse grid of speeds and widths.
 3. Set the work zero at the left end of the stock, on its front face, at the top.
 4. Load the program into cncjs and press play in cncjs. The widget never starts the machine.
