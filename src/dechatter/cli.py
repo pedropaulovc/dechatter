@@ -9,12 +9,12 @@ from pathlib import Path
 
 import numpy as np
 
-from . import audio, bayes, materials, server, session
+from . import audio, bayes, materials, session
 from .audio import AudioError
 from .config import TEMPLATE, ConfigError, Setup, load_setup
 from .detect import Thresholds, Verdict
+from .export import ExportError, export
 from .plan import Envelope, PassKind, Plan, PlanError, envelope
-from .recorder import MicRecorder, RecorderError, default_device, input_devices
 from .session import PassStatus, SessionError, Stock
 
 TOP_RESULTS = 5
@@ -163,17 +163,12 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_serve(args: argparse.Namespace) -> int:
-    recorder = MicRecorder(args.device)
-    thresholds = Thresholds(args.prominence_db, args.excess_db)
-    server.serve(server.App(args.session, recorder, thresholds), args.host, args.port)
-    return 0
-
-
-def cmd_devices(_: argparse.Namespace) -> int:
-    chosen = default_device()
-    for index, name in input_devices():
-        print(f"{'*' if index == chosen else ' '} {index:3d}  {name}")
+def cmd_widget(args: argparse.Namespace) -> int:
+    export(args.folder)
+    folder = args.folder.resolve()
+    print(f"wrote the widget to {folder}")
+    print(f"start cncjs with:  cncjs --mount /dechatter:{folder}")
+    print("then enable the Custom widget in cncjs and set its URL to /dechatter/")
     return 0
 
 
@@ -212,17 +207,9 @@ def build_parser() -> argparse.ArgumentParser:
     listing = commands.add_parser("materials", help="list the built-in material table")
     listing.set_defaults(run=cmd_materials)
 
-    serve = commands.add_parser("serve", help="serve the cncjs widget for a session")
-    serve.add_argument("session", type=Path)
-    serve.add_argument("--host", default="127.0.0.1")
-    serve.add_argument("--port", type=int, default=8765)
-    serve.add_argument("--device", type=int, help="input device index (see `dechatter devices`)")
-    serve.add_argument("--prominence-db", type=float, default=defaults.prominence_db)
-    serve.add_argument("--excess-db", type=float, default=defaults.excess_db)
-    serve.set_defaults(run=cmd_serve)
-
-    devices = commands.add_parser("devices", help="list audio input devices")
-    devices.set_defaults(run=cmd_devices)
+    widget = commands.add_parser("widget", help="write the cncjs widget as a static folder")
+    widget.add_argument("folder", type=Path)
+    widget.set_defaults(run=cmd_widget)
     return parser
 
 
@@ -238,7 +225,7 @@ def main(argv: list[str] | None = None) -> int:
         PlanError,
         SessionError,
         AudioError,
-        RecorderError,
+        ExportError,
         FileNotFoundError,
     ) as exc:
         print(f"dechatter: {exc}", file=sys.stderr)

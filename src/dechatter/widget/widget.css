@@ -7,7 +7,20 @@ body {
   background: #fff;
 }
 
-header { margin-bottom: 8px; }
+[hidden] { display: none !important; }
+header { margin-bottom: 8px; display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+header select { flex: 1 1 110px; min-width: 0; }
+header button { padding: 4px 6px; }
+#summary { flex-basis: 100%; }
+#device { max-width: 150px; }
+textarea {
+  box-sizing: border-box;
+  width: 100%;
+  font: 12px/1.35 Menlo, Consolas, monospace;
+  border: 1px solid #ccc;
+  border-radius: 3px;
+  white-space: pre;
+}
 h2 { margin: 14px 0 6px; font-size: 13px; }
 .muted { color: #777; }
 .legend { margin: 4px 0 0; font-size: 12px; }
