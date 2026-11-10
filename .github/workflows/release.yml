@@ -59,21 +59,31 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: uv run python .github/release_version.py "$RELEASE_TAG"
 
-      # prepack builds web/ with `dechatter widget`: it downloads Pyodide and checks the
-      # numpy and scipy wheels against the hashes in Pyodide's lock file.
-      - name: Build the package once
-        run: npm pack
-
-      - name: Publish that package to npm, unless this version is already there
+      # The registry is asked directly, without credentials: 200 means this version is
+      # published, 404 that it is not, and anything else stops the release rather than guess.
+      - name: See whether npm already has this version
+        id: npm
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           version="${RELEASE_TAG#v}"
-          if npm view "dechatter@$version" version > /dev/null 2>&1; then
-            echo "dechatter@$version is already on npm"
-            exit 0
-          fi
-          npm publish "dechatter-$version.tgz"
+          status="$(curl --silent --output /dev/null --write-out '%{http_code}' "https://registry.npmjs.org/dechatter/$version")"
+          echo "registry answered $status for dechatter@$version"
+          case "$status" in
+            200) echo "published=yes" >> "$GITHUB_OUTPUT" ;;
+            404) echo "published=no" >> "$GITHUB_OUTPUT" ;;
+            *) exit 1 ;;
+          esac
+
+      # prepack builds web/ with `dechatter widget`: it downloads Pyodide and checks the
+      # numpy and scipy wheels against the hashes in Pyodide's lock file.
+      - name: Build the package once and publish that build
+        if: steps.npm.outputs.published == 'no'
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          npm pack
+          npm publish "dechatter-${RELEASE_TAG#v}.tgz"
 
       - name: Create the GitHub release, unless it exists
         env:

@@ -40,7 +40,7 @@ depth. Planning a deeper cut on such a block is refused: mount fresh stock for i
 
 ```sh
 npm install dechatter
-cncjs --mount /dechatter:node_modules/dechatter/web
+cncjs --mount /dechatter:$(npm root)/dechatter/web
 ```
 
 The npm package is the widget as a static folder, about 30 MB. To build that folder from
@@ -237,4 +237,5 @@ apps that recommend a speed from the sound of a cut. The test method, constant c
 stepped speed and width, is described in CNCCookbook's
 [chatter article](https://www.cnccookbook.com/chatter-in-machining-milling-lathe-vibration/).
 
-MIT licensed.
+MIT licensed. The npm package also carries Pyodide, CPython, NumPy and SciPy under their own
+licences; see `THIRD_PARTY_NOTICES.md`.
