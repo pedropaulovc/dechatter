@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 
 from . import audio, bayes, session
-from .config import load_setup
+from .config import SpindleControl, load_setup
 from .detect import Thresholds, Verdict
 from .plan import PassKind, envelope, feed_mm_min
 from .session import PassStatus, SessionError, Stock
@@ -71,12 +71,15 @@ class App:
             upcoming = Next.PLAN if proposal.tests else Next.CONVERGED
 
         tool, cut = self.setup.tool, self.setup.cut
+        manual = self.setup.machine.spindle is SpindleControl.MANUAL
         return {
             "session": self.session_dir.resolve().name,
             "summary": (
                 f"D{tool.diameter_mm:g} mm, {tool.flutes} flutes, {cut.material}, "
                 f"depth {cut.axial_depth_mm:g} mm, {self.env.chip_load_mm:g} mm/tooth"
+                f"{', manual spindle' if manual else ''}"
             ),
+            "spindle": self.setup.machine.spindle,
             "next": upcoming,
             "recording_round": self.recording_round,
             "rounds": [self._round_json(r) for r in rounds],

@@ -36,10 +36,20 @@ class Engine:
             raise RuntimeError(decoded["error"])
         return decoded["ok"]
 
-    def run_round(self, number: int, *, abort_in_pass: int | None = None, gain: float = 1.0):
+    def run_round(
+        self,
+        number: int,
+        *,
+        abort_in_pass: int | None = None,
+        gain: float = 1.0,
+        speed_change_s: float = 0.0,
+    ):
         """Record what the simulated machine sounds like cutting the round, as the mic would."""
         plan = Plan.load(session.round_dir(self.root / NAME, number) / session.PLAN_FILE)
-        heard = synth.record(plan, seed=number, abort_in_pass=abort_in_pass) * gain
+        heard = synth.record(
+            plan, seed=number, abort_in_pass=abort_in_pass, speed_change_s=speed_change_s
+        )
+        heard = heard * gain
         # Browsers capture at 48 kHz, far above the simulated machine's own bandwidth.
         heard = signal.resample_poly(heard, BROWSER_RATE, synth.RATE).astype(np.float32)
         self.call("record_start", NAME, number)
@@ -54,16 +64,14 @@ def engine(tmp_path) -> Engine:
     return engine
 
 
-def test_session_runs_to_convergence(engine, setup):
-    state = engine.call("state", NAME)
-    assert state["next"] == "plan" and state["rounds"] == []
-
+def converge(engine, setup, **run) -> dict:
+    """Plan and run rounds until the planner stops, checking every verdict against the machine."""
     for _ in range(10):
         state = engine.call("plan", NAME, "fresh")
         number = state["rounds"][-1]["round"]
         assert state["next"] == "run"
         assert engine.call("program", NAME, number).rstrip().endswith("M30")
-        state = engine.run_round(number)
+        state = engine.run_round(number, **run)
         latest = state["rounds"][-1]
         assert latest["analysed"]
         for p in latest["passes"]:
@@ -72,9 +80,15 @@ def test_session_runs_to_convergence(engine, setup):
             truth = MACHINE.chatters(p["rpm"], p["width_mm"], setup.tool.flutes)
             assert p["verdict"] == ("unstable" if truth else "stable")
         if state["next"] == "converged":
-            break
-    else:
-        pytest.fail("did not converge in 10 rounds")
+            return state
+    pytest.fail("did not converge in 10 rounds")
+
+
+def test_session_runs_to_convergence(engine, setup):
+    state = engine.call("state", NAME)
+    assert state["next"] == "plan" and state["rounds"] == []
+
+    state = converge(engine, setup)
 
     assert state["best"][0]["mrr_cm3_min"] > 12
     assert len(state["observations"]) == sum(
@@ -82,6 +96,14 @@ def test_session_runs_to_convergence(engine, setup):
     )
     timeline = json.loads((engine.root / NAME / "round-01" / TIMELINE_FILE).read_text())
     assert timeline[0]["state"] == "running"
+
+
+def test_manual_spindle_session_converges_despite_the_stops_to_change_speed(engine, setup):
+    text = engine.call("setup_text", NAME).replace('spindle = "program"', 'spindle = "manual"')
+    assert engine.call("save_setup", NAME, text)["spindle"] == "manual"
+
+    state = converge(engine, setup, speed_change_s=12.0)
+    assert state["best"][0]["mrr_cm3_min"] > 12
 
 
 def test_operator_verdict_overrules_the_detector_and_feeds_the_planner(engine):

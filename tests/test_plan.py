@@ -99,6 +99,36 @@ def test_dwell_precedes_every_cut(setup):
     assert all(program[i - 1] == "G4 P4" for i in cuts)
 
 
+MANUAL = {"s": ('spindle = "program"', 'spindle = "manual"')}
+
+
+def test_manual_spindle_pauses_once_per_speed_and_never_commands_the_spindle(write_setup):
+    manual = load_setup(write_setup(**MANUAL))
+    plan = round1(manual)
+    program = gcode.render(plan, manual).splitlines()
+
+    assert not [line for line in program if re.match(r"M[345]\b|S\d", line)]
+    asked = [
+        int(re.search(r"(\d+) rpm", line).group(1)) for line in program if line.startswith("M0")
+    ]
+    rpms = [p.rpm for p in plan.passes]
+    assert asked == sorted(set(rpms)), "one stop per speed, speeds grouped"
+    # Each stop comes with the cutter clear of the work: after the retract, before the plunge.
+    for i, line in enumerate(program):
+        if line.startswith("M0"):
+            assert program[i - 1].startswith("G0 X") and program[i + 1].startswith("G0 Z")
+    # Within a speed the cuts still get heavier, and the truing pass needs no speed of its own.
+    for rpm in set(rpms):
+        widths = [p.width_mm for p in plan.passes if p.rpm == rpm and p.kind is PassKind.TEST]
+        assert widths == sorted(widths)
+    assert plan.passes[0].kind is PassKind.TRUING and plan.passes[0].rpm == plan.passes[1].rpm
+
+
+def test_manual_spindle_tests_the_same_cuts_as_program_control(setup, write_setup):
+    cuts = lambda plan: sorted((p.rpm, p.width_mm) for p in plan.passes if p.kind is PassKind.TEST)  # noqa: E731
+    assert cuts(round1(load_setup(write_setup(**MANUAL)))) == cuts(round1(setup))
+
+
 def test_unknown_setup_key_is_rejected(write_setup):
     with pytest.raises(ConfigError, match="flute_count"):
         load_setup(write_setup(k=("flutes = 3", "flute_count = 3")))
