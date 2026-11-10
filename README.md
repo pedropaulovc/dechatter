@@ -1,12 +1,14 @@
 # dechatter
 
 dechatter finds the fastest chatter-free cut for one tool on one milling machine. It writes a
-G-code program of test cuts, you run it while recording on a phone, and it reads the recording
-to decide which cuts chattered. From that it either plans a finer round of cuts or reports the
-best stable speeds and widths.
+G-code program of test cuts, listens while the machine runs it, and decides from the sound
+which cuts chattered. From that it either plans a finer round of cuts or reports the best
+stable speeds and widths.
 
-It runs offline and has no controller integration. The G-code is plain Grbl dialect (`G0`,
-`G1`, `G4`, `M3`, `M5`), written for FluidNC and usable on Grbl and grblHAL.
+It runs as a widget inside [cncjs](https://cnc.js.org), recording with the microphone of the
+PC next to the mill, or from the command line with a recording made on a phone. The G-code is
+plain Grbl dialect (`G0`, `G1`, `G4`, `M3`, `M5`), written for FluidNC and usable on Grbl and
+grblHAL.
 
 ## What it measures
 
@@ -19,13 +21,38 @@ Each round holds chip load and axial depth constant and varies spindle speed and
 one pass per combination, cutting along the front face of a block held in the vise. Feed
 follows speed so the chip load stays put.
 
-## Use
+## Use in cncjs
 
 ```sh
 uv tool install git+https://github.com/pedropaulovc/dechatter
 
 dechatter init al-10mm          # writes al-10mm/setup.toml
 $EDITOR al-10mm/setup.toml      # machine, tool, material, stock
+dechatter serve al-10mm         # widget at http://127.0.0.1:8765/
+```
+
+In cncjs, open Manage Widgets, enable the Custom widget, and set its URL to
+`http://127.0.0.1:8765/` in the widget's settings. Then, in the widget:
+
+1. Plan a round. Round 1 is a coarse grid of speeds and widths.
+2. Set the work zero at the left end of the stock, on its front face, at the top.
+3. Load the program into cncjs and press play in cncjs. The widget never starts the machine.
+4. Recording starts when the job starts and stops when it ends. The widget then shows each
+   pass as stable or chatter, the stability map and the best cuts so far.
+5. If your ears disagree with a verdict, change it in the table. Plan the next round and
+   repeat until the widget reports convergence.
+
+`dechatter serve` records on the machine it runs on, so run it on the PC by the mill, which
+need not be the machine cncjs runs on (use `--host` to listen beyond localhost). The widget
+shows the microphone's level before any cutting. `dechatter devices` lists the inputs and
+`--device N` picks one. Each round's `recording.wav` is written as it is recorded and kept
+beside the plan, with the job timeline cncjs reported in `timeline.json`.
+
+## Use from the command line
+
+Without cncjs, record on a phone and run the same session by hand:
+
+```sh
 dechatter plan al-10mm          # writes al-10mm/round-01/program.nc
 ```
 
@@ -72,7 +99,8 @@ does not shift the others. If matching fails, mark the cuts yourself and pass
 `--segments labels.txt` (start and end seconds per pass; an Audacity label export works).
 
 `results.json` in each round holds the verdicts and the numbers behind them. If your ears
-disagree with a verdict, edit it there before planning the next round.
+disagree with a verdict, change it in the widget or edit it there before planning the next
+round.
 
 ### How well it works
 
@@ -91,9 +119,11 @@ has not been scored on a second dataset. Most of those cuts last about a second;
 own passes are longer, which gives a finer spectrum. Removing the spindle harmonics matters:
 without that step the best achievable balanced accuracy on this data falls from 88% to 75%.
 
-It has not yet been run on a real session end to end. The planner and the audio pipeline are
+It has not yet been run on a real machine end to end. The planner and the audio pipeline are
 tested against a simulated machine with stability lobes (`tests/synth.py`), where a session
-converges in about three rounds and 27 cuts to within 10% of the true best removal rate.
+converges in about three rounds and 27 cuts to within 10% of the true best removal rate. The
+widget was driven through that same session in a browser against cncjs 1.11.5 and a simulated
+Grbl (`e2e/`), with the simulated machine standing in for the microphone.
 
 Known limits:
 
@@ -137,6 +167,9 @@ uv run pytest
 uv run ruff check .
 uv run validation/purdue.py ~/purdue-cache   # downloads about 370 MB once
 ```
+
+`e2e/` runs real cncjs against a simulated Grbl inside WSL, for driving the widget without a
+machine. See `e2e/README.md`.
 
 ## Related work
 

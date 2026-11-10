@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>dechatter</title>
+  <link rel="stylesheet" href="widget.css">
+</head>
+<body>
+  <header>
+    <strong id="session"></strong>
+    <span id="summary" class="muted"></span>
+  </header>
+
+  <dl id="links">
+    <dt>cncjs</dt>
+    <dd id="cncjs">connecting</dd>
+    <dt>Microphone</dt>
+    <dd>
+      <span id="device"></span>
+      <meter id="level" min="-80" max="0" low="-60" high="-6" optimum="-30" value="-80"></meter>
+      <span id="level-db" class="muted"></span>
+    </dd>
+  </dl>
+
+  <p id="error" class="error" hidden></p>
+
+  <section id="step"></section>
+
+  <section id="round" hidden>
+    <h2 id="round-title"></h2>
+    <table>
+      <thead>
+        <tr><th>#</th><th>rpm</th><th>width</th><th>feed</th><th>P</th><th>result</th></tr>
+      </thead>
+      <tbody id="passes"></tbody>
+    </table>
+  </section>
+
+  <section id="map-section" hidden>
+    <h2>Stability map</h2>
+    <canvas id="map" width="320" height="180"></canvas>
+    <p class="muted legend">
+      Green is likely stable, red likely chatter. Dots are stable cuts, crosses chatter.
+    </p>
+  </section>
+
+  <section id="best-section" hidden>
+    <h2>Best stable cuts</h2>
+    <table>
+      <thead><tr><th>rpm</th><th>width</th><th>feed</th><th>cm³/min</th></tr></thead>
+      <tbody id="best"></tbody>
+    </table>
+  </section>
+
+  <script type="module" src="widget.js"></script>
+</body>
+</html>

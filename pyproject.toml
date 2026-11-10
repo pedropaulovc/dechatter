@@ -9,6 +9,7 @@ authors = [{ name = "Pedro Paulo Vezza Campos", email = "pedro@vezza.com.br" }]
 dependencies = [
     "numpy>=2.0",
     "scipy>=1.14",
+    "sounddevice>=0.5",
     "soundfile>=0.12",
 ]
 

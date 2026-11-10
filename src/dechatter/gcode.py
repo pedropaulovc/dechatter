@@ -44,6 +44,7 @@ def render(plan: Plan, setup: Setup) -> str:
             f"(pass {p.id} {label}: S{p.rpm} width {_n(p.width_mm)} mm F{_n(p.feed_mm_min)})",
             f"G0 X{_n(x_start)} Y{_n(y_cut)}",
             f"M3 S{p.rpm}",
+            f"G0 Z{_n(clearance)}",
             f"G1 Z{_n(-plan.axial_depth_mm)} F{_n(setup.program.plunge_feed_mm_min)}",
             f"G4 P{_n(plan.dwell_s)}",
             f"G1 X{_n(x_end)} F{_n(p.feed_mm_min)}",

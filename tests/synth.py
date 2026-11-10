@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
+import soundfile
 
 from dechatter.plan import Plan
+from dechatter.recorder import RecorderError, RecorderState, RecorderStatus
+from dechatter.session import PLAN_FILE
 
 RATE = 22050
 
@@ -94,3 +98,31 @@ def record(
             break
     parts.append(0.0005 * rng.standard_normal(2 * RATE))
     return np.concatenate(parts).astype(np.float32)
+
+
+class SimulatedMic:
+    """Stands in for the microphone: 'hears' the simulated machine run the round's plan."""
+
+    def __init__(self) -> None:
+        self.path: Path | None = None
+        self.abort_in_pass: int | None = None
+        self.silent = False
+
+    def start(self, path: Path) -> None:
+        if self.path is not None:
+            raise RecorderError("already recording")
+        self.path = path
+
+    def stop(self) -> Path:
+        path, self.path = self.path, None
+        plan = Plan.load(path.with_name(PLAN_FILE))
+        heard = record(plan, seed=plan.round, abort_in_pass=self.abort_in_pass)
+        soundfile.write(path, heard * (0.0 if self.silent else 1.0), RATE)
+        return path
+
+    def status(self) -> RecorderStatus:
+        state = RecorderState.IDLE if self.path is None else RecorderState.RECORDING
+        return RecorderStatus(state, "simulated", -30.0, 0.0)
+
+    def close(self) -> None:
+        pass

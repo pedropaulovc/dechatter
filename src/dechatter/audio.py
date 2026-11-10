@@ -163,8 +163,8 @@ def find_cuts(samples: np.ndarray, rate: int, plan: Plan) -> Alignment:
     )
     if not alignments[chosen].matches:
         raise AudioError(
-            "no cut in the recording matches the plan's pass durations; "
-            "pass --segments with start,end times per cut"
+            "no cut in the recording matches the plan's pass durations; check the microphone "
+            "level, or mark the cuts yourself (`dechatter analyze --segments`)"
         )
     return alignments[chosen]
 
