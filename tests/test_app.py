@@ -11,7 +11,7 @@ import pytest
 import synth
 from scipy import signal
 
-from dechatter import browser, session
+from dechatter import browser, gcode, session
 from dechatter.app import TIMELINE_FILE
 from dechatter.plan import Plan
 
@@ -70,7 +70,12 @@ def converge(engine, setup, **run) -> dict:
         state = engine.call("plan", NAME, "fresh")
         number = state["rounds"][-1]["round"]
         assert state["next"] == "run"
-        assert engine.call("program", NAME, number).rstrip().endswith("M30")
+        assert engine.call("program", NAME, number, "mm").rstrip().endswith("M30")
+        # An inch machine is put back in inches before the program ends.
+        assert engine.call("program", NAME, number, "in").splitlines()[-2:] == [
+            gcode.RESTORE_INCH,
+            "M30",
+        ]
         state = engine.run_round(number, **run)
         latest = state["rounds"][-1]
         assert latest["analysed"]

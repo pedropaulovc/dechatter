@@ -2,8 +2,21 @@
 
 from __future__ import annotations
 
+import enum
+
 from .config import Coolant, Direction, Setup, SpindleControl
 from .plan import PassKind, Plan
+
+
+class Units(enum.StrEnum):
+    """The length mode a machine was in before a program: G21 or G20."""
+
+    MM = "mm"
+    INCH = "in"
+
+
+PROGRAM_END = "M30"
+RESTORE_INCH = "G20 (back to inches, as the machine was before this program)"
 
 COOLANT_ON = {Coolant.FLOOD: "M8", Coolant.MIST: "M7"}
 MANUAL_NOTE = "(MANUAL SPINDLE: the program pauses before each speed. Set it, then resume.)"
@@ -62,5 +75,18 @@ def render(plan: Plan, setup: Setup) -> str:
             f"G0 Z{_n(setup.program.safe_z_mm)}",
         ]
 
-    lines += ["M9", "M30"] if manual else ["M9", "M5", "M30"]
+    lines += ["M9", PROGRAM_END] if manual else ["M9", "M5", PROGRAM_END]
     return "\n".join(lines) + "\n"
+
+
+def for_machine(program: str, units: Units) -> str:
+    """A rendered program as a machine working in `units` should run it.
+
+    Programs are written in millimetres and say so (G21), and the controller keeps that
+    mode after the program ends. A machine that was working in inches is switched back
+    just before the end, so its operator's jogs and offsets still mean inches.
+    """
+    if units is Units.MM:
+        return program
+    body, end, tail = program.rpartition(PROGRAM_END)
+    return f"{body}{RESTORE_INCH}\n{end}{tail}"

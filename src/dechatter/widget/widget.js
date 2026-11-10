@@ -13,9 +13,14 @@ const TIMELINE_LIMIT = 5000;
 const LEVEL_MS = 250;
 const SESSION_KEY = 'dechatter.session';
 const DEVICE_KEY = 'dechatter.microphone';
-const UNITS_KEY = 'dechatter.units';
 const $ = (id) => document.getElementById(id);
 
+const MACHINE_UNITS = { G20: 'in', G21: 'mm' };
+const UNITS_TEXT = {
+  mm: 'Lengths in mm: the machine is in G21.',
+  in: 'Lengths in inches: the machine is in G20.',
+  unknown: 'Lengths in mm. With the machine connected they follow its G20/G21 mode.',
+};
 const cnc = {
   socket: null,
   link: 'connecting', // connecting | no-port | ready | offline
@@ -23,6 +28,7 @@ const cnc = {
   workflow: null, // idle | running | paused; null until cncjs reports it
   program: '', // name of the G-code file cncjs has loaded
   pause: null, // { text, settled } while the program waits at an M0, else null
+  units: null, // mm | in, from the machine's G21/G20 mode; null until cncjs reports it
 };
 const mic = new Mic();
 let boot = 'Starting'; // what the engine is loading; null once it is ready
@@ -31,7 +37,6 @@ let names = []; // sessions stored in this browser
 let current = localStorage.getItem(SESSION_KEY) ?? '';
 let state = null; // the current session, as the engine last reported it
 let editing = null; // { values, materials, step } while the setup wizard is open, else null
-let units = localStorage.getItem(UNITS_KEY) ?? 'mm'; // how the wizard shows lengths: mm | in
 let timeline = []; // what cncjs reported since the job last started; saved with the recording
 let busy = false; // an engine request is in flight
 let stockChoice = 'same'; // survives redraws: planning on the wrong face position cuts air or too deep
@@ -138,8 +143,13 @@ async function editSetup() {
   render();
 }
 
+// Lengths are shown in the machine's units; millimetres until cncjs has reported them.
+function units() {
+  return cnc.units ?? 'mm';
+}
+
 function keepStep() {
-  read($('setup-form'), STEPS[editing.step], editing.values, units);
+  read($('setup-form'), STEPS[editing.step], editing.values, units());
 }
 
 async function nextStep() {
@@ -165,13 +175,6 @@ async function nextStep() {
 function previousStep() {
   keepStep();
   editing.step -= 1;
-  render();
-}
-
-function changeUnits(next) {
-  keepStep();
-  units = next;
-  localStorage.setItem(UNITS_KEY, units);
   render();
 }
 
@@ -321,6 +324,20 @@ async function connectCncjs() {
     syncRecording();
     render();
   });
+  // The machine's G20/G21 mode decides how the wizard shows lengths. Programs run in G21
+  // and put an inch machine back in G20 before they end, so reports during a job are not
+  // the operator's choice.
+  socket.on('controller:state', (_type, controller) => {
+    const reported = MACHINE_UNITS[controller?.parserstate?.modal?.units];
+    if (!reported || reported === cnc.units || ['running', 'paused'].includes(cnc.workflow)) {
+      return;
+    }
+    if (editing) {
+      keepStep();
+    }
+    cnc.units = reported;
+    render();
+  });
 }
 
 window.addEventListener('message', (event) => {
@@ -370,7 +387,7 @@ async function loadProgram(round) {
   try {
     // Capture has to be running before the job can start; the listener below does not wait.
     await mic.resume();
-    const gcode = await engine('program', current, round.round);
+    const gcode = await engine('program', current, round.round, units());
     await new Promise((resolve, reject) => {
       cnc.socket.emit('command', cnc.port, 'gcode:load', round.program, gcode, {}, (err) =>
         err ? reject(new Error(`cncjs could not load the program: ${err.message ?? err}`)) : resolve(),
@@ -444,11 +461,11 @@ function renderSetup() {
   $('setup-back').hidden = editing.step === 0;
   $('setup-next').textContent = editing.step === STEPS.length - 1 ? 'Save' : 'Next';
   $('setup-next').disabled = busy;
-  $('units').value = units;
+  $('units').textContent = UNITS_TEXT[cnc.units ?? 'unknown'];
   // Redraw the fields only when the step or units change, so typing is never interrupted.
-  const key = `${current}|${editing.step}|${units}`;
+  const key = `${current}|${editing.step}|${units()}`;
   if ($('setup-form').dataset.key !== key) {
-    draw($('setup-form'), step, editing.values, units, editing.materials);
+    draw($('setup-form'), step, editing.values, units(), editing.materials);
     $('setup-form').dataset.key = key;
   }
 }
@@ -647,7 +664,6 @@ $('sessions').onchange = () => openSession($('sessions').value);
 $('new-session').onclick = newSession;
 $('edit-setup').onclick = editSetup;
 $('setup-back').onclick = previousStep;
-$('units').onchange = () => changeUnits($('units').value);
 $('setup-form').onsubmit = (event) => {
   event.preventDefault();
   nextStep();
