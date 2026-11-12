@@ -1,0 +1,81 @@
+{
+  "round": 2,
+  "planner": "bayes",
+  "flutes": 2,
+  "diameter_mm": 12.7,
+  "axial_depth_mm": 5.08,
+  "chip_load_mm": 0.0889,
+  "face_y_start_mm": 20.7,
+  "dwell_s": 4,
+  "plunge_s": 3.23,
+  "passes": [
+    {
+      "id": 0,
+      "kind": "truing",
+      "rpm": 1850,
+      "width_mm": 0.2,
+      "feed_mm_min": 328.9,
+      "expected_cut_s": 9.84,
+      "lead_in_s": 1.42,
+      "p_stable": null,
+      "chip_load_mm": null
+    },
+    {
+      "id": 1,
+      "kind": "test",
+      "rpm": 1850,
+      "width_mm": 3.0,
+      "feed_mm_min": 328.9,
+      "expected_cut_s": 11.23,
+      "lead_in_s": 0.72,
+      "p_stable": 0.802,
+      "chip_load_mm": null
+    },
+    {
+      "id": 2,
+      "kind": "test",
+      "rpm": 1850,
+      "width_mm": 3.6,
+      "feed_mm_min": 328.9,
+      "expected_cut_s": 11.35,
+      "lead_in_s": 0.66,
+      "p_stable": 0.669,
+      "chip_load_mm": null
+    },
+    {
+      "id": 3,
+      "kind": "test",
+      "rpm": 2180,
+      "width_mm": 3.4,
+      "feed_mm_min": 387.6,
+      "expected_cut_s": 9.6,
+      "lead_in_s": 0.58,
+      "p_stable": 0.553,
+      "chip_load_mm": null
+    },
+    {
+      "id": 4,
+      "kind": "test",
+      "rpm": 2250,
+      "width_mm": 3.0,
+      "feed_mm_min": 400.1,
+      "expected_cut_s": 9.24,
+      "lead_in_s": 0.59,
+      "p_stable": 0.806,
+      "chip_load_mm": null
+    },
+    {
+      "id": 5,
+      "kind": "test",
+      "rpm": 2250,
+      "width_mm": 3.6,
+      "feed_mm_min": 400.1,
+      "expected_cut_s": 9.34,
+      "lead_in_s": 0.54,
+      "p_stable": 0.672,
+      "chip_load_mm": null
+    }
+  ],
+  "planned_on": "2026-11-11",
+  "schema": 2
+}

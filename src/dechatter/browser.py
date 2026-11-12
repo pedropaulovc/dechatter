@@ -205,8 +205,16 @@ class Sessions:
         """The round's program for a machine in `machine_units` ("mm" or "in")."""
         return self._app(name).program(number, gcode.Units(machine_units))
 
+    def steps(self, name: str, number: int, machine_units: str) -> list[dict]:
+        """The round's program as blocks to run one at a time, in `machine_units`."""
+        return self._app(name).steps(number, gcode.Units(machine_units))
+
     def record_start(self, name: str, number: int) -> dict:
         self._app(name).record_start(number)
+        return self.state(name)
+
+    def record_cancel(self, name: str) -> dict:
+        self._app(name).record_cancel()
         return self.state(name)
 
     def record_stop(self, name: str, samples, rate: float, timeline: str) -> dict:

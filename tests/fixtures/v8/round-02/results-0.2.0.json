@@ -1,0 +1,101 @@
+{
+  "round": 2,
+  "recording": "recording.wav",
+  "thresholds": {
+    "prominence_db": 27.0,
+    "excess_db": 10.0
+  },
+  "passes": [
+    {
+      "id": 0,
+      "kind": "truing",
+      "rpm": 1850,
+      "width_mm": 0.2,
+      "status": "missing",
+      "verdict": null,
+      "chatter_hz": null,
+      "spindle_hz": null,
+      "prominence_db": null,
+      "excess_db": null,
+      "start_s": null,
+      "end_s": null,
+      "detected": null
+    },
+    {
+      "id": 1,
+      "kind": "test",
+      "rpm": 1850,
+      "width_mm": 3.0,
+      "status": "analysed",
+      "verdict": "stable",
+      "chatter_hz": 392.6,
+      "spindle_hz": 30.698,
+      "prominence_db": 17.8,
+      "excess_db": 13.3,
+      "start_s": 25.62,
+      "end_s": 34.72,
+      "detected": "stable"
+    },
+    {
+      "id": 2,
+      "kind": "test",
+      "rpm": 1850,
+      "width_mm": 3.6,
+      "status": "analysed",
+      "verdict": "unstable",
+      "chatter_hz": 421.9,
+      "spindle_hz": 30.408,
+      "prominence_db": 29.8,
+      "excess_db": 26.8,
+      "start_s": 47.38,
+      "end_s": 57.35,
+      "detected": "unstable"
+    },
+    {
+      "id": 3,
+      "kind": "test",
+      "rpm": 2180,
+      "width_mm": 3.4,
+      "status": "analysed",
+      "verdict": "unstable",
+      "chatter_hz": 424.8,
+      "spindle_hz": 37.278,
+      "prominence_db": 35.3,
+      "excess_db": 36.7,
+      "start_s": 70.0,
+      "end_s": 80.15,
+      "detected": "unstable"
+    },
+    {
+      "id": 4,
+      "kind": "test",
+      "rpm": 2250,
+      "width_mm": 3.0,
+      "status": "analysed",
+      "verdict": "stable",
+      "chatter_hz": 397.0,
+      "spindle_hz": 35.655,
+      "prominence_db": 26.7,
+      "excess_db": 27.7,
+      "start_s": 108.2,
+      "end_s": 116.95,
+      "detected": "stable"
+    },
+    {
+      "id": 5,
+      "kind": "test",
+      "rpm": 2250,
+      "width_mm": 3.6,
+      "status": "missing",
+      "verdict": null,
+      "chatter_hz": null,
+      "spindle_hz": null,
+      "prominence_db": null,
+      "excess_db": null,
+      "start_s": null,
+      "end_s": null,
+      "detected": null
+    }
+  ],
+  "schema": 2
+}

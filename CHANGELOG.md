@@ -8,6 +8,24 @@ What changed for people who use the dechatter widget and command line. The forma
 
 ### Changed
 
+- The widget runs a round itself: press Start in the widget instead of loading the program
+  into cncjs and pressing play. It sends one move at a time through cncjs and waits for the
+  controller to report Idle at its end, so it knows exactly when each cut starts and ends
+  and records those windows with the sound. Hold, Resume and Stop are in the widget; Stop
+  always holds first and resets the controller only once it has reported the hold complete
+  (or Idle) and nothing has changed for a second; if the connection drops meanwhile, nothing
+  is reset, then or on reconnect. An alarm (its state or an `ALARM:` line) ends the round with
+  nothing more sent and is left for you to clear (the widget never unlocks). With a
+  manual spindle no `M0` is sent: the widget asks for each speed and waits for Continue, so
+  the "set the spindle" prompt shows only once the machine has stopped. Start is refused
+  while cncjs runs a job of its own, in alarm or hold, or before the machine's units are
+  known, and a job cncjs starts during the round stops it. If the machine refuses, or the
+  microphone closes, while the round is being prepared, it does not start and no recording
+  is kept. While a round runs,
+  or starts, its session stays open: the session list, New, Import and Setup wait for it to
+  end.
+  `program.nc` is still written, unchanged, for the command line.
+
 - On a machine in G20 the whole widget shows inches, not only the wizard and the programs:
   the session summary, round headings and pass table, the front face position, the best
   cuts, the chip-load sweep result and the stability map's axes. Inches have 4 decimals
@@ -27,6 +45,27 @@ What changed for people who use the dechatter widget and command line. The forma
   works for sessions that no longer load, such as ones from dechatter 0.1.x. One whose setup
   does not load cannot be exported, and the confirmation says so instead. It is refused while the session
   records or a cncjs job of its program runs.
+
+### Fixed
+
+- Cuts were matched to the wrong passes, seen on a real manual-spindle session: light cuts at
+  a low speed fell under one level threshold for the whole recording, and the rest slid onto
+  the wrong passes; passes never run had cuts forced onto them. A round the widget runs is
+  now analysed from the cut and dwell windows it recorded. A recording without them is
+  searched against the spindle's own noise around each cut, keeps the pass order with the
+  narrowest cuts taken as the unheard ones, and marks passes after the last cut as "likely
+  not run". A widget run that ended before its first cut leaves the round to run again,
+  and a cut stopped before the cutter reached the stock counts as not run. A hold before
+  the cutter reaches the stock no longer puts air into the cut analysed. Silence in a
+  recording, even most of it (a recorder left running after the round), short pauses with
+  the spindle off, or silence broken up by knocks, is told from a quiet spindle under loud
+  cuts, and no longer hides the spindle's level.
+  A pass whose spindle speed was found at the edge of its search is flagged.
+- A recording could get stuck with no way to stop it, and Export was disabled meanwhile. The
+  recording now follows the widget's own run, which always ends (Stop, the last pass, an
+  error or a lost connection) and keeps the cuts made. A run held for a minute, or a machine
+  idle but not where its move ends, points to Stop. Export works during a run, without the
+  round in progress, and says so.
 
 ## [0.2.0] - 2026-11-12
 

@@ -87,11 +87,22 @@ a page the microphone on those. Then, in the widget:
    plan uses the new setup. `dechatter plan` refuses the same changes made by hand.
 2. Plan a round. Round 1 is a coarse grid of speeds and widths.
 3. Set the work zero at the left end of the stock, on its front face, at the top.
-4. Load the program into cncjs and press play in cncjs. The widget never starts the machine.
-   To check the toolpath first, raise Z zero and run the round in the air, then Reset the
-   session (next to the session list) and set Z zero back on the top of the stock.
-5. Recording starts when the job starts and stops when it ends. The widget then shows each
-   pass as stable or chatter, the stability map and the best cuts so far.
+4. Press Start. The widget runs the round itself through cncjs, one move at a time: it
+   sends a move, waits until the controller reports Idle at its end, then sends the next.
+   So it knows when every cut starts and ends, and records those times with the sound; at
+   most one move is ever queued, so if the tab closes or the connection drops the machine
+   finishes that move and stands. Hold, Resume and Stop are in the widget (cncjs's own feed
+   hold works too). Stop holds, waits until the controller reports the hold complete (or
+   Idle) and nothing changes for a second, then resets it; if the hold never completes, or
+   the connection drops meanwhile, it does not reset, and says so. An alarm stops the round with nothing more sent and is left for you
+   to clear in cncjs (home, or unlock): the widget never unlocks. While a round runs, its
+   session stays open: the session list, New, Import and Setup wait for it to end. Start is refused while cncjs runs a job of its own, while the machine is in
+   alarm or held, or before its G20/G21 mode is known, and a job cncjs starts during the
+   round stops the round. To check the toolpath first, raise Z zero and run the round in the
+   air, then Reset the session (next to the session list) and set Z zero back on the top of
+   the stock.
+5. Recording starts with Start and stops when the last pass ends, or on Stop. The widget
+   then shows each pass as stable or chatter, the stability map and the best cuts so far.
 6. If your ears disagree with a verdict, change it in the table. Plan the next round and
    repeat until the widget reports convergence.
 7. Optionally, plan the chip-load sweep it then offers: the best cut once more at five
@@ -113,9 +124,11 @@ browser kept any of that processing on.
 
 Sessions are stored in that browser (IndexedDB), per cncjs address. Export saves one as a zip
 holding `setup.toml` and each round's plan, program, `recording.wav`, results and the job
-timeline cncjs reported, plus `report.html`. Import loads it in another browser, and unzipped it is a session
+timeline of the run (each pass's cut and dwell windows), plus `report.html`. Import loads it in another browser, and unzipped it is a session
 folder the command line reads. Keep the tab open while a round runs: the recording lives in
-the page until the job ends. Reset, next to the session list, discards every round and
+the page until the round ends. Export works during a run too, without that round. If a run
+seems stuck (held for a minute, or the machine idle but not where its move ends), the widget
+says so and points to Stop, which keeps and analyses the cuts made so far. Reset, next to the session list, discards every round and
 keeps the setup, so the session starts again from round 1 and its setup can be changed
 freely (`dechatter reset <session>` on the command line); it needs a setup that loads,
 though its rounds need not. Delete removes a session for good after asking, and offers
@@ -127,9 +140,10 @@ Both are refused while that session records or its job runs.
 
 If the spindle is started and set by hand, choose "me, by hand" on the wizard's first step
 (`spindle = "manual"` under `[machine]` in a setup file). The program then never commands the
-spindle. It stops with `M0` before each speed, with
-the cutter clear of the work, and the widget (and cncjs) shows the speed to set. Set it and
-press resume in cncjs. Cuts are grouped by speed, lightest first, so a round has one stop per
+spindle. In the widget, the round stops before each speed with the cutter clear of the work
+and shows the speed to set: set it and press Continue. The program file (`program.nc`, for
+the command line) stops with `M0` at the same places instead: set the speed and press resume
+in cncjs. Cuts are grouped by speed, lightest first, so a round has one stop per
 speed: five in round 1. The first stop is where you start the spindle, and you stop it yourself
 after the program ends.
 
@@ -185,9 +199,19 @@ remaining spectrum and at least 10 dB above the same frequency in the dwell just
 pass, when the spindle was turning in air. The second test rejects tones the machine makes
 without cutting, such as drive whine.
 
-Passes are found in the recording by level, then matched in order to the planned passes by
-how long each cut should last. A quiet pass that goes undetected is reported as missing and
-does not shift the others. If matching fails, mark the cuts yourself and pass
+When the widget ran the round, it recorded where every cut and every dwell is, and those
+windows are used as they are: the cut from where the cutter meets the stock to where it
+leaves it, without any time the machine was held, and the dwell before it as the air
+reference. A pass the run never reached is "not run". A run that ended before its first cut
+is not analysed, and the round stays planned to run again.
+
+A recording made otherwise (the command line, a phone) is searched for its cuts by their
+level over the spindle's own noise around them, since the spindle gets louder as it speeds
+up and a light cut is only a few dB over it. The cuts found are matched in order to the
+planned passes by how long each should last; at one speed the narrowest cuts are the ones
+that can go unheard, so those are the ones taken as missing. Passes after the last cut heard
+are "likely not run" (a verdict can still be set by hand, should one have run unheard), and a pass whose spindle speed was found at the edge of its ±5% search is
+flagged ("speed?" in the widget). If matching fails, mark the cuts yourself and pass
 `--segments labels.txt` (start and end seconds per pass; an Audacity label export works).
 
 `results.json` in each round holds the verdicts and the numbers behind them. If your ears
@@ -258,6 +282,7 @@ mount it, reset the face to `Y0` and run `dechatter plan --new-stock`.
 uv sync
 uv run pytest
 uv run ruff check .
+node --test tests/js/stepper.test.mjs   # the widget's stepper against a scripted controller
 uv run validation/purdue.py ~/purdue-cache   # downloads about 370 MB once
 ```
 

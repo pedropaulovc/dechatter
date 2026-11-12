@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 
 from . import audio, bayes, gcode, session
-from .config import SetupSource, read_setup, setup_source
+from .config import Setup, SetupSource, read_setup, setup_source
 from .detect import Thresholds, Verdict
 from .plan import PassKind, envelope, feed_mm_min
 from .session import PassStatus, SessionError, Stock
@@ -24,7 +24,7 @@ from .session import PassStatus, SessionError, Stock
 log = logging.getLogger(__name__)
 
 RECORDING_FILE = session.RECORDING_FILE
-TIMELINE_FILE = "timeline.json"
+TIMELINE_FILE = session.TIMELINE_FILE
 TOP_RESULTS = 5
 PROGRAM_ID_LENGTH = 6
 
@@ -149,6 +149,7 @@ class App:
                     "verdict": result.verdict if result else None,
                     "chatter_hz": result.chatter_hz if result else None,
                     "prominence_db": result.prominence_db if result else None,
+                    "spindle_fit": session.spindle_fit(result) if result else None,
                 }
             )
         return {
@@ -185,17 +186,31 @@ class App:
         session.plan_sweep(self.session_dir, self.source, self.env, stock)
         self.discarded_round = None
 
+    def _planned(self, number: int) -> tuple[session.Round, Setup]:
+        target = self._round(number)
+        return target, session.at_depth(session.planned_with(target), target.plan.axial_depth_mm)
+
     def program(self, number: int, units: gcode.Units) -> str:
         """The round's program in the machine's units. The file beside the plan is in mm."""
-        target = self._round(number)
-        planned = session.at_depth(session.planned_with(target), target.plan.axial_depth_mm)
+        target, planned = self._planned(number)
         return gcode.render(target.plan, planned, units)
+
+    def steps(self, number: int, units: gcode.Units) -> list[dict]:
+        """The round's program as the blocks the widget runs one at a time."""
+        target, planned = self._planned(number)
+        return [asdict(block) for block in gcode.blocks(target.plan, planned, units)]
 
     def record_start(self, number: int) -> None:
         if self.recording_round is not None:
             raise SessionError(f"already recording round {self.recording_round}")
         self._round(number)
         self.recording_round = number
+
+    def record_cancel(self) -> None:
+        """Drop the recording under way unsaved: the run ended before it sent a block."""
+        if self.recording_round is None:
+            raise SessionError("not recording")
+        self.recording_round = None
 
     def record_stop(self, samples: np.ndarray, rate: int, timeline: list) -> None:
         """Keep the recording and the job timeline cncjs reported, then analyse."""
@@ -229,7 +244,9 @@ class App:
         passes = []
         for p in target.results.passes:
             if p.id == pass_id:
-                status = PassStatus.ANALYSED if p.status is PassStatus.MISSING else p.status
+                if p.status is PassStatus.NOT_RUN:
+                    raise SessionError(f"pass {pass_id} of round {number} was never run")
+                status = PassStatus.ANALYSED if p.status in session.UNHEARD else p.status
                 p = session.PassResult(**{**asdict(p), "verdict": verdict, "status": status})
             passes.append(p)
         if all(p.id != pass_id or p.kind is not PassKind.TEST for p in passes):

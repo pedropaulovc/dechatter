@@ -1,0 +1,191 @@
+{
+  "round": 1,
+  "planner": "grid",
+  "flutes": 2,
+  "diameter_mm": 12.7,
+  "axial_depth_mm": 5.08,
+  "chip_load_mm": 0.0889,
+  "face_y_start_mm": 0.0,
+  "dwell_s": 4,
+  "plunge_s": 3.23,
+  "passes": [
+    {
+      "id": 0,
+      "kind": "truing",
+      "rpm": 570,
+      "width_mm": 0.2,
+      "feed_mm_min": 101.3,
+      "expected_cut_s": 31.95,
+      "lead_in_s": 4.6,
+      "p_stable": null,
+      "chip_load_mm": null
+    },
+    {
+      "id": 1,
+      "kind": "test",
+      "rpm": 570,
+      "width_mm": 0.6,
+      "feed_mm_min": 101.3,
+      "expected_cut_s": 33.27,
+      "lead_in_s": 3.94,
+      "p_stable": null,
+      "chip_load_mm": null
+    },
+    {
+      "id": 2,
+      "kind": "test",
+      "rpm": 570,
+      "width_mm": 1.3,
+      "feed_mm_min": 101.3,
+      "expected_cut_s": 34.63,
+      "lead_in_s": 3.26,
+      "p_stable": null,
+      "chip_load_mm": null
+    },
+    {
+      "id": 3,
+      "kind": "test",
+      "rpm": 570,
+      "width_mm": 2.2,
+      "feed_mm_min": 101.3,
+      "expected_cut_s": 35.77,
+      "lead_in_s": 2.69,
+      "p_stable": null,
+      "chip_load_mm": null
+    },
+    {
+      "id": 4,
+      "kind": "test",
+      "rpm": 990,
+      "width_mm": 0.6,
+      "feed_mm_min": 176.0,
+      "expected_cut_s": 19.15,
+      "lead_in_s": 2.27,
+      "p_stable": null,
+      "chip_load_mm": null
+    },
+    {
+      "id": 5,
+      "kind": "test",
+      "rpm": 990,
+      "width_mm": 1.3,
+      "feed_mm_min": 176.0,
+      "expected_cut_s": 19.94,
+      "lead_in_s": 1.87,
+      "p_stable": null,
+      "chip_load_mm": null
+    },
+    {
+      "id": 6,
+      "kind": "test",
+      "rpm": 990,
+      "width_mm": 2.2,
+      "feed_mm_min": 176.0,
+      "expected_cut_s": 20.59,
+      "lead_in_s": 1.55,
+      "p_stable": null,
+      "chip_load_mm": null
+    },
+    {
+      "id": 7,
+      "kind": "test",
+      "rpm": 1410,
+      "width_mm": 0.6,
+      "feed_mm_min": 250.7,
+      "expected_cut_s": 13.45,
+      "lead_in_s": 1.59,
+      "p_stable": null,
+      "chip_load_mm": null
+    },
+    {
+      "id": 8,
+      "kind": "test",
+      "rpm": 1410,
+      "width_mm": 1.3,
+      "feed_mm_min": 250.7,
+      "expected_cut_s": 14.0,
+      "lead_in_s": 1.32,
+      "p_stable": null,
+      "chip_load_mm": null
+    },
+    {
+      "id": 9,
+      "kind": "test",
+      "rpm": 1410,
+      "width_mm": 2.2,
+      "feed_mm_min": 250.7,
+      "expected_cut_s": 14.46,
+      "lead_in_s": 1.09,
+      "p_stable": null,
+      "chip_load_mm": null
+    },
+    {
+      "id": 10,
+      "kind": "test",
+      "rpm": 1830,
+      "width_mm": 0.6,
+      "feed_mm_min": 325.4,
+      "expected_cut_s": 10.36,
+      "lead_in_s": 1.23,
+      "p_stable": null,
+      "chip_load_mm": null
+    },
+    {
+      "id": 11,
+      "kind": "test",
+      "rpm": 1830,
+      "width_mm": 1.3,
+      "feed_mm_min": 325.4,
+      "expected_cut_s": 10.79,
+      "lead_in_s": 1.01,
+      "p_stable": null,
+      "chip_load_mm": null
+    },
+    {
+      "id": 12,
+      "kind": "test",
+      "rpm": 1830,
+      "width_mm": 2.2,
+      "feed_mm_min": 325.4,
+      "expected_cut_s": 11.14,
+      "lead_in_s": 0.84,
+      "p_stable": null,
+      "chip_load_mm": null
+    },
+    {
+      "id": 13,
+      "kind": "test",
+      "rpm": 2250,
+      "width_mm": 0.6,
+      "feed_mm_min": 400.1,
+      "expected_cut_s": 8.43,
+      "lead_in_s": 1.0,
+      "p_stable": null,
+      "chip_load_mm": null
+    },
+    {
+      "id": 14,
+      "kind": "test",
+      "rpm": 2250,
+      "width_mm": 1.3,
+      "feed_mm_min": 400.1,
+      "expected_cut_s": 8.77,
+      "lead_in_s": 0.82,
+      "p_stable": null,
+      "chip_load_mm": null
+    },
+    {
+      "id": 15,
+      "kind": "test",
+      "rpm": 2250,
+      "width_mm": 2.2,
+      "feed_mm_min": 400.1,
+      "expected_cut_s": 9.06,
+      "lead_in_s": 0.68,
+      "p_stable": null,
+      "chip_load_mm": null
+    }
+  ],
+  "planned_on": "2026-11-11",
+  "schema": 2
+}

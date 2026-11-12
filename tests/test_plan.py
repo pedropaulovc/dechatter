@@ -197,3 +197,32 @@ def test_a_setup_from_dechatter_0_1_is_refused_with_what_to_do():
     old = (Path(__file__).parent / "fixtures" / "setup-0.1.1.toml").read_text()
     with pytest.raises(ConfigError, match=r"from dechatter 0\.1\.x.*start a new session"):
         parse_setup(old, "setup.toml")
+
+
+def test_the_widget_runs_the_program_as_blocks_with_targets_in_mm(setup, write_setup):
+    plan = round1(setup, face=4.0)
+    blocks = {}
+    for units in gcode.Units:
+        blocks[units] = gcode.blocks(plan, setup, units)
+        program = gcode.render(plan, setup, units).splitlines()
+        # The blocks send exactly the program's own lines, but for its comments, its dwells
+        # (the widget times them) and the end of program.
+        own = [line for line in program if not line.startswith(("(", "G4", "M0")) and line != "M30"]
+        assert [line for b in blocks[units] for line in b.lines] == own
+    steps = [b.step for b in blocks[MM]]
+    assert steps.count(gcode.Step.CUT) == steps.count(gcode.Step.DWELL) == len(plan.passes)
+    assert {b.seconds for b in blocks[MM] if b.step is gcode.Step.DWELL} == {plan.dwell_s}
+    # Positions to wait for are in mm whatever the program's units.
+    for mm, inch in zip(blocks[MM], blocks[gcode.Units.INCH], strict=True):
+        assert (mm.target is None) == (inch.target is None)
+        for axis, value in (mm.target or {}).items():
+            assert inch.target[axis] == pytest.approx(value, abs=0.003)
+    cut = next(b for b in blocks[MM] if b.step is gcode.Step.CUT)
+    assert cut.target["x"] > setup.stock.length_mm and cut.target["z"] == -plan.axial_depth_mm
+
+    manual = load_setup(write_setup(**MANUAL))
+    manual_blocks = gcode.blocks(round1(manual), manual, MM)
+    asks = [b for b in manual_blocks if b.step is gcode.Step.SET_SPINDLE]
+    assert [b.rpm for b in asks] == sorted({p.rpm for p in round1(manual).passes})
+    assert all(b.lines == () and b.target is None for b in asks)
+    assert not [line for b in manual_blocks for line in b.lines if line.startswith(("M0", "M3"))]
