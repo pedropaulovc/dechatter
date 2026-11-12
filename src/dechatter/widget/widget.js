@@ -45,6 +45,12 @@ let timeline = []; // what cncjs reported since the job last started; saved with
 // Engine requests in flight; the controls wait while there are any.
 let requests = 0;
 const busy = () => requests > 0;
+
+// Every request ends here: a job that started while it was in flight is recorded now.
+function requestDone() {
+  requests -= 1;
+  syncRecording();
+}
 // The delete or reset confirmation: closed, being prepared, or open. While it is not
 // closed, the session it names cannot change.
 let dialog = 'closed';
@@ -103,8 +109,7 @@ async function act(method, ...args) {
   } catch (err) {
     showError(err.message);
   } finally {
-    requests -= 1;
-    syncRecording();
+    requestDone();
     render();
   }
 }
@@ -138,7 +143,7 @@ async function checkSetup(name) {
       showError(err.message);
     }
   } finally {
-    requests -= 1;
+    requestDone();
   }
 }
 
@@ -377,7 +382,7 @@ async function confirmed() {
   } catch (err) {
     showError(err.message);
   } finally {
-    requests -= 1;
+    requestDone();
   }
   render();
 }
@@ -601,7 +606,7 @@ async function loadProgram(round) {
   } catch (err) {
     showError(err.message);
   } finally {
-    requests -= 1;
+    requestDone();
     render();
   }
 }

@@ -761,6 +761,36 @@ def test_a_reset_is_refused_while_recording_and_undone_if_it_fails(engine, monke
     assert not list(folder.glob(".discarded-*"))
 
 
+def test_a_finished_reset_that_could_not_delete_its_rounds_is_swept_later(engine, monkeypatch):
+    engine.call("plan", NAME, "same")
+    engine.run_round(1)
+    folder = engine.root / NAME
+    real = Path.rename
+
+    def no_discard(self, target):
+        if self.name.startswith(".reset-"):
+            raise OSError("storage refused")
+        return real(self, target)
+
+    monkeypatch.setattr(Path, "rename", no_discard)
+    assert engine.call("reset", NAME)["rounds"] == []
+    left = [p for p in folder.glob(".reset-*") if p.is_dir()]
+    assert len(left) == 1 and (left[0] / "round-01" / "recording.wav").exists()
+    assert left[0].with_name(left[0].name + ".done").exists()
+    # Meanwhile Export leaves the discarded rounds out.
+    names = zipfile.ZipFile(io.BytesIO(engine.call("export_zip", NAME, "mm"))).namelist()
+    assert not [n for n in names if ".reset-" in n or ".discarded-" in n]
+
+    monkeypatch.undo()
+    Engine(engine.root).call("setup_form", NAME)  # opening the session sweeps
+    assert sorted(p.name for p in folder.iterdir()) == [session.SETUP_FILE]
+
+    # An empty one, left when everything was put back but its removal failed, goes too.
+    (folder / ".reset-0badc0de").mkdir()
+    session.sweep_discarded(folder)
+    assert sorted(p.name for p in folder.iterdir()) == [session.SETUP_FILE]
+
+
 def test_a_reset_goes_ahead_when_the_report_cannot_be_removed(engine, monkeypatch):
     engine.call("plan", NAME, "same")
     report = engine.root / NAME / "report.html"

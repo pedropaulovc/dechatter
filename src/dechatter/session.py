@@ -656,8 +656,9 @@ def set_aside(r: Round) -> Path:
 
 
 def sweep_discarded(session: Path) -> None:
-    """Delete what is left of rounds discarded earlier (`.discarded-*` only); one that will
-    not go is left for the next sweep."""
+    """Delete what is left of rounds discarded earlier, and of resets that did not finish
+    (see RESETTING); one that will not go is left for the next sweep."""
+    _finish_resets(session)
     for leftover in session.glob(f"{DISCARDED}*"):
         try:
             shutil.rmtree(leftover)
@@ -681,11 +682,43 @@ class Contents:
     recordings: int
 
 
-# A reset moves the rounds into `.reset-<hex>`, which no sweep touches and Export keeps.
-# Only once every round is in it is it renamed `.discarded-<hex>` and deleted. So a reset
-# that fails part-way, or cannot rename its folder, leaves rounds only where they are safe:
-# back in the session, or in `.reset-<hex>`, which the error names.
+# A reset moves the rounds into `.reset-<hex>`. Once every round is in it, a sibling file
+# `.reset-<hex>.done` marks it as meant to go, and it is renamed `.discarded-<hex>` and
+# deleted. Whatever of that fails, the sweep finishes: it deletes a marked `.reset-*` and an
+# empty one, and keeps an unmarked one with rounds in it. That one holds rounds a failed
+# reset could not put back: the error named it, no sweep deletes it, and Export keeps it.
 RESETTING = ".reset-"
+DONE = ".done"
+
+
+def _done(aside: Path) -> Path:
+    return aside.with_name(aside.name + DONE)
+
+
+def finished_reset(path: Path) -> bool:
+    """A reset's folder, or its marker, that is only waiting to be deleted."""
+    if path.name.endswith(DONE):
+        return path.name.startswith(RESETTING)
+    return path.name.startswith(RESETTING) and _done(path).exists()
+
+
+def _finish_resets(session: Path) -> None:
+    for aside in session.glob(f"{RESETTING}*"):
+        if not aside.is_dir():
+            if aside.name.endswith(DONE) and not aside.with_name(aside.name[: -len(DONE)]).exists():
+                aside.unlink(missing_ok=True)
+            continue
+        try:
+            if not any(aside.iterdir()):
+                aside.rmdir()
+            elif _done(aside).exists():
+                discarded = session / f"{DISCARDED}{aside.name[len(RESETTING) :]}"
+                aside.rename(discarded)
+            else:
+                continue
+            _done(aside).unlink(missing_ok=True)
+        except OSError as exc:
+            log.warning("could not finish %s: %s", aside.name, exc)
 
 
 def _put_back(session: Path, aside: Path, moved: list[Path], exc: OSError) -> None:
@@ -738,11 +771,17 @@ def reset(session: Path) -> None:
         (session / REPORT_FILE).unlink(missing_ok=True)
     except OSError as exc:
         log.warning("reset %s: could not remove %s: %s", session.name, REPORT_FILE, exc)
+    try:
+        _done(aside).touch()
+    except OSError as exc:
+        log.warning("reset %s: the discarded rounds stay in %s: %s", session.name, aside, exc)
+        return
     discarded = session / f"{DISCARDED}{marker}"
     try:
         aside.rename(discarded)
+        _done(aside).unlink()
     except OSError as exc:
-        log.warning("reset %s: the discarded rounds stay in %s: %s", session.name, aside, exc)
+        log.warning("reset %s: the next sweep deletes %s: %s", session.name, aside, exc)
         return
     try:
         shutil.rmtree(discarded)

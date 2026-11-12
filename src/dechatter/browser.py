@@ -241,9 +241,9 @@ class Sessions:
         with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
             for path in sorted(self._dir(name).rglob("*")):
                 inside = path.relative_to(self._dir(name))
-                if inside.parts[0].startswith(session.DISCARDED) or inside == Path(
-                    report.REPORT_FILE
-                ):
+                top = self._dir(name) / inside.parts[0]
+                left = inside.parts[0].startswith(session.DISCARDED) or session.finished_reset(top)
+                if left or inside == Path(report.REPORT_FILE):
                     continue
                 if path.is_file():
                     archive.write(path, f"{name}/{inside.as_posix()}")
