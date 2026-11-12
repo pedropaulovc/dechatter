@@ -19,8 +19,9 @@ What changed for people who use the dechatter widget and command line. The forma
   manual spindle no `M0` is sent: the widget asks for each speed and waits for Continue, so
   the "set the spindle" prompt shows only once the machine has stopped. Start is refused
   while cncjs runs a job of its own, in alarm or hold, or before the machine's units are
-  known, and a job cncjs starts during the round stops it. If the machine refuses while the
-  round is being prepared, it does not start and no recording is kept. While a round runs,
+  known, and a job cncjs starts during the round stops it. If the machine refuses, or the
+  microphone closes, while the round is being prepared, it does not start and no recording
+  is kept. While a round runs,
   or starts, its session stays open: the session list, New, Import and Setup wait for it to
   end.
   `program.nc` is still written, unchanged, for the command line.
@@ -56,8 +57,9 @@ What changed for people who use the dechatter widget and command line. The forma
   not run". A widget run that ended before its first cut leaves the round to run again,
   and a cut stopped before the cutter reached the stock counts as not run. A hold before
   the cutter reaches the stock no longer puts air into the cut analysed. Silence in a
-  recording, even most of it (a recorder left running after the round), is told from a
-  quiet spindle under loud cuts, and no longer hides the spindle's level.
+  recording, even most of it (a recorder left running after the round), short pauses with
+  the spindle off, or silence broken up by knocks, is told from a quiet spindle under loud
+  cuts, and no longer hides the spindle's level.
   A pass whose spindle speed was found at the edge of its search is flagged.
 - A recording could get stuck with no way to stop it, and Export was disabled meanwhile. The
   recording now follows the widget's own run, which always ends (Stop, the last pass, an

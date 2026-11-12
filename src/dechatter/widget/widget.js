@@ -679,11 +679,15 @@ async function startRound(round) {
   }
 }
 
-// Why a round about to start cannot: the machine now refuses, or the stepper was ended
-// (a lost link, an error or alarm line, a cncjs job) before it sent a block; '' if it can.
+// Why a round about to start cannot: the machine now refuses, the microphone closed, or
+// the stepper was ended (a lost link, an error or alarm line, a cncjs job) before it sent
+// a block; '' if it can.
 function notStartedReason(stepper) {
   if (stepper.finished) {
     return `The round did not start: ${stepper.reason.replace(/\.$/, '')}. Nothing was sent.`;
+  }
+  if (!mic.open) {
+    return 'The round did not start: the microphone closed. Enable it, then press Start again.';
   }
   return machineRefusal();
 }

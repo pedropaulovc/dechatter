@@ -10,7 +10,7 @@ import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-import { PHASE, Stepper } from '../src/dechatter/widget/stepper.js';
+import { PHASE, REST, restOf, Stepper } from '../src/dechatter/widget/stepper.js';
 
 const cache = process.env.DECHATTER_E2E_CACHE || join(homedir(), '.cache', 'dechatter-e2e');
 const args = process.argv.slice(2);
@@ -89,22 +89,24 @@ const start = async () => {
     // What reached the controller, and when it said it had stopped.
     const hold = written.find((w) => w.what === 'feedhold');
     const reset = written.find((w) => w.what === 'reset');
-    // The last report between the hold and the reset: it must say the machine was at rest,
-    // and nothing may have changed for most of a second (cncjs polls every 250 ms).
-    const last = hold && reset && reports.findLast((r) => r.t >= hold.t && r.t <= reset.t);
+    // The last change the controller reported between the hold and the reset (its state or
+    // position; cncjs also reports feed or buffer changes): it must leave the machine at
+    // rest, and must have come most of a second before the reset (cncjs polls every 250 ms).
+    const between = hold && reset ? reports.filter((r) => r.t >= hold.t && r.t <= reset.t) : [];
+    const last = between.findLast((r, i) => i === 0 || r.state !== between[i - 1].state || r.wpos !== between[i - 1].wpos);
     const problems = [
       phase !== PHASE.STOPPED && `ended ${phase}`,
       !hold && 'no feed hold was sent',
       !reset && 'no reset was sent',
       hold && reset && !last && 'nothing was reported between the hold and the reset',
       last && last.rest === REST.OTHER && `reset while the machine reported ${last.state}`,
-      last && reset.t - last.t < 900 && `reset ${reset.t - last.t} ms after the last report`,
+      last && reset.t - last.t < 900 && `reset ${reset.t - last.t} ms after the last change reported`,
       written.some((w) => w.what === 'unlock') && 'an unlock ($X) was sent',
       lastState === 'Alarm' && 'the controller is in alarm',
     ].filter(Boolean);
     const ok = problems.length === 0;
     const at = (w) => (w ? `${(w.t - t0) / 1000}s` : 'never');
-    log(`${ok ? 'PASS' : `FAIL (${problems.join('; ')})`}: stopped in cut ${stopInCut} at ${stopAt}: ${phase}; hold ${at(hold)}, last report ${last?.state ?? 'none'} ${at(last)}, reset ${at(reset)}; controller ${lastState}; aborted window: ${JSON.stringify(windows.at(-1))}`);
+    log(`${ok ? 'PASS' : `FAIL (${problems.join('; ')})`}: stopped in cut ${stopInCut} at ${stopAt}: ${phase}; hold ${at(hold)}, last change ${last?.state ?? 'none'} ${at(last)}, reset ${at(reset)}; controller ${lastState}; aborted window: ${JSON.stringify(windows.at(-1))}`);
     socket.emit('close', port, () => process.exit(ok ? 0 : 1));
     return;
   }
@@ -138,22 +140,12 @@ socket.on('startup', () => socket.emit('open', port, { controllerType: 'Grbl', b
 socket.on('controller:settings', () => setTimeout(start, 500));
 socket.on('serialport:open', () => setTimeout(start, 1500));
 let lastState = '';
-// What a report says of the machine's motion.
-const REST = {
-  IDLE: 'idle',
-  HOLD_COMPLETE: 'hold-complete', // Hold:0
-  OTHER: 'other', // moving, decelerating, or in another state
-};
-const rest = (activeState, subState) => {
-  if (activeState === 'Idle') return REST.IDLE;
-  if (activeState === 'Hold' && subState === 0) return REST.HOLD_COMPLETE;
-  return REST.OTHER;
-};
-const reports = []; // { t, state, rest }: each controller state cncjs reported
+const reports = []; // { t, state, wpos, rest }: each controller state cncjs reported
 socket.on('controller:state', (_t, state) => {
   const { activeState, subState, wpos } = state?.status ?? {};
   lastState = activeState;
-  reports.push({ t: Date.now(), state: activeState === 'Hold' ? `Hold:${subState}` : activeState, rest: rest(activeState, subState) });
+  const shown = activeState === 'Hold' ? `Hold:${subState}` : activeState;
+  reports.push({ t: Date.now(), state: shown, wpos: JSON.stringify(wpos), rest: restOf({ activeState, subState }) });
   stepper.controller({ activeState, subState, wpos });
 });
 // What cncjs wrote to the controller, from any sender: the realtime bytes included.

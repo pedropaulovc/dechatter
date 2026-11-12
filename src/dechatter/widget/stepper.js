@@ -47,8 +47,26 @@ const HALT = {
 // what is emitted while disconnected and sends it on reconnect, maybe minutes later.
 const LINK = { UP: 'up', LOST: 'lost' };
 
-// A report that says the machine is at rest, once nothing changes for QUIET_S.
-const atRest = (state) => state.activeState === 'Idle' || (state.activeState === 'Hold' && state.subState === 0);
+// What a report says of the machine's motion. At rest (Idle, or a complete hold) counts
+// once nothing changes for QUIET_S.
+export const REST = {
+  IDLE: 'idle',
+  HOLD_COMPLETE: 'hold-complete', // Hold:0
+  OTHER: 'other', // moving, decelerating, or in another state
+};
+
+export const holdComplete = (state) => state.activeState === 'Hold' && state.subState === 0;
+
+export function restOf(state) {
+  if (state.activeState === 'Idle') {
+    return REST.IDLE;
+  }
+  return holdComplete(state) ? REST.HOLD_COMPLETE : REST.OTHER;
+}
+
+// Whether two reports differ in what the stepper sees: cncjs also reports when only the
+// feed, the spindle speed or the planner buffer changed.
+const changed = (a, b) => a.activeState !== b.activeState || a.subState !== b.subState || JSON.stringify(a.wpos) !== JSON.stringify(b.wpos);
 const UNSETTLED_ADVICE = 'so it was not reset. Make sure it has stopped, then reset it in cncjs.';
 
 // Positions match within this many mm: controllers report three decimals in mm, or four in
@@ -98,9 +116,7 @@ export class Stepper {
       this.alarm('an alarm');
       return;
     }
-    for (const resolve of this.watchers.splice(0)) {
-      resolve(this.state);
-    }
+    this.wakeWatchers();
     const away = this.phase === PHASE.MOVING && activeState === 'Idle' && !this.at(this.state.wpos, this.block?.target ?? {});
     this.idleAway = away ? (this.idleAway ?? this.now()) : null;
     const held = HOLD_STATES.has(activeState);
@@ -132,15 +148,21 @@ export class Stepper {
     }
     this.alarmedBy = what;
     this.end(PHASE.FAILED, `the controller reported ${what}. ${ALARM_ADVICE}`);
-    for (const resolve of this.watchers.splice(0)) {
-      resolve(this.state);
-    }
+    this.wakeWatchers();
   }
 
-  // The socket or the port went away. A halt under way ends at once, sending nothing.
+  // The socket or the port went away. A halt under way ends at once, sending nothing, and
+  // a run already ending keeps the reason it ended for.
   disconnected() {
     this.link = LINK.LOST;
-    this.end(PHASE.FAILED, 'the connection to cncjs or the machine was lost');
+    if (!this.finished && this.phase !== PHASE.STOPPING) {
+      this.end(PHASE.FAILED, 'the connection to cncjs or the machine was lost');
+    }
+    this.wakeWatchers();
+  }
+
+  // Wake halt(): a report came, or the run can no longer be halted.
+  wakeWatchers() {
     for (const resolve of this.watchers.splice(0)) {
       resolve(this.state);
     }
@@ -185,9 +207,6 @@ export class Stepper {
     if (this.alarmedBy !== null) {
       return HALT.ALARM;
     }
-    if (this.link === LINK.LOST) {
-      return HALT.UNSETTLED;
-    }
     if (was !== PHASE.MOVING && was !== PHASE.HELD) {
       // Dwelling or waiting for the spindle: the last move was seen to end where it should.
       this.io.reset();
@@ -209,19 +228,25 @@ export class Stepper {
     const since = this.now();
     let report = this.nextReport(); // watch before holding: the controller may answer at once
     this.io.feedhold();
-    let quietSince = this.state.activeState === 'Hold' && this.state.subState === 0 ? since : null;
+    let quietSince = holdComplete(this.state) ? since : null;
+    let last = this.state;
     for (;;) {
       const state = await Promise.race([report, this.sleep(POLL_MS).then(() => null)]);
       if (this.alarmedBy !== null) {
         return HALT.ALARM;
       }
       if (this.link === LINK.LOST) {
-        this.reason = `${this.reason} before the machine reported the hold complete, ${UNSETTLED_ADVICE}`;
+        this.reason = `${this.reason}; the connection was lost while stopping, ${UNSETTLED_ADVICE}`;
         return HALT.UNSETTLED;
       }
       if (state) {
         report = this.nextReport();
-        quietSince = atRest(state) ? this.now() : null;
+        if (restOf(state) === REST.OTHER) {
+          quietSince = null;
+        } else if (quietSince === null || changed(state, last)) {
+          quietSince = this.now();
+        }
+        last = state;
       }
       if (quietSince !== null && this.now() - quietSince >= QUIET_S) {
         this.io.reset();

@@ -16,6 +16,9 @@ const HOLD = {
   // cncjs emits an Idle from a `?` answered before the move started (a $G reply changed the
   // parser state), then the move and its hold.
   STALE_IDLE: 'stale-idle',
+  // Reports Hold:0, then keeps reporting it unchanged: cncjs emits on any change of its
+  // state, feed, spindle speed or planner buffer among them, none of which the stepper sees.
+  CHATTY: 'chatty',
 };
 
 // A controller as cncjs reports it: each move takes `seconds` of virtual time, shows Run
@@ -80,6 +83,15 @@ class Machine {
       this.report('Run');
       await tick();
       this.report('Hold', 0);
+      return;
+    }
+    if (this.hold === HOLD.CHATTY) {
+      this.report('Hold', 0);
+      this.heldAt = this.t;
+      for (let i = 0; i < 40; i += 1) {
+        await tick();
+        this.report('Hold', 0);
+      }
       return;
     }
     if (this.hold === HOLD.SLOWS) {
@@ -461,5 +473,20 @@ test('a lost connection during a stop ends it without a reset, then or on reconn
   assert.equal(await stepper.run(round([1])), PHASE.FAILED);
   assert.ok(!machine.log.includes('^X'), 'no reset to be buffered and sent on reconnect');
   assert.ok(machine.t < 5 + 10 + 2, 'it does not wait out the settle time');
-  assert.match(stepper.reason, /connection.*lost.*not reset/);
+  assert.match(stepper.reason, /^stopped by the operator; the connection was lost while stopping, so it was not reset/);
+});
+
+test('reports that change nothing the stepper sees do not delay the reset', async () => {
+  const machine = new Machine();
+  machine.hold = HOLD.CHATTY;
+  const { stepper } = machine.stepper_for();
+  machine.onMove = async (lines) => {
+    if (lines[0] === 'G1 X68 F500') {
+      machine.moving = false;
+      stepper.stop();
+    }
+  };
+  assert.equal(await stepper.run(round([1])), PHASE.STOPPED);
+  const after = machine.resetAt - machine.heldAt;
+  assert.ok(after >= 1 && after < 1.5, `reset ${after} s after Hold:0`);
 });
