@@ -20,11 +20,13 @@ What changed for people who use the dechatter widget and command line. The forma
   session starts again from round 1 and its setup can be changed freely, for instance after
   a run in the air to check the toolpath, or one with Z zero set wrong. It asks first,
   naming the rounds and recordings lost, offers Export first, and is refused while the
-  session records or a cncjs job of its program runs.
+  session records or a cncjs job of its program runs, and for a session whose setup does
+  not load (delete that one instead). A stale `report.html` in the session goes too.
 - **Delete** next to the widget's session list removes a session from the browser for good,
   after a confirmation that names its rounds and recordings and offers Export first. It
-  works for sessions that no longer load, such as ones from dechatter 0.1.x, and is refused
-  while the session records or a cncjs job of its program runs.
+  works for sessions that no longer load, such as ones from dechatter 0.1.x; those cannot
+  be exported, and the confirmation says so instead. It is refused while the session
+  records or a cncjs job of its program runs.
 
 ## [0.2.0] - 2026-11-12
 

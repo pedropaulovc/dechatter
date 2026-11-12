@@ -35,6 +35,7 @@ log = logging.getLogger(__name__)
 SCHEMA = 2  # 2: dechatter 0.2.0 (the detector's own verdict)
 SETUP_FILE = "setup.toml"
 RECORDING_FILE = "recording.wav"  # where the widget keeps a round's recording
+REPORT_FILE = "report.html"  # the last printable report, if one was written into the session
 PLAN_FILE = "plan.json"
 PROGRAM_FILE = "program.nc"
 RESULTS_FILE = "results.json"
@@ -679,30 +680,53 @@ class Contents:
     recordings: int
 
 
+def _put_back(session: Path, aside: Path, moved: list[Path], marker: str, exc: OSError) -> None:
+    """Return the rounds a failed reset moved; keep any that will not go back from the sweep."""
+    stuck = []
+    for folder in reversed(moved):
+        try:
+            (aside / folder.name).rename(folder)
+        except OSError:
+            stuck.append(folder.name)
+    if not stuck:
+        aside.rmdir()
+        return
+    kept = session / f".reset-failed-{marker}"
+    aside.rename(kept)
+    raise SessionError(
+        f"could not reset {session.name}: {exc}; {', '.join(stuck)} could not be put back "
+        f"and are in {kept}"
+    ) from exc
+
+
 def contents(session: Path) -> Contents:
     rounds = _round_dirs(session)
     return Contents(len(rounds), sum((r / RECORDING_FILE).exists() for r in rounds))
 
 
 def reset(session: Path) -> None:
-    """Discard every round, keeping the setup: the session starts over from round 1.
+    """Discard every round and the report, keeping the setup: the session starts over.
 
     The rounds are not read, so a damaged one goes too. They are moved aside together and
-    only then deleted; if moving one fails, those already moved are put back.
+    only then deleted. If moving one fails, those already moved are put back; any that
+    cannot be are left in a folder the sweep keeps, named in the error.
     """
     sweep_discarded(session)
-    aside = session / f"{DISCARDED}reset-{uuid.uuid4().hex[:8]}"
-    aside.mkdir()
-    moved: list[Path] = []
+    marker = uuid.uuid4().hex[:8]
+    aside = session / f"{DISCARDED}reset-{marker}"
     try:
-        for folder in _round_dirs(session):
-            folder.rename(aside / folder.name)
-            moved.append(folder)
-    except OSError:
-        for folder in reversed(moved):
-            (aside / folder.name).rename(folder)
-        aside.rmdir()
-        raise
+        aside.mkdir()
+        moved: list[Path] = []
+        try:
+            for folder in _round_dirs(session):
+                folder.rename(aside / folder.name)
+                moved.append(folder)
+        except OSError as exc:
+            _put_back(session, aside, moved, marker, exc)
+            raise
+    except OSError as exc:
+        raise SessionError(f"could not reset {session.name}: {exc}") from exc
+    (session / REPORT_FILE).unlink(missing_ok=True)
     log.info("reset %s: discarded %d rounds", session.name, len(moved))
     try:
         shutil.rmtree(aside)

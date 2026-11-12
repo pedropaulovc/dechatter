@@ -91,11 +91,17 @@ class Sessions:
             )
 
     def reset(self, name: str) -> dict:
-        """Discard every round of a session, keeping its setup; answer its new state."""
+        """Discard every round of a session, keeping its setup; answer its new state.
+
+        Only a session whose setup loads: one that does not (from dechatter 0.1.x, or
+        damaged) is refused before anything changes; Delete is the way to be rid of it.
+        """
         target = self._existing(name)
         self._not_recording(name, "reset")
         self._apps.pop(name, None)
+        self._app(name)
         session.reset(target)
+        self._apps.pop(name, None)
         return self.state(name)
 
     def delete(self, name: str) -> list[str]:

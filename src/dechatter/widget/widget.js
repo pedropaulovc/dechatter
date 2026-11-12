@@ -43,6 +43,7 @@ let state = null; // the current session, as the engine last reported it
 let editing = null; // { values, defaults, materials, computed, step } while the setup wizard is open, else null
 let timeline = []; // what cncjs reported since the job last started; saved with the recording
 let busy = false; // an engine request is in flight
+let confirming = false; // a delete or reset is being confirmed: its session cannot change
 let stockChoice = 'same'; // survives redraws: planning on the wrong face position cuts air or too deep
 
 // ---- engine (Python in a worker) -------------------------------------------------------
@@ -231,10 +232,10 @@ function download(blob, filename) {
 }
 
 // Both carry the report, whose lengths follow the machine's units (mm until known).
-async function exportSession() {
+async function exportSession(name = current) {
   try {
-    const bytes = await engine('export_zip', current, units());
-    download(new Blob([bytes], { type: 'application/zip' }), `${current}.zip`);
+    const bytes = await engine('export_zip', name, units());
+    download(new Blob([bytes], { type: 'application/zip' }), `${name}.zip`);
   } catch (err) {
     showError(err.message);
   }
@@ -284,12 +285,20 @@ const ACTIONS = {
     verb: 'Reset',
     question: (name, held) => `Reset session ${name}? Its ${plural(held.rounds, 'round')} and ${plural(held.recordings, 'recording')} are discarded; its setup stays, and planning starts again from round 1.`,
     note: 'Resetting cannot be undone. Export keeps a copy as a zip.',
+    // On a refusal or failure the session shows as the engine has it now.
     async run(name) {
-      editing = null;
-      if (name === current) {
-        state = null;
+      try {
+        const after = await engine('reset', name);
+        if (name === current) {
+          state = after;
+          editing = null;
+        }
+      } catch (err) {
+        if (name === current) {
+          state = await engine('state', name).catch(() => state);
+        }
+        throw err;
       }
-      await act('reset');
     },
   },
 };
@@ -302,14 +311,21 @@ async function ask(action) {
     showError(refusal);
     return;
   }
+  confirming = true;
+  render();
   try {
+    // A session that did not load cannot be exported (from dechatter 0.1.x, or damaged).
+    const loads = state !== null;
     $('confirm-question').textContent = question(name, await engine('contents', name));
-    $('confirm-note').textContent = note;
+    $('confirm-note').textContent = loads ? note : `${note.split('.')[0]}. This session cannot be exported: it is from dechatter 0.1.x, or damaged.`;
+    $('confirm-export').hidden = !loads;
     $('confirm-go').textContent = verb;
     Object.assign($('confirm-dialog').dataset, { session: name, action });
     $('confirm-dialog').showModal();
   } catch (err) {
+    confirming = false;
     showError(err.message);
+    render();
   }
 }
 
@@ -589,15 +605,17 @@ function renderSessions() {
     ...names.map((name) => el('option', { value: name }, name)),
   );
   select.value = names.includes(current) ? current : '';
-  select.disabled = busy || mic.recording;
+  select.disabled = busy || mic.recording || confirming;
   $('summary').textContent = state ? summary(state) : '';
   for (const id of ['edit-setup', 'export']) {
     $(id).disabled = !state || busy || mic.recording;
   }
   // Also for a session that failed to load: deleting it is the way to be rid of it.
   for (const [id, verb] of [['delete-session', 'Delete'], ['reset-session', 'Reset']]) {
-    $(id).disabled = !names.includes(current) || busy || Boolean(busyRefusal(current, verb));
+    $(id).disabled = !names.includes(current) || busy || confirming || Boolean(busyRefusal(current, verb));
   }
+  // Reset keeps the setup, so the setup has to load; Delete is the way out otherwise.
+  $('reset-session').disabled ||= state === null;
 }
 
 // The session's tool and cut in one line, lengths in the machine's units.
@@ -909,9 +927,13 @@ $('export').onclick = exportSession;
 $('delete-session').onclick = () => ask('delete');
 $('reset-session').onclick = () => ask('reset');
 // The page's error line is behind the dialog: say there how the export went.
+$('confirm-dialog').addEventListener('close', () => {
+  confirming = false;
+  render();
+});
 $('confirm-export').onclick = async () => {
   showError('');
-  await exportSession();
+  await exportSession($('confirm-dialog').dataset.session);
   const { verb } = ACTIONS[$('confirm-dialog').dataset.action];
   $('confirm-note').textContent = $('error').hidden ? `Exported. ${verb} it now, or cancel.` : `Not exported: ${$('error').textContent}`;
 };

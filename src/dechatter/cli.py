@@ -195,10 +195,13 @@ def cmd_reset(args: argparse.Namespace) -> int:
         raise SessionError(f"{args.session} is not a session: it has no {session.SETUP_FILE}")
     held = session.contents(args.session)
     if not args.yes:
-        answer = input(
-            f"Discard all {held.rounds} rounds and {held.recordings} recordings of "
-            f"{args.session}, keeping its setup? This cannot be undone. [y/N] "
-        )
+        try:
+            answer = input(
+                f"Discard all {held.rounds} rounds and {held.recordings} recordings of "
+                f"{args.session}, keeping its setup? This cannot be undone. [y/N] "
+            )
+        except EOFError:
+            answer = ""
         if answer.strip().lower() not in ("y", "yes"):
             print("nothing changed")
             return 1

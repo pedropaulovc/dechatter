@@ -8,9 +8,9 @@ const MM3_PER_IN3 = MM_PER_INCH ** 3;
 // Enough decimals that a hundred-thousandth of an inch survives the trip to millimetres.
 export const tidy = (number) => Number(number.toFixed(5));
 
-// "5.08 mm", or "0.2000 in" and with `mmToo` "0.2000 in (5.08 mm)". Millimetres drop
+// "3.175 mm", or "0.1250 in" and with `mmToo` "0.1250 in (3.175 mm)". Millimetres drop
 // trailing zeros: "5 mm".
-export function length(mm, units, { mmToo = false, places = 2, inchPlaces = 4 } = {}) {
+export function length(mm, units, { mmToo = false, places = 3, inchPlaces = 4 } = {}) {
   const metric = `${Number(mm.toFixed(places))} mm`;
   if (units !== 'in') {
     return metric;

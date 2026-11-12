@@ -727,12 +727,40 @@ def test_a_reset_is_refused_while_recording_and_undone_if_it_fails(engine, monke
         return real(self, target)
 
     monkeypatch.setattr(Path, "rename", fail_on_second)
-    with pytest.raises(RuntimeError, match="storage refused"):
+    with pytest.raises(RuntimeError, match="could not reset al-10mm: storage refused"):
         engine.call("reset", NAME)
     monkeypatch.undo()
     assert files(engine.root / NAME) == before
     assert not list((engine.root / NAME).glob(".discarded-*"))
     assert [r["round"] for r in engine.call("state", NAME)["rounds"]] == [1, 2]
+
+    # A round that cannot be put back either is kept where no sweep deletes it.
+    def fail_back(self, target):
+        if self.name == "round-02" or (self.name == "round-01" and ".discarded-" in str(self)):
+            raise OSError("storage refused")
+        return real(self, target)
+
+    monkeypatch.setattr(Path, "rename", fail_back)
+    stuck = r"round-01 could not be put back and are in .*\.reset-failed-"
+    with pytest.raises(RuntimeError, match=stuck):
+        engine.call("reset", NAME)
+    monkeypatch.undo()
+    kept = list((engine.root / NAME).glob(".reset-failed-*"))
+    assert len(kept) == 1 and (kept[0] / "round-01" / "recording.wav").exists()
+    session.sweep_discarded(engine.root / NAME)
+    assert kept[0].exists()
+
+
+def test_a_session_whose_setup_does_not_load_is_not_reset(engine):
+    old = engine.root / "old-011"
+    (old / "round-01").mkdir(parents=True)
+    (old / "round-01" / session.PLAN_FILE).write_text('{"schema": 1}')
+    setup_011 = (Path(__file__).parent / "fixtures" / "setup-0.1.1.toml").read_text()
+    (old / session.SETUP_FILE).write_text(setup_011)
+    before = files(old)
+    with pytest.raises(RuntimeError, match="0.1.x"):
+        engine.call("reset", "old-011")
+    assert files(old) == before
 
 
 def test_the_command_line_resets_a_session_after_asking(engine, monkeypatch, capsys):
@@ -744,9 +772,27 @@ def test_the_command_line_resets_a_session_after_asking(engine, monkeypatch, cap
     out = capsys.readouterr().out
     assert "Discard all 1 rounds and 1 recordings" in out and "nothing changed" in out
     assert (folder / "round-01").exists()
+
+    def no_answer(prompt):
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", no_answer)
+    assert cli.main(["reset", str(folder)]) == 1
+    assert "nothing changed" in capsys.readouterr().out
+    assert (folder / "round-01").exists()
+
+    def refuse(self, target):
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(Path, "rename", refuse)
+    assert cli.main(["reset", str(folder), "--yes"]) == 1
+    assert "could not reset al-10mm: read-only file system" in capsys.readouterr().err
+    monkeypatch.undo()
+    assert (folder / "round-01").exists()
+    (folder / "report.html").write_text("<!doctype html>")
     monkeypatch.setattr("builtins.input", lambda prompt: "y")
     assert cli.main(["reset", str(folder)]) == 0
-    assert not (folder / "round-01").exists()
+    assert not (folder / "round-01").exists() and not (folder / "report.html").exists()
     engine.call("plan", NAME, "same")
     assert cli.main(["reset", str(folder), "--yes"]) == 0
     assert "discarded 1 rounds" in capsys.readouterr().out
