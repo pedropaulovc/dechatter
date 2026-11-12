@@ -219,8 +219,6 @@ def render(session_dir: Path, units: Units) -> str:
                 f"{_e(_length(sweep.session_chip_load_mm, units, 3))} per tooth.</p>"
             )
             continue
-        feed = found_load * tool.flutes * sweep.rpm
-        mrr = sweep.depth_mm * sweep.width_mm * feed
         recommended.append(
             f"<h3>{_e(where)}</h3>"
             + _table(
@@ -235,9 +233,9 @@ def render(session_dir: Path, units: Units) -> str:
                     [
                         _length(found_load, units, 3),
                         f"{found_load / sweep.session_chip_load_mm:.2f}×",
-                        _feed(feed, units),
-                        _rate(mrr, units),
-                        power(mrr),
+                        _feed(sweep.feed_mm_min, units),
+                        _rate(sweep.mrr_mm3_min, units),
+                        power(sweep.mrr_mm3_min),
                     ]
                 ],
             )

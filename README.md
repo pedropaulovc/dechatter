@@ -79,7 +79,10 @@ a page the microphone on those. Then, in the widget:
    search may still change (the machine's speed range and power, the cut's speed and width
    limits and shallower depths), as may the machine's name, the safe height, clearance,
    plunge feed, truing width, stock width and the planner's settings. Cuts outside narrowed
-   bounds stay in their round but leave the map and the recommendations. A round
+   bounds stay in their round but are not recommended, nor are cuts over a lowered power
+   cap. On the map, a stable cut wider than a narrowed width limit counts as stable at the
+   widest width searched; chatter that wide, and cuts at speeds outside the limits, are left
+   out. A round
    planned but not yet run is discarded when the setup changes its program, so the next
    plan uses the new setup. `dechatter plan` refuses the same changes made by hand.
 2. Plan a round. Round 1 is a coarse grid of speeds and widths.

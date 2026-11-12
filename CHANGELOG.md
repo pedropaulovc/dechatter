@@ -12,12 +12,10 @@ What changed for people who use the dechatter widget and command line. The forma
 
 - **Breaking:** the spindle motor power is given in horsepower. `spindle_power_w` in
   `[machine]` is now `spindle_power_hp` (1 hp = 745.7 W), and the wizard asks for hp. A
-  setup that still has `spindle_power_w` is refused, and a session with one cannot be opened
-  or exported. Start a new session for the tool. To keep using an old session folder with
-  the command line, replace the line with `spindle_power_hp = <watts / 745.7>`.
-- **Breaking:** sessions planned by an older dechatter can be viewed, but not planned on:
-  each round now keeps a copy of the setup it was planned from, and older rounds have none.
-  Start a new session to go on testing.
+  setup that still has `spindle_power_w` is refused.
+- **Breaking:** sessions from 0.1.x do not load in 0.2.0, in the widget or the command line:
+  their setup, plans and results are in the older format. Start a new session for each
+  tool. dechatter refuses them with a message that says so.
 - **Breaking:** once a round has been cut (recorded or analysed), the setup can no longer
   change in anything that shapes the cut or its sound: the machine's weight and spindle
   control, the tool, the work material, depth, direction and chip load, the stock length,
@@ -34,7 +32,8 @@ What changed for people who use the dechatter widget and command line. The forma
 - The machine's speed range and power, the cut's speed and width limits and shallower
   depths, the machine's name, the safe height, clearance, plunge feed, truing width, stock
   width and the planner's settings may change at any time. Cuts outside narrowed limits stay
-  in their round but are not recommended. On the map, a stable cut wider than a narrowed
+  in their round but are not recommended, nor are cuts over a lowered power cap, and the
+  chip-load sweep is offered only for a cut the power cap leaves room to sweep. On the map, a stable cut wider than a narrowed
   width limit counts as stable at the widest width searched; chatter that wide, and cuts at
   speeds outside the limits, are left out. Cuts at the edges of the search, such as a width
   the grid rounds just above the limit, or speeds a coarser speed step no longer reaches,

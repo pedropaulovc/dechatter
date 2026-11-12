@@ -54,10 +54,8 @@ class App:
         """Names one planned program: a round planned again after a setup change gets a new
         name, so a program still loaded in cncjs never passes for it."""
         digest = hashlib.sha256()
-        # A round planned by an older dechatter has no setup copy; its plan alone names it.
-        for path in (r.path / session.SETUP_FILE, r.path / session.PLAN_FILE):
-            if path.exists():
-                digest.update(path.read_bytes())
+        for name in (session.SETUP_FILE, session.PLAN_FILE):
+            digest.update((r.path / name).read_bytes())
         return (
             f"dechatter-{self.session_dir.resolve().name}-round-{r.plan.round:02d}-"
             f"{digest.hexdigest()[:PROGRAM_ID_LENGTH]}.nc"
@@ -87,11 +85,7 @@ class App:
             upcoming = Next.PLAN if stage.tests else Next.CONVERGED
             next_depth = stage.depth_mm
         sweep = session.swept(self.setup, self.env, rounds)
-        if (
-            upcoming is Next.CONVERGED
-            and sweep is None
-            and session.best_cuts(self.setup, self.env, rounds)
-        ):
+        if upcoming is Next.CONVERGED and session.to_sweep(self.setup, self.env, rounds):
             upcoming = Next.SWEEP
         template = setup_source(self.source.text) is SetupSource.TEMPLATE
         if upcoming is Next.PLAN and template:
@@ -168,19 +162,17 @@ class App:
         }
 
     def _sweep_json(self, sweep: session.Sweep) -> dict:
-        found = sweep.stable_chip_load_mm
-        feed = None if found is None else found * self.setup.tool.flutes * sweep.rpm
         return {
             "round": sweep.round,
             "rpm": sweep.rpm,
             "width_mm": sweep.width_mm,
             "depth_mm": sweep.depth_mm,
             "session_chip_load_mm": sweep.session_chip_load_mm,
-            "chip_load_mm": found,
-            "feed_mm_min": None if feed is None else round(feed),
+            "chip_load_mm": sweep.stable_chip_load_mm,
+            "feed_mm_min": None if sweep.feed_mm_min is None else round(sweep.feed_mm_min),
             "mrr_cm3_min": None
-            if feed is None
-            else round(sweep.depth_mm * sweep.width_mm * feed / 1000, 2),
+            if sweep.mrr_mm3_min is None
+            else round(sweep.mrr_mm3_min / 1000, 2),
         }
 
     def plan(self, stock: Stock) -> None:

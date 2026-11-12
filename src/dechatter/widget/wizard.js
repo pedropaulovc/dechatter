@@ -226,11 +226,12 @@ function row(field, values, units, setup) {
   // What the user was shown. Only a field they change is written back: a length
   // shown rounded in inches must not come back as a slightly different length.
   input.dataset.shown = input.value;
-  const label = document.createElement('label');
+  const id = field.at.replace('.', '-');
+  input.id = `field-${id}`;
   const unit = LENGTH_UNITS[field.type]?.[units] ?? field.unit ?? '';
   const bubble = Object.assign(document.createElement('p'), {
     className: 'bubble',
-    id: `info-${field.at.replace('.', '-')}`,
+    id: `info-${id}`,
     hidden: true,
     textContent: infoFor(field, units),
   });
@@ -239,18 +240,18 @@ function row(field, values, units, setup) {
   about.setAttribute('aria-label', `About ${field.label}`);
   about.setAttribute('aria-expanded', 'false');
   about.setAttribute('aria-controls', bubble.id);
-  about.onclick = (event) => {
-    event.preventDefault(); // inside a label: do not move focus to its input
-    toggle(about, bubble);
-  };
-  const name = Object.assign(document.createElement('span'), { textContent: `${field.label} ` });
-  name.append(about);
-  label.append(name, input, Object.assign(document.createElement('small'), { textContent: unit }));
+  about.onclick = () => toggle(about, bubble);
+  // The label names only the input; the (i) button and its bubble sit beside it.
+  const label = Object.assign(document.createElement('label'), { htmlFor: input.id, textContent: field.label });
+  const name = document.createElement('span');
+  name.append(label, ' ', about);
+  const row = Object.assign(document.createElement('div'), { className: 'field' });
+  row.append(name, input, Object.assign(document.createElement('small'), { textContent: unit }));
   if (field.note) {
-    label.append(Object.assign(document.createElement('em'), { textContent: field.note }));
+    row.append(Object.assign(document.createElement('em'), { textContent: field.note }));
   }
-  label.append(bubble);
-  return label;
+  row.append(bubble);
+  return row;
 }
 
 // One info bubble open at a time. It closes on its button, Escape, or a click elsewhere.

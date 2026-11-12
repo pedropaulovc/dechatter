@@ -14,7 +14,7 @@ header select { flex: 1 1 110px; min-width: 0; }
 header button { padding: 4px 6px; }
 #summary { flex-basis: 100%; }
 #device { max-width: 150px; }
-#setup-form label {
+#setup-form .field {
   display: grid;
   grid-template-columns: 1fr 96px 44px;
   gap: 2px 6px;

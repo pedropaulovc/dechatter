@@ -72,10 +72,10 @@ def _print_sweep(setup: Setup, sweep: session.Sweep) -> None:
     if found is None:
         print(f"chip-load sweep (round {sweep.round}) at {where}: its lightest pass chattered")
         return
-    feed = found * setup.tool.flutes * sweep.rpm
     print(
         f"chip-load sweep (round {sweep.round}) at {where}: stable up to {found:g} mm/tooth"
-        f" ({found / sweep.session_chip_load_mm:.2f}x the session's), F{feed:.0f} mm/min"
+        f" ({found / sweep.session_chip_load_mm:.2f}x the session's),"
+        f" F{sweep.feed_mm_min:.0f} mm/min"
     )
 
 
@@ -140,7 +140,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
             f"converged: no further cut is expected to add {setup.planner.stop_improvement:.0%} "
             f"removal rate (best candidate {planned.expected_improvement:.1%})"
         )
-        if session.best_cuts(setup, env, rounds) and session.swept(setup, env, rounds) is None:
+        if session.to_sweep(setup, env, rounds):
             print(
                 f"to find how far the chip load can go at the best cut: "
                 f"dechatter plan {args.session} --sweep"

@@ -121,11 +121,22 @@ def round_dir(session: Path, number: int) -> Path:
 
 
 def load_rounds(session: Path) -> list[Round]:
+    """The session's rounds. One in another format than this version writes, or missing
+    the copy of its setup, is refused: the session cannot be used."""
     rounds = []
     for plan_path in sorted(session.glob(f"round-*/{PLAN_FILE}")):
         results_path = plan_path.with_name(RESULTS_FILE)
-        results = Results.load(results_path) if results_path.exists() else None
-        rounds.append(Round(plan_path.parent, Plan.load(plan_path), results))
+        try:
+            if not plan_path.with_name(SETUP_FILE).exists():
+                raise SessionError(f"no {SETUP_FILE}")
+            plan = Plan.load(plan_path)
+            results = Results.load(results_path) if results_path.exists() else None
+        except (SessionError, PlanError, KeyError, TypeError, ValueError) as exc:
+            raise SessionError(
+                f"{plan_path.parent.name} was written by an older dechatter, or is damaged "
+                f"({exc!s}). Start a new session"
+            ) from exc
+        rounds.append(Round(plan_path.parent, plan, results))
     return rounds
 
 
@@ -208,10 +219,10 @@ class StableCut:
 
 
 def best_cuts(setup: Setup, env: Envelope, rounds: list[Round]) -> list[StableCut]:
-    """Every stable test cut of the session inside the search now, at whatever depth,
-    highest removal rate first."""
+    """Every stable test cut of the session inside the search now, power cap included, at
+    whatever depth, highest removal rate first."""
     cut_depths = sorted({r.plan.axial_depth_mm for r in rounds}, reverse=True)
-    found = [
+    made = [
         StableCut(
             float(mrr_mm3_min(at_depth(setup, depth), env, o.rpm, o.width_mm)),
             depth,
@@ -222,6 +233,7 @@ def best_cuts(setup: Setup, env: Envelope, rounds: list[Round]) -> list[StableCu
         for o in _tests(rounds, _at(depth))
         if o.verdict is Verdict.STABLE and env.contains(o.rpm, o.width_mm)
     ]
+    found = [cut for cut in made if cut.mrr_mm3_min <= env.mrr_limit_mm3_min * (1 + 1e-9)]
     return sorted(found, key=lambda cut: -cut.mrr_mm3_min)
 
 
@@ -437,10 +449,23 @@ def plan_sweep(session: Path, source: SetupFile, env: Envelope, stock: Stock) ->
     if not found:
         raise PlanError("no stable cut has been measured to sweep")
     best = found[0]
-    tests = sweep_tests(at_depth(source.setup, best.depth_mm), env, best.rpm, best.width_mm)
+    tests = _sweep_of(source.setup, env, best)
     if not tests:
         raise PlanError("the power cap leaves no chip load to sweep at the best cut")
     return _place(session, source, env, rounds, stock, best.depth_mm, PlannerKind.SWEEP, tests)
+
+
+def _sweep_of(setup: Setup, env: Envelope, best: StableCut) -> list:
+    return sweep_tests(at_depth(setup, best.depth_mm), env, best.rpm, best.width_mm)
+
+
+def to_sweep(setup: Setup, env: Envelope, rounds: list[Round]) -> StableCut | None:
+    """The best cut, when a chip-load sweep of it is still to run and the power cap leaves
+    it a chip load to try."""
+    found = best_cuts(setup, env, rounds)
+    if not found or swept(setup, env, rounds) is not None:
+        return None
+    return found[0] if _sweep_of(setup, env, found[0]) else None
 
 
 @dataclass(frozen=True)
@@ -452,7 +477,11 @@ class Sweep:
     width_mm: float
     depth_mm: float
     session_chip_load_mm: float
-    stable_chip_load_mm: float | None  # the highest that stayed stable; None: not even the first
+    # The highest chip load that stayed stable, its pass's feed and removal rate; all None
+    # when not even the lightest pass did.
+    stable_chip_load_mm: float | None
+    feed_mm_min: float | None
+    mrr_mm3_min: float | None
 
 
 def sweeps(rounds: list[Round]) -> list[Sweep]:
@@ -471,16 +500,19 @@ def sweeps(rounds: list[Round]) -> list[Sweep]:
         for p in tests:
             if verdicts.get(p.id) is not Verdict.STABLE:
                 break
-            stable = p.chip_load_mm
+            stable = p
         first = tests[0]
+        depth = r.plan.axial_depth_mm
         found.append(
             Sweep(
                 r.plan.round,
                 first.rpm,
                 first.width_mm,
-                r.plan.axial_depth_mm,
+                depth,
                 r.plan.chip_load_mm,
-                stable,
+                None if stable is None else stable.chip_load_mm,
+                None if stable is None else stable.feed_mm_min,
+                None if stable is None else depth * stable.width_mm * stable.feed_mm_min,
             )
         )
     return found
@@ -531,13 +563,7 @@ OUTSIDE_PROGRAM = frozenset({"machine.name"})
 
 def planned_with(r: Round) -> Setup:
     """The setup a round was planned from, as its directory keeps it."""
-    path = r.path / SETUP_FILE
-    if not path.exists():
-        raise SessionError(
-            f"{r.path.name} has no copy of the setup it was planned from: it was planned by an "
-            "older dechatter. Start a new session"
-        )
-    return load_setup(path)
+    return load_setup(r.path / SETUP_FILE)
 
 
 def _changes(old: Setup, new: Setup) -> list[str]:
