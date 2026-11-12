@@ -583,7 +583,7 @@ def test_setup_form_round_trips_and_an_invalid_one_keeps_the_old_setup(engine):
     edited["tool"]["holder"] = 'ER32 "short" 🔧'
     edited["cut"]["width_max_mm"] = 3.5
     state = engine.call("save_setup", NAME, json.dumps(edited))
-    assert "2 flutes" in state["summary"]
+    assert state["summary"]["flutes"] == 2
     assert engine.call("setup_form", NAME)["values"] == edited
 
     with pytest.raises(RuntimeError, match="unknown keys: rpm"):
@@ -638,6 +638,291 @@ def test_saved_setup_pins_shown_values_and_survives_unstorable_text(engine):
     with pytest.raises(RuntimeError, match="broken character"):
         engine.call("save_setup", NAME, json.dumps(broken))
     assert path.read_text(encoding="utf-8") == written
+
+
+def test_a_session_can_be_deleted(engine):
+    engine.call("plan", NAME, "same")
+    engine.run_round(1)
+    engine.call("plan", NAME, "same")
+    engine.call("create", "other")
+    assert engine.call("contents", NAME) == {"rounds": 2, "recordings": 1}
+    assert engine.call("delete", NAME) == ["other"]
+    assert not (engine.root / NAME).exists()
+    with pytest.raises(RuntimeError, match="no session named"):
+        engine.call("state", NAME)
+    # The name is free again, for a fresh session.
+    engine.call("create", NAME)
+    assert engine.call("state", NAME)["rounds"] == []
+    for bad in ("../sessions", "a/b", ""):
+        with pytest.raises(RuntimeError, match="session names"):
+            engine.call("delete", bad)
+    with pytest.raises(RuntimeError, match="no session named 'missing'"):
+        engine.call("delete", "missing")
+
+
+def test_a_session_that_cannot_load_can_still_be_deleted(engine):
+    """A 0.1.x session: its setup and rounds are never read."""
+    old = engine.root / "old-011"
+    for number in (1, 2):
+        folder = old / f"round-{number:02d}"
+        folder.mkdir(parents=True)
+        (folder / session.PLAN_FILE).write_text('{"schema": 1}')
+    (old / "round-01" / "recording.wav").write_bytes(b"RIFF")
+    setup_011 = (Path(__file__).parent / "fixtures" / "setup-0.1.1.toml").read_text()
+    (old / session.SETUP_FILE).write_text(setup_011)
+    with pytest.raises(RuntimeError, match="0.1.x"):
+        engine.call("state", "old-011")
+    assert engine.call("contents", "old-011") == {"rounds": 2, "recordings": 1}
+    assert engine.call("delete", "old-011") == [NAME]
+    assert not old.exists()
+
+
+def test_a_session_is_not_deleted_while_it_records(engine):
+    engine.call("plan", NAME, "same")
+    engine.call("record_start", NAME, 1)
+    with pytest.raises(RuntimeError, match="round 1 of 'al-10mm' is being recorded"):
+        engine.call("delete", NAME)
+    assert (engine.root / NAME / "round-01").exists()
+    with pytest.raises(RuntimeError, match="delivered no audio"):
+        engine.call("record_stop", NAME, memoryview(np.zeros(0, np.float32)), 48000.0, "[]")
+    assert engine.call("delete", NAME) == []
+
+
+def test_a_reset_discards_every_round_and_frees_the_setup(engine):
+    engine.call("plan", NAME, "same")
+    engine.run_round(1)
+    engine.call("plan", NAME, "same")
+    form = engine.call("setup_form", NAME)["values"]
+    form["tool"]["flutes"] = 2
+    with pytest.raises(RuntimeError, match="start a new session"):
+        engine.call("save_setup", NAME, json.dumps(form))
+    setup_before = (engine.root / NAME / session.SETUP_FILE).read_bytes()
+
+    assert engine.call("contents", NAME) == {"rounds": 2, "recordings": 1}
+    state = engine.call("reset", NAME)
+    assert state["rounds"] == [] and state["next"] == "plan" and state["best"] == []
+    assert sorted(p.name for p in (engine.root / NAME).iterdir()) == [session.SETUP_FILE]
+    assert (engine.root / NAME / session.SETUP_FILE).read_bytes() == setup_before
+    # Nothing has been cut any more: the setup may change, and planning starts at round 1.
+    assert engine.call("save_setup", NAME, json.dumps(form))["summary"]["flutes"] == 2
+    assert engine.call("plan", NAME, "same")["rounds"][0]["round"] == 1
+
+
+def test_a_reset_is_refused_while_recording_and_undone_if_it_fails(engine, monkeypatch):
+    engine.call("plan", NAME, "same")
+    engine.run_round(1)
+    engine.call("plan", NAME, "same")
+    engine.call("record_start", NAME, 2)
+    with pytest.raises(RuntimeError, match="round 2 of 'al-10mm' is being recorded; reset"):
+        engine.call("reset", NAME)
+    with pytest.raises(RuntimeError, match="delivered no audio"):
+        engine.call("record_stop", NAME, memoryview(np.zeros(0, np.float32)), 48000.0, "[]")
+
+    before = files(engine.root / NAME)
+    real = Path.rename
+
+    def fail_on_second(self, target):
+        if self.name == "round-02":
+            raise OSError("storage refused")
+        return real(self, target)
+
+    monkeypatch.setattr(Path, "rename", fail_on_second)
+    with pytest.raises(RuntimeError, match="could not reset al-10mm: storage refused"):
+        engine.call("reset", NAME)
+    monkeypatch.undo()
+    assert files(engine.root / NAME) == before
+    assert not list((engine.root / NAME).glob(".discarded-*"))
+    assert [r["round"] for r in engine.call("state", NAME)["rounds"]] == [1, 2]
+
+    # A round that cannot be put back either stays in .reset-*, named in the error.
+    def fail_back(self, target):
+        if self.name == "round-02" or (self.name == "round-01" and ".reset-" in str(self)):
+            raise OSError("storage refused")
+        return real(self, target)
+
+    monkeypatch.setattr(Path, "rename", fail_back)
+    with pytest.raises(RuntimeError, match=r"round-01 could not be put back and are in .*\.reset-"):
+        engine.call("reset", NAME)
+    monkeypatch.undo()
+    folder = engine.root / NAME
+    kept = list(folder.glob(".reset-*"))
+    assert len(kept) == 1 and (kept[0] / "round-01" / "recording.wav").exists()
+    original = (kept[0] / "round-01" / session.PLAN_FILE).read_bytes()
+
+    # Reset again and plan a new round 1: the name is reused, yet no sweep takes the
+    # original, and Export carries it.
+    assert engine.call("reset", NAME)["rounds"] == []
+    engine.call("plan", NAME, "same")
+    session.sweep_discarded(folder)
+    Engine(engine.root).call("setup_form", NAME)  # opening the session sweeps too
+    assert (kept[0] / "round-01" / session.PLAN_FILE).read_bytes() == original
+    names = zipfile.ZipFile(io.BytesIO(engine.call("export_zip", NAME, "mm"))).namelist()
+    assert f"{NAME}/{kept[0].name}/round-01/recording.wav" in names
+    assert not list(folder.glob(".discarded-*"))
+
+
+def test_a_finished_reset_that_could_not_delete_its_rounds_is_swept_later(engine, monkeypatch):
+    engine.call("plan", NAME, "same")
+    engine.run_round(1)
+    folder = engine.root / NAME
+    real = Path.rename
+
+    def no_discard(self, target):
+        if self.name.startswith(".reset-"):
+            raise OSError("storage refused")
+        return real(self, target)
+
+    monkeypatch.setattr(Path, "rename", no_discard)
+    assert engine.call("reset", NAME)["rounds"] == []
+    left = [p for p in folder.glob(".reset-*") if p.is_dir()]
+    assert len(left) == 1 and (left[0] / "round-01" / "recording.wav").exists()
+    assert left[0].with_name(left[0].name + ".done").exists()
+    # Meanwhile Export leaves the discarded rounds out.
+    names = zipfile.ZipFile(io.BytesIO(engine.call("export_zip", NAME, "mm"))).namelist()
+    assert not [n for n in names if ".reset-" in n or ".discarded-" in n]
+
+    monkeypatch.undo()
+    Engine(engine.root).call("setup_form", NAME)  # opening the session sweeps
+    assert sorted(p.name for p in folder.iterdir()) == [session.SETUP_FILE]
+
+    # An empty one, left when everything was put back but its removal failed, goes too.
+    (folder / ".reset-0badc0de").mkdir()
+    session.sweep_discarded(folder)
+    assert sorted(p.name for p in folder.iterdir()) == [session.SETUP_FILE]
+
+
+def test_a_reset_that_cannot_mark_its_folder_discards_it_or_says_where(engine, monkeypatch):
+    folder = engine.root / NAME
+    real_touch, real_rename = Path.touch, Path.rename
+
+    def no_marker(self, *args, **kwargs):
+        if self.name.endswith(".done"):
+            raise OSError("storage refused")
+        return real_touch(self, *args, **kwargs)
+
+    # Unmarked but discarded right away: a clean reset.
+    engine.call("plan", NAME, "same")
+    monkeypatch.setattr(Path, "touch", no_marker)
+    assert engine.call("reset", NAME)["rounds"] == []
+    assert sorted(p.name for p in folder.iterdir()) == [session.SETUP_FILE]
+
+    # Nor can it be renamed: the reset says where the rounds are.
+    def no_discard(self, target):
+        if self.name.startswith(".reset-"):
+            raise OSError("storage refused")
+        return real_rename(self, target)
+
+    engine.call("plan", NAME, "same")
+    monkeypatch.setattr(Path, "rename", no_discard)
+    with pytest.raises(
+        RuntimeError, match=r"discarded rounds are still in .*\.reset-.*delete that"
+    ):
+        engine.call("reset", NAME)
+    monkeypatch.undo()
+    left = [p for p in folder.glob(".reset-*") if p.is_dir()]
+    assert len(left) == 1 and (left[0] / "round-01").exists()
+
+
+def test_a_marker_that_will_not_go_does_not_stop_the_session_opening(engine, monkeypatch):
+    folder = engine.root / NAME
+    (folder / ".reset-0ddba11.done").touch()
+    real = Path.unlink
+
+    def refuse(self, *args, **kwargs):
+        if self.name.endswith(".done"):
+            raise OSError("storage refused")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", refuse)
+    assert Engine(engine.root).call("state", NAME)["rounds"] == []
+    monkeypatch.undo()
+    session.sweep_discarded(folder)
+    assert sorted(p.name for p in folder.iterdir()) == [session.SETUP_FILE]
+
+
+def test_a_reset_goes_ahead_when_the_report_cannot_be_removed(engine, monkeypatch):
+    engine.call("plan", NAME, "same")
+    report = engine.root / NAME / "report.html"
+    report.write_text("<!doctype html>")
+    real = Path.unlink
+
+    def refuse(self, *args, **kwargs):
+        if self.name == "report.html":
+            raise OSError("busy")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", refuse)
+    assert engine.call("reset", NAME)["rounds"] == []
+    monkeypatch.undo()
+    assert report.exists() and not list((engine.root / NAME).glob("round-*"))
+    assert not list((engine.root / NAME).glob(".discarded-*"))
+
+
+def test_reset_and_export_go_by_whether_the_setup_loads(engine):
+    assert engine.call("setup_status", NAME) == {"status": "loads", "reason": ""}
+    # Rounds that do not load leave the setup loading: the session can be exported and reset.
+    engine.call("plan", NAME, "same")
+    (session.round_dir(engine.root / NAME, 1) / session.SETUP_FILE).unlink()
+    fresh = Engine(engine.root)
+    with pytest.raises(RuntimeError, match="setup.toml is missing"):
+        fresh.call("state", NAME)
+    assert fresh.call("setup_status", NAME)["status"] == "loads"
+    assert (
+        f"{NAME}/setup.toml"
+        in zipfile.ZipFile(io.BytesIO(fresh.call("export_zip", NAME, "mm"))).namelist()
+    )
+    assert fresh.call("reset", NAME)["rounds"] == []
+
+
+def test_a_session_whose_setup_does_not_load_is_not_reset(engine):
+    old = engine.root / "old-011"
+    (old / "round-01").mkdir(parents=True)
+    (old / "round-01" / session.PLAN_FILE).write_text('{"schema": 1}')
+    setup_011 = (Path(__file__).parent / "fixtures" / "setup-0.1.1.toml").read_text()
+    (old / session.SETUP_FILE).write_text(setup_011)
+    before = files(old)
+    status = engine.call("setup_status", "old-011")
+    assert status["status"] == "refused" and "0.1.x" in status["reason"]
+    with pytest.raises(RuntimeError, match="0.1.x"):
+        engine.call("reset", "old-011")
+    assert cli.main(["reset", str(old), "--yes"]) == 1
+    assert files(old) == before
+
+
+def test_the_command_line_resets_a_session_after_asking(engine, monkeypatch, capsys):
+    engine.call("plan", NAME, "same")
+    engine.run_round(1)
+    folder = engine.root / NAME
+    monkeypatch.setattr("builtins.input", lambda prompt: print(prompt) or "n")
+    assert cli.main(["reset", str(folder)]) == 1
+    out = capsys.readouterr().out
+    assert "Discard all 1 rounds and 1 recordings" in out and "nothing changed" in out
+    assert (folder / "round-01").exists()
+
+    def no_answer(prompt):
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", no_answer)
+    assert cli.main(["reset", str(folder)]) == 1
+    assert "nothing changed" in capsys.readouterr().out
+    assert (folder / "round-01").exists()
+
+    def refuse(self, target):
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(Path, "rename", refuse)
+    assert cli.main(["reset", str(folder), "--yes"]) == 1
+    assert "could not reset al-10mm: read-only file system" in capsys.readouterr().err
+    monkeypatch.undo()
+    assert (folder / "round-01").exists()
+    (folder / "report.html").write_text("<!doctype html>")
+    monkeypatch.setattr("builtins.input", lambda prompt: "y")
+    assert cli.main(["reset", str(folder)]) == 0
+    assert not (folder / "round-01").exists() and not (folder / "report.html").exists()
+    engine.call("plan", NAME, "same")
+    assert cli.main(["reset", str(folder), "--yes"]) == 0
+    assert "discarded 1 rounds" in capsys.readouterr().out
+    assert sorted(p.name for p in folder.iterdir()) == [session.SETUP_FILE]
 
 
 def test_session_names_cannot_escape_the_store(engine):

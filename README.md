@@ -59,7 +59,7 @@ a page the microphone on those. Then, in the widget:
 
 1. Create a session. A short wizard asks for the machine, the tool, the cut and the stock. It
    shows lengths in inches when the machine is in G20 and in millimetres when it is in G21,
-   or with no machine connected. Its last step holds the planner's settings, which rarely
+   or with no machine connected; so does the rest of the widget. Its last step holds the planner's settings, which rarely
    need changing. Settings with a sensible default or a computed value (the machine's name,
    the holder, the cut's limits and chip load, the program's dwell, clearance, plunge feed,
    truing width and coolant, and the planner) sit in a collapsed Advanced section of their
@@ -88,6 +88,8 @@ a page the microphone on those. Then, in the widget:
 2. Plan a round. Round 1 is a coarse grid of speeds and widths.
 3. Set the work zero at the left end of the stock, on its front face, at the top.
 4. Load the program into cncjs and press play in cncjs. The widget never starts the machine.
+   To check the toolpath first, raise Z zero and run the round in the air, then Reset the
+   session (next to the session list) and set Z zero back on the top of the stock.
 5. Recording starts when the job starts and stops when it ends. The widget then shows each
    pass as stable or chatter, the stability map and the best cuts so far.
 6. If your ears disagree with a verdict, change it in the table. Plan the next round and
@@ -113,7 +115,13 @@ Sessions are stored in that browser (IndexedDB), per cncjs address. Export saves
 holding `setup.toml` and each round's plan, program, `recording.wav`, results and the job
 timeline cncjs reported, plus `report.html`. Import loads it in another browser, and unzipped it is a session
 folder the command line reads. Keep the tab open while a round runs: the recording lives in
-the page until the job ends.
+the page until the job ends. Reset, next to the session list, discards every round and
+keeps the setup, so the session starts again from round 1 and its setup can be changed
+freely (`dechatter reset <session>` on the command line); it needs a setup that loads,
+though its rounds need not. Delete removes a session for good after asking, and offers
+Export first. It also removes sessions that no longer load, such as ones from dechatter
+0.1.x; one whose setup does not load cannot be exported.
+Both are refused while that session records or its job runs.
 
 ### Manual spindle
 
@@ -145,6 +153,7 @@ dechatter analyze al-10mm recording.wav   # classifies each pass
 dechatter plan al-10mm                    # next round, or "converged"
 dechatter plan al-10mm --sweep            # once converged: chip-load sweep of the best cut
 dechatter report al-10mm                  # stability map and best cuts so far
+dechatter reset al-10mm                   # discard every round, keep the setup (asks first)
 dechatter report al-10mm --html al-10mm.html --units in   # printable report
 ```
 

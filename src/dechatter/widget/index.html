@@ -13,6 +13,8 @@
   <div id="main" hidden>
     <header>
       <select id="sessions" aria-label="Session"></select>
+      <button id="reset-session" disabled>Reset</button>
+      <button id="delete-session" disabled>Delete</button>
       <button id="new-session">New</button>
       <button id="edit-setup" disabled>Setup</button>
       <button id="export" disabled>Export</button>
@@ -46,6 +48,16 @@
       </p>
     </section>
 
+    <dialog id="confirm-dialog" aria-labelledby="confirm-question">
+      <p id="confirm-question"></p>
+      <p id="confirm-note" class="muted"></p>
+      <p class="wizard-buttons">
+        <button id="confirm-export" type="button">Export first</button>
+        <button id="confirm-go" type="button" class="danger">Delete</button>
+        <button id="confirm-cancel" type="button">Cancel</button>
+      </p>
+    </dialog>
+
     <section id="step" hidden></section>
 
     <section id="round" hidden>
@@ -69,7 +81,7 @@
     <section id="best-section" hidden>
       <h2>Best stable cuts <button id="download-report" type="button">Download report</button></h2>
       <table>
-        <thead><tr><th>rpm</th><th>width</th><th>depth</th><th>feed</th><th>cm³/min</th></tr></thead>
+        <thead><tr><th>rpm</th><th>width</th><th>depth</th><th>feed</th><th>removal</th></tr></thead>
         <tbody id="best"></tbody>
       </table>
       <p id="sweep-result" class="muted legend" hidden></p>

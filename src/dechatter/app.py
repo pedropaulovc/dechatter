@@ -16,14 +16,14 @@ from pathlib import Path
 import numpy as np
 
 from . import audio, bayes, gcode, session
-from .config import SetupSource, SpindleControl, read_setup, setup_source
+from .config import SetupSource, read_setup, setup_source
 from .detect import Thresholds, Verdict
 from .plan import PassKind, envelope, feed_mm_min
 from .session import PassStatus, SessionError, Stock
 
 log = logging.getLogger(__name__)
 
-RECORDING_FILE = "recording.wav"
+RECORDING_FILE = session.RECORDING_FILE
 TIMELINE_FILE = "timeline.json"
 TOP_RESULTS = 5
 PROGRAM_ID_LENGTH = 6
@@ -92,16 +92,17 @@ class App:
         if upcoming is Next.PLAN and template:
             upcoming = Next.SETUP
 
-        tool, cut = self.setup.tool, self.setup.cut
-        manual = self.setup.machine.spindle is SpindleControl.MANUAL
-        all_depths = ", ".join(f"{d:g}" for d in session.depths(self.setup))
+        tool = self.setup.tool
         return {
             "session": self.session_dir.resolve().name,
-            "summary": (
-                f"D{tool.diameter_mm:g} mm, {tool.flutes} flutes, {cut.material}, "
-                f"depth {all_depths} mm, {self.env.chip_load_mm:g} mm/tooth"
-                f"{', manual spindle' if manual else ''}"
-            ),
+            # In mm, like every length here: the widget shows them in the machine's units.
+            "summary": {
+                "diameter_mm": tool.diameter_mm,
+                "flutes": tool.flutes,
+                "material": self.setup.cut.material,
+                "depths_mm": session.depths(self.setup),
+                "chip_load_mm": self.env.chip_load_mm,
+            },
             "spindle": self.setup.machine.spindle,
             "next": upcoming,
             "next_depth_mm": next_depth,

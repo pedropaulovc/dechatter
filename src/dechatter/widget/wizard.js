@@ -4,7 +4,8 @@
 // 'advanced' section (the default is 'basic') have a sensible default or computed value and
 // sit in a collapsed section.
 
-const MM_PER_INCH = 25.4;
+import { MM_PER_INCH, tidy } from './units.js';
+
 const LENGTH_UNITS = {
   length: { mm: 'mm', in: 'in' },
   lengths: { mm: 'mm', in: 'in' },
@@ -133,8 +134,6 @@ export const STEPS = [
   },
 ];
 
-// Enough decimals that a hundred-thousandth of an inch survives the trip to millimetres.
-const tidy = (number) => Number(number.toFixed(5));
 
 function shown(field, value, units) {
   if (value === null || value === undefined) {

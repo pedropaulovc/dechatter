@@ -13,6 +13,8 @@ import logging
 import re
 import shutil
 import zipfile
+from dataclasses import asdict
+from enum import StrEnum
 from pathlib import Path
 
 import numpy as np
@@ -34,6 +36,12 @@ from .session import SessionError, Stock
 
 log = logging.getLogger(__name__)
 
+
+class SetupLoad(StrEnum):
+    LOADS = "loads"
+    REFUSED = "refused"  # from dechatter 0.1.x, or damaged: only Delete applies
+
+
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 EXPECTED = (ConfigError, PlanError, SessionError, AudioError)
 
@@ -54,10 +62,9 @@ class Sessions:
 
     def _app(self, name: str) -> App:
         if name not in self._apps:
-            if not (self._dir(name) / session.SETUP_FILE).exists():
-                raise SessionError(f"no session named {name!r}")
-            session.sweep_discarded(self._dir(name))
-            self._apps[name] = App(self._dir(name), self.thresholds)
+            target = self._existing(name)
+            session.sweep_discarded(target)
+            self._apps[name] = App(target, self.thresholds)
         return self._apps[name]
 
     def names(self) -> list[str]:
@@ -70,6 +77,59 @@ class Sessions:
         target.mkdir()
         (target / session.SETUP_FILE).write_text(TEMPLATE, encoding="utf-8")
         return name
+
+    def _existing(self, name: str) -> Path:
+        """A session's directory, without reading anything in it: it may not load."""
+        target = self._dir(name)
+        if not (target / session.SETUP_FILE).exists():
+            raise SessionError(f"no session named {name!r}")
+        return target
+
+    def contents(self, name: str) -> dict:
+        """What deleting or resetting a session would lose, counted without loading it."""
+        return asdict(session.contents(self._existing(name)))
+
+    def _not_recording(self, name: str, action: str) -> None:
+        opened = self._apps.get(name)
+        if opened is not None and opened.recording_round is not None:
+            raise SessionError(
+                f"round {opened.recording_round} of {name!r} is being recorded; {action} the "
+                "session after the job"
+            )
+
+    def reset(self, name: str) -> dict:
+        """Discard every round of a session, keeping its setup; answer its new state.
+
+        Only a session whose setup loads: one that does not (from dechatter 0.1.x, or
+        damaged) is refused before anything changes; Delete is the way to be rid of it.
+        """
+        target = self._existing(name)
+        self._not_recording(name, "reset")
+        self._apps.pop(name, None)
+        app = self._app(name)
+        session.reset(target)
+        return app.state()
+
+    def setup_status(self, name: str) -> dict:
+        """Whether a session's setup loads, its rounds aside: reset and export need it to.
+
+        The session it loads is kept, for the state asked next.
+        """
+        self._existing(name)
+        try:
+            self._app(name)
+        except EXPECTED as exc:
+            return {"status": SetupLoad.REFUSED, "reason": str(exc)}
+        return {"status": SetupLoad.LOADS, "reason": ""}
+
+    def delete(self, name: str) -> list[str]:
+        """Remove a session for good, whether or not it loads; answer the names left."""
+        target = self._existing(name)
+        self._not_recording(name, "delete")
+        self._apps.pop(name, None)
+        shutil.rmtree(target)
+        log.info("deleted session %s", name)
+        return self.names()
 
     def setup_form(self, name: str) -> dict:
         """What the widget's setup wizard needs: the current values and the material choices."""
@@ -181,9 +241,9 @@ class Sessions:
         with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
             for path in sorted(self._dir(name).rglob("*")):
                 inside = path.relative_to(self._dir(name))
-                if inside.parts[0].startswith(session.DISCARDED) or inside == Path(
-                    report.REPORT_FILE
-                ):
+                top = self._dir(name) / inside.parts[0]
+                left = inside.parts[0].startswith(session.DISCARDED) or session.finished_reset(top)
+                if left or inside == Path(report.REPORT_FILE):
                     continue
                 if path.is_file():
                     archive.write(path, f"{name}/{inside.as_posix()}")

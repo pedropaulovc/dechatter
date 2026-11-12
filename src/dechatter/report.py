@@ -19,7 +19,7 @@ from .gcode import MM_PER_INCH, Units
 from .plan import SPINDLE_EFFICIENCY, PassKind, PlannerKind, envelope, feed_mm_min
 from .session import Round, VerdictSource
 
-REPORT_FILE = "report.html"
+REPORT_FILE = session.REPORT_FILE
 CUTS_PER_DEPTH = 3
 MM3_PER_IN3 = MM_PER_INCH**3
 

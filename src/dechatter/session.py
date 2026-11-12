@@ -34,6 +34,8 @@ log = logging.getLogger(__name__)
 
 SCHEMA = 2  # 2: dechatter 0.2.0 (the detector's own verdict)
 SETUP_FILE = "setup.toml"
+RECORDING_FILE = "recording.wav"  # where the widget keeps a round's recording
+REPORT_FILE = "report.html"  # the last printable report, if one was written into the session
 PLAN_FILE = "plan.json"
 PROGRAM_FILE = "program.nc"
 RESULTS_FILE = "results.json"
@@ -654,7 +656,9 @@ def set_aside(r: Round) -> Path:
 
 
 def sweep_discarded(session: Path) -> None:
-    """Delete what is left of rounds discarded earlier; one that will not go is left."""
+    """Delete what is left of rounds discarded earlier, and of resets that did not finish
+    (see RESETTING); one that will not go is left for the next sweep."""
+    _finish_resets(session)
     for leftover in session.glob(f"{DISCARDED}*"):
         try:
             shutil.rmtree(leftover)
@@ -664,6 +668,142 @@ def sweep_discarded(session: Path) -> None:
 
 def restore(aside: Path, r: Round) -> None:
     aside.rename(r.path)
+
+
+def _round_dirs(session: Path) -> list[Path]:
+    return sorted(p for p in session.glob("round-*") if p.is_dir())
+
+
+@dataclass(frozen=True)
+class Contents:
+    """What a session holds, counted from its folders alone: it may not load."""
+
+    rounds: int
+    recordings: int
+
+
+# A reset moves the rounds into `.reset-<hex>`. Once every round is in it, a sibling file
+# `.reset-<hex>.done` marks it as meant to go, and it is renamed `.discarded-<hex>` and
+# deleted. Whatever of that fails, the sweep finishes: it deletes a marked `.reset-*` and an
+# empty one, and keeps an unmarked one with rounds in it. That one holds rounds a failed
+# reset could not put back: the error named it, no sweep deletes it, and Export keeps it.
+RESETTING = ".reset-"
+DONE = ".done"
+
+
+def _done(aside: Path) -> Path:
+    return aside.with_name(aside.name + DONE)
+
+
+def _discarded_for(aside: Path) -> Path:
+    return aside.with_name(DISCARDED + aside.name[len(RESETTING) :])
+
+
+def finished_reset(path: Path) -> bool:
+    """A reset's folder, or its marker, that is only waiting to be deleted."""
+    if path.name.endswith(DONE):
+        return path.name.startswith(RESETTING)
+    return path.name.startswith(RESETTING) and _done(path).exists()
+
+
+def _finish_resets(session: Path) -> None:
+    for aside in session.glob(f"{RESETTING}*"):
+        if not aside.is_dir():
+            orphan = aside.name.endswith(DONE)
+            if orphan and not aside.with_name(aside.name[: -len(DONE)]).exists():
+                try:
+                    aside.unlink(missing_ok=True)
+                except OSError as exc:
+                    log.warning("could not remove %s: %s", aside.name, exc)
+            continue
+        try:
+            if not any(aside.iterdir()):
+                aside.rmdir()
+            elif _done(aside).exists():
+                aside.rename(_discarded_for(aside))
+            else:
+                continue
+            _done(aside).unlink(missing_ok=True)
+        except OSError as exc:
+            log.warning("could not finish %s: %s", aside.name, exc)
+
+
+def _put_back(session: Path, aside: Path, moved: list[Path], exc: OSError) -> None:
+    """Return the rounds a failed reset moved; any that will not go back stay in `aside`."""
+    stuck = []
+    for folder in reversed(moved):
+        try:
+            (aside / folder.name).rename(folder)
+        except OSError:
+            stuck.append(folder.name)
+    if stuck:
+        raise SessionError(
+            f"could not reset {session.name}: {exc}; {', '.join(stuck)} could not be put "
+            f"back and are in {aside}"
+        ) from exc
+    try:
+        aside.rmdir()
+    except OSError as cleanup:
+        log.warning("reset %s: could not remove the empty %s: %s", session.name, aside, cleanup)
+
+
+def contents(session: Path) -> Contents:
+    rounds = _round_dirs(session)
+    return Contents(len(rounds), sum((r / RECORDING_FILE).exists() for r in rounds))
+
+
+def reset(session: Path) -> None:
+    """Discard every round and the report, keeping the setup: the session starts over.
+
+    The rounds are not read, so a damaged one goes too. See RESETTING for how they are
+    kept safe until the reset has succeeded.
+    """
+    sweep_discarded(session)
+    marker = uuid.uuid4().hex[:8]
+    aside = session / f"{RESETTING}{marker}"
+    try:
+        aside.mkdir()
+        moved: list[Path] = []
+        try:
+            for folder in _round_dirs(session):
+                folder.rename(aside / folder.name)
+                moved.append(folder)
+        except OSError as exc:
+            _put_back(session, aside, moved, exc)
+            raise
+    except OSError as exc:
+        raise SessionError(f"could not reset {session.name}: {exc}") from exc
+    log.info("reset %s: discarded %d rounds", session.name, len(moved))
+    try:
+        (session / REPORT_FILE).unlink(missing_ok=True)
+    except OSError as exc:
+        log.warning("reset %s: could not remove %s: %s", session.name, REPORT_FILE, exc)
+    discarded = _discarded_for(aside)
+    try:
+        _done(aside).touch()
+    except OSError as unmarked:
+        # Unmarked, no sweep would delete it: discard it now, or say where the rounds are.
+        try:
+            aside.rename(discarded)
+        except OSError as exc:
+            raise SessionError(
+                f"reset {session.name}, but its discarded rounds are still in {aside} "
+                f"({unmarked}; {exc}): delete that folder"
+            ) from exc
+    else:
+        try:
+            aside.rename(discarded)
+        except OSError as exc:
+            log.warning("reset %s: the next sweep deletes %s: %s", session.name, aside, exc)
+            return
+        try:
+            _done(aside).unlink(missing_ok=True)
+        except OSError as exc:
+            log.warning("reset %s: the next sweep removes %s: %s", session.name, _done(aside), exc)
+    try:
+        shutil.rmtree(discarded)
+    except OSError as exc:
+        log.warning("reset %s: the next sweep deletes %s: %s", session.name, discarded, exc)
 
 
 def _write_round(session: Path, setup_text: str, setup: Setup, plan: Plan) -> None:

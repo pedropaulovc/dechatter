@@ -3,6 +3,7 @@
 // and analysis are dechatter's Python running in a worker (engine.js).
 
 import { Mic } from './mic.js';
+import { chipLoad, feed, length, rate } from './units.js';
 import { STEPS, draw, placehold, read, reveal } from './wizard.js';
 
 const params = new URLSearchParams(location.search);
@@ -41,7 +42,21 @@ let current = localStorage.getItem(SESSION_KEY) ?? '';
 let state = null; // the current session, as the engine last reported it
 let editing = null; // { values, defaults, materials, computed, step } while the setup wizard is open, else null
 let timeline = []; // what cncjs reported since the job last started; saved with the recording
-let busy = false; // an engine request is in flight
+// Engine requests in flight; the controls wait while there are any.
+let requests = 0;
+const busy = () => requests > 0;
+
+// Every request ends here: a job that started while it was in flight is recorded now.
+function requestDone() {
+  requests -= 1;
+  syncRecording();
+}
+// The delete or reset confirmation: closed, being prepared, or open. While it is not
+// closed, the session it names cannot change.
+let dialog = 'closed';
+// Whether the open session's setup loads ('loads' | 'refused'), as the engine checks it;
+// null with no session open. Reset and Export need it to load; the rounds need not.
+let setupStatus = null;
 let stockChoice = 'same'; // survives redraws: planning on the wrong face position cuts air or too deep
 
 // ---- engine (Python in a worker) -------------------------------------------------------
@@ -86,7 +101,7 @@ function showError(message) {
 
 // Run one request that answers with the session's new state.
 async function act(method, ...args) {
-  busy = true;
+  requests += 1;
   render();
   try {
     state = await engine(method, current, ...args);
@@ -94,8 +109,7 @@ async function act(method, ...args) {
   } catch (err) {
     showError(err.message);
   } finally {
-    busy = false;
-    syncRecording();
+    requestDone();
     render();
   }
 }
@@ -104,11 +118,33 @@ async function openSession(name) {
   current = name;
   editing = null;
   state = null;
+  setupStatus = null;
   localStorage.setItem(SESSION_KEY, name);
   if (name) {
+    await checkSetup(name);
     await act('state');
   }
   render();
+}
+
+// Whether a session's setup loads, apart from its rounds: a session whose rounds do not
+// load can still be reset and exported.
+async function checkSetup(name) {
+  requests += 1;
+  render();
+  try {
+    const { status } = await engine('setup_status', name);
+    if (name === current) {
+      setupStatus = status;
+    }
+  } catch (err) {
+    if (name === current) {
+      setupStatus = null;
+      showError(err.message);
+    }
+  } finally {
+    requestDone();
+  }
 }
 
 async function newSession() {
@@ -122,6 +158,7 @@ async function newSession() {
     current = name.trim();
     localStorage.setItem(SESSION_KEY, current);
     state = null;
+    await checkSetup(current);
     await openWizard();
     showError('');
   } catch (err) {
@@ -191,7 +228,7 @@ async function nextStep() {
     goToStep(editing.step + 1);
     return;
   }
-  if (busy) {
+  if (busy()) {
     return; // already saving
   }
   // A job may be running one of this session's programs; a new setup could discard it.
@@ -230,10 +267,10 @@ function download(blob, filename) {
 }
 
 // Both carry the report, whose lengths follow the machine's units (mm until known).
-async function exportSession() {
+async function exportSession(name = current) {
   try {
-    const bytes = await engine('export_zip', current, units());
-    download(new Blob([bytes], { type: 'application/zip' }), `${current}.zip`);
+    const bytes = await engine('export_zip', name, units());
+    download(new Blob([bytes], { type: 'application/zip' }), `${name}.zip`);
   } catch (err) {
     showError(err.message);
   }
@@ -246,6 +283,108 @@ async function downloadReport() {
   } catch (err) {
     showError(err.message);
   }
+}
+
+// A cncjs job of this session's own program is running or paused.
+function jobOf(name) {
+  return (cnc.workflow === 'running' || cnc.workflow === 'paused') && cnc.program.startsWith(`dechatter-${name}-round-`);
+}
+
+// Why a session cannot be deleted or reset now; '' when it can.
+function busyRefusal(name, verb) {
+  if (mic.recording) {
+    return `A round is being recorded. ${verb} the session after the job.`;
+  }
+  if (jobOf(name)) {
+    return `cncjs is running a program of ${name}. ${verb} the session after the job.`;
+  }
+  return '';
+}
+
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+// Deleting removes the session; resetting discards its rounds and keeps its setup. Both ask
+// first, naming what goes, and offer Export. They read nothing but the folder, so a session
+// that does not load (from dechatter 0.1.x, or damaged) can go too.
+const ACTIONS = {
+  delete: {
+    verb: 'Delete',
+    question: (name, held) => `Delete session ${name}? It holds ${plural(held.rounds, 'round')} and ${plural(held.recordings, 'recording')}.`,
+    note: 'Deleting cannot be undone. Export keeps a copy as a zip.',
+    async run(name) {
+      names = await engine('delete', name);
+      await openSession('');
+    },
+  },
+  reset: {
+    verb: 'Reset',
+    question: (name, held) => `Reset session ${name}? Its ${plural(held.rounds, 'round')} and ${plural(held.recordings, 'recording')} are discarded; its setup stays, and planning starts again from round 1.`,
+    note: 'Resetting cannot be undone. Export keeps a copy as a zip.',
+    // On a refusal or failure the session shows as the engine has it now.
+    async run(name) {
+      try {
+        const after = await engine('reset', name);
+        if (name === current) {
+          state = after;
+          editing = null;
+        }
+      } catch (err) {
+        if (name === current) {
+          state = await engine('state', name).catch(() => state);
+        }
+        throw err;
+      }
+    },
+  },
+};
+
+async function ask(action) {
+  const name = current;
+  const { verb, question, note } = ACTIONS[action];
+  const refusal = busyRefusal(name, verb);
+  if (refusal) {
+    showError(refusal);
+    return;
+  }
+  dialog = 'preparing';
+  render();
+  try {
+    // A session whose setup does not load (from dechatter 0.1.x, or damaged) cannot be
+    // exported; one whose rounds alone do not load can.
+    const loads = setupStatus === 'loads';
+    $('confirm-question').textContent = question(name, await engine('contents', name));
+    $('confirm-note').textContent = loads ? note : `${note.split('.')[0]}. This session cannot be exported: its setup does not load (it is from dechatter 0.1.x, or damaged).`;
+    $('confirm-export').hidden = !loads;
+    $('confirm-go').textContent = verb;
+    Object.assign($('confirm-dialog').dataset, { session: name, action });
+    $('confirm-dialog').showModal();
+    dialog = 'open';
+  } catch (err) {
+    dialog = 'closed';
+    showError(err.message);
+    render();
+  }
+}
+
+async function confirmed() {
+  const { session: name, action } = $('confirm-dialog').dataset;
+  $('confirm-dialog').close();
+  const refusal = busyRefusal(name, ACTIONS[action].verb);
+  if (refusal) {
+    showError(refusal);
+    return;
+  }
+  requests += 1;
+  render();
+  try {
+    showError('');
+    await ACTIONS[action].run(name);
+  } catch (err) {
+    showError(err.message);
+  } finally {
+    requestDone();
+  }
+  render();
 }
 
 async function importSession(file) {
@@ -425,7 +564,7 @@ function plannedRound() {
 
 // Record exactly while cncjs runs the planned round's program.
 function syncRecording() {
-  if (!state || busy) {
+  if (!state || busy()) {
     return;
   }
   const round = plannedRound();
@@ -449,7 +588,7 @@ function syncRecording() {
 }
 
 async function loadProgram(round) {
-  busy = true;
+  requests += 1;
   render();
   try {
     // Capture has to be running before the job can start; the listener below does not wait.
@@ -467,7 +606,7 @@ async function loadProgram(round) {
   } catch (err) {
     showError(err.message);
   } finally {
-    busy = false;
+    requestDone();
     render();
   }
 }
@@ -507,11 +646,22 @@ function renderSessions() {
     ...names.map((name) => el('option', { value: name }, name)),
   );
   select.value = names.includes(current) ? current : '';
-  select.disabled = busy || mic.recording;
-  $('summary').textContent = state?.summary ?? '';
-  for (const id of ['edit-setup', 'export']) {
-    $(id).disabled = !state || busy || mic.recording;
+  select.disabled = busy() || dialog !== 'closed' || mic.recording;
+  $('summary').textContent = state ? summary(state) : '';
+  $('edit-setup').disabled = !state || busy() || mic.recording;
+  $('export').disabled = setupStatus !== 'loads' || busy() || mic.recording;
+  // Also for a session that failed to load: deleting it is the way to be rid of it.
+  for (const [id, verb] of [['delete-session', 'Delete'], ['reset-session', 'Reset']]) {
+    $(id).disabled = !names.includes(current) || busy() || Boolean(busyRefusal(current, verb)) || dialog !== 'closed';
   }
+  // Reset keeps the setup, so the setup has to load; Delete is the way out otherwise.
+  $('reset-session').disabled ||= setupStatus !== 'loads';
+}
+
+// The session's tool and cut in one line, lengths in the machine's units.
+function summary({ summary: s, spindle }) {
+  const depths = s.depths_mm.map((depth) => length(depth, units())).join(', ');
+  return `Ø ${length(s.diameter_mm, units())}, ${s.flutes} flutes, ${s.material}, depth ${depths}, ${chipLoad(s.chip_load_mm, units())} per tooth${spindle === 'manual' ? ', manual spindle' : ''}`;
 }
 
 function minutes(seconds) {
@@ -529,7 +679,7 @@ function renderSetup() {
   $('setup-hint').textContent = step.hint;
   $('setup-back').hidden = editing.step === 0;
   $('setup-next').textContent = editing.step === STEPS.length - 1 ? 'Save' : 'Next';
-  $('setup-next').disabled = busy;
+  $('setup-next').disabled = busy();
   $('units').textContent = UNITS_TEXT[cnc.units ?? 'unknown'];
   // Redraw the fields only when the step or the machine's units change, so typing is not
   // interrupted otherwise. A change of units drops an entry that is only half typed.
@@ -568,7 +718,7 @@ function renderStep() {
     return;
   }
 
-  if (busy) {
+  if (busy()) {
     step.append(el('p', {}, 'Working…'));
     return;
   }
@@ -590,7 +740,7 @@ function renderStep() {
     const stock = stockSelect();
     step.append(
       el('p', {}, 'Converged: no further cut is expected to add removal rate. The best stable cuts are below.'),
-      el('p', {}, `One more round can find how hard the best cut (${best.rpm} rpm, ${best.width_mm.toFixed(2)} mm wide, ${best.depth_mm} mm deep) can be pushed: the same cut at rising chip loads, lightest first. Its cuts do not change the map.`),
+      el('p', {}, `One more round can find how hard the best cut (${best.rpm} rpm, ${length(best.width_mm, units())} wide, ${length(best.depth_mm, units())} deep) can be pushed: the same cut at rising chip loads, lightest first. Its cuts do not change the map.`),
       el('p', {}, button('Plan the chip-load sweep', async () => {
         await act('plan_sweep', stockChoice);
         stockChoice = 'same';
@@ -612,13 +762,13 @@ function renderStep() {
     const first = state.rounds.length === 0;
     const stock = stockSelect();
     const shallower = !first && state.next_depth_mm !== state.depth_mm;
-    const label = `Plan round ${state.rounds.length + 1}${shallower ? ` at ${state.next_depth_mm} mm depth` : ''}`;
+    const label = `Plan round ${state.rounds.length + 1}${shallower ? ` at ${length(state.next_depth_mm, units())} depth` : ''}`;
     const plan = button(label, async () => {
       await act('plan', first ? 'same' : stockChoice);
       stockChoice = 'same';
     }, { className: 'primary' });
     const next = shallower
-      ? `${state.depth_mm} mm depth is settled. Next come cuts ${state.next_depth_mm} mm deep, starting from the widths that were stable.`
+      ? `${length(state.depth_mm, units(), { mmToo: true })} depth is settled. Next come cuts ${length(state.next_depth_mm, units(), { mmToo: true })} deep, starting from the widths that were stable.`
       : 'Plan the next cuts from what was measured.';
     step.append(el('p', {}, first ? 'Plan a coarse grid of test cuts.' : next));
     step.append(el('p', {}, plan, ...(first ? [] : [' on the ', stock])));
@@ -643,7 +793,7 @@ function renderStep() {
   };
   const unknownUnits = mic.open && cnc.link === 'ready' && cnc.units === null;
   step.append(
-    el('p', {}, `Round ${round.round}: ${tests} test cuts ${round.depth_mm} mm deep, about ${minutes(round.run_time_s)} plus rapids. The front face ends at Y${round.face_y_end_mm}.`),
+    el('p', {}, `Round ${round.round}: ${tests} test cuts ${length(round.depth_mm, units(), { mmToo: true })} deep, about ${minutes(round.run_time_s)} plus rapids. The front face ends at Y ${length(round.face_y_end_mm, units(), { mmToo: true })}.`),
     el('ol', {},
       el('li', {}, 'Zero X at the left end of the stock, Y on its front face, Z on top.'),
       el('li', {}, load, ...(unknownUnits ? [' cncjs has not reported G20 or G21 yet; the machine is in ', declare] : []), mic.open ? '' : ' (enable the microphone first)'),
@@ -666,7 +816,7 @@ function verdictCell(round, pass) {
   if (!round.analysed) {
     return el('td', {}, '');
   }
-  const select = el('select', { disabled: busy },
+  const select = el('select', { disabled: busy() },
     ...(pass.verdict ? [] : [el('option', { value: '' }, 'not heard')]),
     el('option', { value: 'stable' }, pass.status === 'aborted' ? 'stable (aborted)' : 'stable'),
     el('option', { value: 'unstable' }, pass.status === 'aborted' ? 'chatter (aborted)' : 'chatter'),
@@ -684,14 +834,14 @@ function renderRound() {
     return;
   }
   const kind = round.planner === 'sweep' ? ' (chip-load sweep)' : '';
-  $('round-title').textContent = `Round ${round.round}${kind}${round.analysed ? ' results' : ''}, ${round.depth_mm} mm deep`;
+  $('round-title').textContent = `Round ${round.round}${kind}${round.analysed ? ' results' : ''}, ${length(round.depth_mm, units(), { mmToo: true })} deep`;
   $('passes').replaceChildren(
     ...round.passes.map((p) =>
       el('tr', { className: p.kind === 'test' ? '' : 'prep' },
         el('td', {}, String(p.id)),
         el('td', {}, String(p.rpm)),
-        el('td', {}, p.width_mm.toFixed(2)),
-        el('td', {}, String(Math.round(p.feed_mm_min))),
+        el('td', {}, length(p.width_mm, units())),
+        el('td', {}, feed(p.feed_mm_min, units())),
         el('td', {}, p.p_stable === null ? '' : p.p_stable.toFixed(2)),
         verdictCell(round, p),
       ),
@@ -705,11 +855,11 @@ function renderMap() {
   if ($('map-section').hidden) {
     return;
   }
-  $('map-title').textContent = `Stability map at ${state.depth_mm} mm depth`;
+  $('map-title').textContent = `Stability map at ${length(state.depth_mm, units(), { mmToo: true })} depth`;
   const { speeds, widths, p } = state.map;
   const canvas = $('map');
   const ctx = canvas.getContext('2d');
-  const pad = { left: 40, bottom: 16, top: 4, right: 4 };
+  const pad = { left: units() === 'in' ? 56 : 40, bottom: 16, top: 4, right: 4 };
   const w = canvas.width - pad.left - pad.right;
   const h = canvas.height - pad.top - pad.bottom;
   ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -750,9 +900,9 @@ function renderMap() {
   ctx.fillText(`${speeds[0]} rpm`, pad.left, pad.top + h + 3);
   ctx.textAlign = 'right';
   ctx.fillText(String(speeds.at(-1)), pad.left + w, pad.top + h + 3);
-  ctx.fillText(`${widths.at(-1)}`, pad.left - 3, pad.top);
+  ctx.fillText(length(widths.at(-1), units()).split(' ')[0], pad.left - 3, pad.top);
   ctx.textBaseline = 'bottom';
-  ctx.fillText(`${widths[0]} mm`, pad.left - 3, pad.top + h);
+  ctx.fillText(length(widths[0], units()), pad.left - 3, pad.top + h);
 }
 
 function renderBest() {
@@ -762,10 +912,10 @@ function renderBest() {
     ...best.map((b) =>
       el('tr', {},
         el('td', {}, String(b.rpm)),
-        el('td', {}, `${b.width_mm.toFixed(2)} mm`),
-        el('td', {}, `${b.depth_mm} mm`),
-        el('td', {}, String(b.feed_mm_min)),
-        el('td', {}, b.mrr_cm3_min.toFixed(2)),
+        el('td', {}, length(b.width_mm, units())),
+        el('td', {}, length(b.depth_mm, units())),
+        el('td', {}, feed(b.feed_mm_min, units())),
+        el('td', {}, rate(b.mrr_cm3_min, units())),
       ),
     ),
   );
@@ -774,10 +924,11 @@ function renderBest() {
   if (!sweep) {
     return;
   }
-  const where = `At ${sweep.rpm} rpm, ${sweep.width_mm.toFixed(2)} mm wide and ${sweep.depth_mm} mm deep`;
+  const u = units();
+  const where = `at ${sweep.rpm} rpm, ${length(sweep.width_mm, u)} wide and ${length(sweep.depth_mm, u)} deep`;
   $('sweep-result').textContent = sweep.chip_load_mm === null
-    ? `Chip-load sweep: ${where.toLowerCase()}, even its lightest pass chattered. Keep the session's ${sweep.session_chip_load_mm} mm per tooth.`
-    : `Chip-load sweep: ${where.toLowerCase()}, the cut stayed stable up to ${sweep.chip_load_mm} mm per tooth (the session used ${sweep.session_chip_load_mm}): feed ${sweep.feed_mm_min} mm/min, ${sweep.mrr_cm3_min.toFixed(2)} cm³/min.`;
+    ? `Chip-load sweep: ${where}, even its lightest pass chattered. Keep the session's ${chipLoad(sweep.session_chip_load_mm, u, { mmToo: true })} per tooth.`
+    : `Chip-load sweep: ${where}, the cut stayed stable up to ${chipLoad(sweep.chip_load_mm, u, { mmToo: true })} per tooth (the session used ${chipLoad(sweep.session_chip_load_mm, u)}): feed ${feed(sweep.feed_mm_min, u, { mmToo: true })}, ${rate(sweep.mrr_cm3_min, u, { mmToo: true })}.`;
 }
 
 function render() {
@@ -812,7 +963,22 @@ $('cancel-setup').onclick = () => {
   showError('');
   render();
 };
-$('export').onclick = exportSession;
+$('export').onclick = () => exportSession();
+$('delete-session').onclick = () => ask('delete');
+$('reset-session').onclick = () => ask('reset');
+// The page's error line is behind the dialog: say there how the export went.
+$('confirm-dialog').addEventListener('close', () => {
+  dialog = 'closed';
+  render();
+});
+$('confirm-export').onclick = async () => {
+  showError('');
+  await exportSession($('confirm-dialog').dataset.session);
+  const { verb } = ACTIONS[$('confirm-dialog').dataset.action];
+  $('confirm-note').textContent = $('error').hidden ? `Exported. ${verb} it now, or cancel.` : `Not exported: ${$('error').textContent}`;
+};
+$('confirm-go').onclick = confirmed;
+$('confirm-cancel').onclick = () => $('confirm-dialog').close();
 $('download-report').onclick = downloadReport;
 $('import').onclick = () => $('import-file').click();
 $('import-file').onchange = () => {
