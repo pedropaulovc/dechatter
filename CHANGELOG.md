@@ -12,12 +12,14 @@ What changed for people who use the dechatter widget and command line. The forma
   into cncjs and pressing play. It sends one move at a time through cncjs and waits for the
   controller to report Idle at its end, so it knows exactly when each cut starts and ends
   and records those windows with the sound. Hold, Resume and Stop are in the widget; Stop
-  resets the controller only once its hold is complete, and an alarm is left for you to clear
-  (the widget never unlocks). With a
+  always holds first and resets the controller only once it has reported the hold complete
+  and stopped moving, and an alarm (its state or an `ALARM:` line) ends the round with
+  nothing more sent and is left for you to clear (the widget never unlocks). With a
   manual spindle no `M0` is sent: the widget asks for each speed and waits for Continue, so
   the "set the spindle" prompt shows only once the machine has stopped. Start is refused
   while cncjs runs a job of its own, in alarm or hold, or before the machine's units are
-  known, and a job cncjs starts during the round stops it.
+  known, and a job cncjs starts during the round stops it. While a round runs, or starts,
+  its session stays open: the session list, New, Import and Setup wait for it to end.
   `program.nc` is still written, unchanged, for the command line.
 
 - On a machine in G20 the whole widget shows inches, not only the wizard and the programs:
@@ -48,7 +50,11 @@ What changed for people who use the dechatter widget and command line. The forma
   now analysed from the cut and dwell windows it recorded. A recording without them is
   searched against the spindle's own noise around each cut, keeps the pass order with the
   narrowest cuts taken as the unheard ones, and marks passes after the last cut as "likely
-  not run". A widget run that ended before its first cut leaves the round to run again.
+  not run". A widget run that ended before its first cut leaves the round to run again,
+  and a cut stopped before the cutter reached the stock counts as not run. A hold before
+  the cutter reaches the stock no longer puts air into the cut analysed. Long silence in a
+  recording, such as a recorder left running after the round, no longer hides the
+  spindle's level.
   A pass whose spindle speed was found at the edge of its search is flagged.
 - A recording could get stuck with no way to stop it, and Export was disabled meanwhile. The
   recording now follows the widget's own run, which always ends (Stop, the last pass, an

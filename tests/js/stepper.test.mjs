@@ -7,6 +7,14 @@ import { PHASE, Stepper } from '../../src/dechatter/widget/stepper.js';
 
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 
+// What a controller does with a feed hold.
+const HOLD = {
+  COMPLETES: 'completes', // decelerates, then reports Hold:0
+  NEVER: 'never', // never reports the hold complete
+  ALARMS: 'alarms', // goes into alarm instead
+  SLOWS: 'slows', // reports Hold:0 while its position still changes (Grbl 0.9's bare Hold)
+};
+
 // A controller as cncjs reports it: each move takes `seconds` of virtual time, shows Run
 // on the way and Idle at its end. It refuses a second move while one is under way.
 class Machine {
@@ -17,7 +25,9 @@ class Machine {
     this.log = [];
     this.moving = false;
     this.onMove = null; // a test's hook into a move under way
-    this.settles = true; // feed hold completes
+    this.hold = HOLD.COMPLETES; // what a feed hold does
+    this.lastReport = null; // when the controller last reported
+    this.resetAt = null;
     this.io = {
       send: (lines) => {
         this.log.push(...lines);
@@ -29,13 +39,13 @@ class Machine {
       },
       feedhold: () => {
         this.log.push('!');
-        // A controller decelerates, then reports the hold complete (Hold:0), unless told not to.
-        if (this.settles) {
-          setImmediate(() => this.report('Hold', 0));
-        }
+        this.feedhold();
       },
       cyclestart: () => this.log.push('~'),
-      reset: () => this.log.push('^X'),
+      reset: () => {
+        this.log.push('^X');
+        this.resetAt = this.t;
+      },
     };
   }
 
@@ -47,7 +57,29 @@ class Machine {
   };
 
   report(activeState, subState = null) {
+    this.lastReport = this.t;
     this.stepper.controller({ activeState, subState, wpos: this.wpos });
+  }
+
+  async feedhold() {
+    if (this.hold === HOLD.NEVER) {
+      return;
+    }
+    await tick();
+    if (this.hold === HOLD.ALARMS) {
+      this.report('Alarm');
+      return;
+    }
+    if (this.hold === HOLD.SLOWS) {
+      // Grbl 0.9 says a bare Hold, which cncjs reads as Hold:0, while it still decelerates.
+      for (let i = 0; i < 3; i += 1) {
+        this.wpos = { ...this.wpos, x: (Number(this.wpos.x) + 0.5).toFixed(3) };
+        this.report('Hold', 0);
+        await tick();
+      }
+      return;
+    }
+    this.report('Hold', 0); // decelerated: the hold is complete
   }
 
   async move(lines) {
@@ -275,7 +307,7 @@ test('stop resets only once the hold is complete, and never without it', async (
   assert.deepEqual(settled.log.slice(-2), ['!', '^X'], 'reset after Hold:0');
 
   const moving = new Machine();
-  moving.settles = false; // it never reports the hold complete
+  moving.hold = HOLD.NEVER;
   const second = moving.stepper_for().stepper;
   moving.onMove = async (lines) => {
     if (lines[0] === 'G1 X68 F500') {
@@ -314,4 +346,75 @@ test('a hold already in place when a move is sent holds that move', async () => 
   assert.equal(stepper.phase, PHASE.HELD);
   stepper.disconnected();
   assert.equal(await running, PHASE.FAILED);
+});
+
+// The review's log: Idle at Z10 from the setup move, the next move sent, Stop before
+// cncjs reports anything new. That Idle predates the move: a reset now loses position.
+test('stop or a failure right after a move is sent holds before it resets', async () => {
+  for (const [what, act] of [
+    ['stop', (stepper) => stepper.stop()],
+    ['error', (stepper) => stepper.error('error:9 (G-code locked out during alarm or jog state)')],
+  ]) {
+    const machine = new Machine();
+    const { stepper } = machine.stepper_for();
+    const blocks = [
+      { step: 'setup', lines: ['G0 Z10'], pass_id: null, rpm: null, seconds: null, target: { z: 10 } },
+      { step: 'rapid', lines: ['G0 X-8 Y1'], pass_id: 1, rpm: 1000, seconds: null, target: { x: -8, y: 1, z: 10 } },
+    ];
+    const move = machine.move.bind(machine);
+    machine.move = async function (lines) {
+      if (lines[0] !== 'G0 X-8 Y1') {
+        return move(lines);
+      }
+      this.moving = false;
+      act(stepper); // before cncjs's next poll: the last report is still Idle
+    };
+    await stepper.run(blocks);
+    assert.deepEqual(machine.log, ['G0 Z10', 'G0 X-8 Y1', '!', '^X'], what);
+  }
+});
+
+test('an alarm while stopping ends it at once, without a reset or blame on the hold', async () => {
+  const machine = new Machine();
+  machine.hold = HOLD.ALARMS;
+  const { stepper } = machine.stepper_for();
+  machine.onMove = async (lines) => {
+    if (lines[0] === 'G1 X68 F500') {
+      machine.moving = false;
+      stepper.stop();
+    }
+  };
+  assert.equal(await stepper.run(round([1])), PHASE.FAILED);
+  assert.ok(!machine.log.includes('^X'));
+  assert.ok(machine.t < 5 + 10 + 2, 'it does not wait out the settle time');
+  assert.match(stepper.reason, /alarm/);
+  assert.doesNotMatch(stepper.reason, /did not report the hold complete/);
+});
+
+test('an ALARM: line ends the run without a hold, a reset or an unlock', async () => {
+  const machine = new Machine();
+  const { stepper } = machine.stepper_for();
+  machine.onMove = async (lines) => {
+    if (lines[0] === 'G1 X68 F500') {
+      machine.moving = false;
+      stepper.alarm('ALARM:1 (Hard limit)');
+    }
+  };
+  assert.equal(await stepper.run(round([1])), PHASE.FAILED);
+  assert.ok(!machine.log.includes('!') && !machine.log.includes('^X') && !machine.log.includes('$X'));
+  assert.match(stepper.reason, /ALARM:1.*home, or unlock/);
+});
+
+test('a hold counts as complete only once the position stops changing', async () => {
+  const machine = new Machine();
+  machine.hold = HOLD.SLOWS;
+  const { stepper } = machine.stepper_for();
+  machine.onMove = async (lines) => {
+    if (lines[0] === 'G1 X68 F500') {
+      machine.moving = false;
+      stepper.stop();
+    }
+  };
+  assert.equal(await stepper.run(round([1])), PHASE.STOPPED);
+  assert.ok(machine.resetAt - machine.lastReport >= 1, `reset ${machine.resetAt - machine.lastReport} s after the last move`);
 });

@@ -4,8 +4,8 @@
 // is to send one move, then wait until it reports Idle at that move's end.
 //
 // The stepper talks to the machine through `io` (cncjs's socket commands) and learns its
-// state from controller() (cncjs's controller:state), error() (an error: or ALARM: line)
-// and disconnected(). Nothing here touches the page.
+// state from controller() (cncjs's controller:state), error() (an error: line), alarm()
+// (an ALARM: line) and disconnected(). Nothing here touches the page.
 
 // What the run is doing; the widget shows it.
 export const PHASE = {
@@ -22,13 +22,27 @@ export const PHASE = {
 
 const FINISHED = new Set([PHASE.DONE, PHASE.STOPPED, PHASE.FAILED]);
 const HOLD_STATES = new Set(['Hold', 'Door']);
-// Stop: hold, wait until the controller reports the hold complete (Hold:0) or Idle, then
-// reset. A reset while the machine still moves loses its position (Grbl ALARM:3), so if it
-// does not settle in this long, nothing is reset and the operator is told.
-const SETTLE_TIMEOUT_MS = 15000;
+// Stop: hold, wait until the controller reports the hold complete or Idle, then reset. A
+// reset while the machine still moves loses its position (Grbl ALARM:3), so if it does not
+// settle in this long, nothing is reset and the operator is told.
+const SETTLE_TIMEOUT_S = 15;
+// Grbl 0.9 reports a bare Hold, which cncjs reads as Hold:0, while it still decelerates. A
+// hold is complete once it has said Hold:0 and nothing has changed for this long: cncjs
+// polls about every 250 ms and reports only changes, the position among them.
+const QUIET_S = 1;
+const POLL_MS = 250;
 const ALARM_ADVICE = 'Clear it in cncjs (home, or unlock if you are sure the position is still right).';
 
 class Ended extends Error {}
+
+// How a halt ended.
+const HALT = {
+  RESET: 'reset', // the machine had stopped; it was reset
+  UNSETTLED: 'unsettled', // it never said it stopped: nothing was reset
+  ALARM: 'alarm', // the controller went into alarm: it stopped itself
+};
+
+const holdComplete = (state) => state.activeState === 'Hold' && state.subState === 0;
 
 // Positions match within this many mm: controllers report three decimals in mm, or four in
 // inches, and a program in inches rounds its words to four decimals.
@@ -51,7 +65,8 @@ export class Stepper {
     this.total = 0;
     this.reason = ''; // why it stopped or failed
     this.state = { activeState: '', subState: null, wpos: null };
-    this.watchers = []; // what halt() waits for; unlike waiters, they outlive the end of the run
+    this.watchers = []; // halt() waiting for the next report; unlike waiters, they outlive the end of the run
+    this.alarmedBy = null; // the alarm that ended the run, if one did
     this.waiters = [];
     this.ended = null; // the Ended error every wait rejects with, once the run is over
     this.holds = []; // [start, end] of holds during the current block
@@ -71,16 +86,12 @@ export class Stepper {
   // subState: Grbl's Hold:N, as cncjs reports it: 0 once the hold is complete.
   controller({ activeState, subState = null, wpos }) {
     this.state = { activeState: activeState ?? '', subState, wpos: wpos ?? this.state.wpos };
-    for (const watcher of [...this.watchers]) {
-      if (watcher.until(this.state)) {
-        this.watchers.splice(this.watchers.indexOf(watcher), 1);
-        watcher.resolve(true);
-      }
-    }
     if (activeState === 'Alarm') {
-      // The controller has stopped the machine itself: nothing is sent, not even a reset.
-      this.end(PHASE.FAILED, `the controller is in alarm. ${ALARM_ADVICE}`);
+      this.alarm('an alarm');
       return;
+    }
+    for (const resolve of this.watchers.splice(0)) {
+      resolve(this.state);
     }
     const away = this.phase === PHASE.MOVING && activeState === 'Idle' && !this.at(this.state.wpos, this.block?.target ?? {});
     this.idleAway = away ? (this.idleAway ?? this.now()) : null;
@@ -103,6 +114,19 @@ export class Stepper {
 
   error(message) {
     this.fail(message);
+  }
+
+  // The controller has stopped the machine itself: nothing is sent, not even a hold or a
+  // reset, and a halt under way ends at once.
+  alarm(what) {
+    if (this.alarmedBy !== null || this.phase === PHASE.DONE || this.phase === PHASE.STOPPED) {
+      return;
+    }
+    this.alarmedBy = what;
+    this.end(PHASE.FAILED, `the controller reported ${what}. ${ALARM_ADVICE}`);
+    for (const resolve of this.watchers.splice(0)) {
+      resolve(this.state);
+    }
   }
 
   disconnected() {
@@ -134,42 +158,72 @@ export class Stepper {
     if (this.finished || this.phase === PHASE.STOPPING) {
       return;
     }
-    const wasRunning = this.phase !== PHASE.READY;
+    const was = this.phase;
     this.end(PHASE.STOPPING, reason);
     this.halting = (async () => {
-      const settled = wasRunning ? await this.halt() : true;
-      this.set(settled ? PHASE.STOPPED : PHASE.FAILED);
+      const halt = was === PHASE.READY ? HALT.RESET : await this.halt(was);
+      this.set(halt === HALT.RESET ? PHASE.STOPPED : PHASE.FAILED);
     })();
     await this.halting;
   }
 
-  // Hold; reset once the hold is complete or the machine idle. Resolves false, with the
-  // reason said, if it never settles: then nothing is reset.
-  async halt() {
-    const settled = (state) => state.activeState === 'Idle' || (state.activeState === 'Hold' && state.subState === 0);
-    if (!settled(this.state)) {
-      // Watch before holding: the controller may answer at once.
-      const holdComplete = new Promise((resolve) => this.watchers.push({ until: settled, resolve }));
-      this.io.feedhold();
-      const done = await Promise.race([holdComplete, this.sleep(SETTLE_TIMEOUT_MS).then(() => false)]);
+  // Bring the machine to rest and reset it. `was`: the phase the run was in.
+  async halt(was) {
+    if (this.alarmedBy !== null) {
+      return HALT.ALARM;
+    }
+    if (was !== PHASE.MOVING && was !== PHASE.HELD) {
+      // Dwelling or waiting for the spindle: the last move was seen to end where it should.
+      this.io.reset();
+      return HALT.RESET;
+    }
+    try {
+      return await this.holdThenReset();
+    } finally {
       this.watchers = [];
-      if (!done) {
+    }
+  }
+
+  // A move was sent: the last report may predate it (cncjs reports only changes), so an
+  // Idle counts only once reported after the hold. A hold already complete when the move
+  // was sent keeps that move from starting, so it counts once nothing changes.
+  async holdThenReset() {
+    const since = this.now();
+    let report = this.nextReport(); // watch before holding: the controller may answer at once
+    this.io.feedhold();
+    let quietSince = holdComplete(this.state) ? since : null;
+    for (;;) {
+      const state = await Promise.race([report, this.sleep(POLL_MS).then(() => null)]);
+      if (this.alarmedBy !== null) {
+        return HALT.ALARM;
+      }
+      if (state) {
+        report = this.nextReport();
+        quietSince = holdComplete(state) ? this.now() : null;
+      }
+      if (state?.activeState === 'Idle' || (quietSince !== null && this.now() - quietSince >= QUIET_S)) {
+        this.io.reset();
+        return HALT.RESET;
+      }
+      if (this.now() - since >= SETTLE_TIMEOUT_S) {
         this.reason = `${this.reason}; the machine did not report the hold complete, so it was not reset. Make sure it has stopped, then reset it in cncjs.`;
-        return false;
+        return HALT.UNSETTLED;
       }
     }
-    this.io.reset();
-    return true;
+  }
+
+  nextReport() {
+    return new Promise((resolve) => this.watchers.push(resolve));
   }
 
   fail(reason) {
     if (this.finished || this.phase === PHASE.STOPPING) {
       return;
     }
-    const wasRunning = this.phase !== PHASE.READY;
+    const was = this.phase;
     this.end(PHASE.FAILED, reason);
-    if (wasRunning) {
-      this.halting = this.halt();
+    if (was !== PHASE.READY) {
+      this.halting = this.halt(was);
     }
   }
 

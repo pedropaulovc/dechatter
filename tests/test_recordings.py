@@ -123,17 +123,20 @@ def test_windows_the_widget_recorded_say_where_each_cut_is(setup):
         truth = synth.DEFAULT_MACHINE.chatters(p.rpm, p.width_mm, plan.flutes, plan.axial_depth_mm)
         assert (result.verdict is Verdict.UNSTABLE) == truth, p.id
 
-    # The run stopped in pass 5: a cut cut short, held cuts analysed up to the hold, and
-    # passes never reached are "not run" without any guessing from the sound.
+    # The run stopped in pass 5: a cut cut short, a held cut analysed over its longest
+    # stretch without the hold, and passes never reached are "not run" without any guessing
+    # from the sound.
     stopped = [e for e in timeline if e.get("pass", 0) <= 5]
     cut5 = next(e for e in stopped if e["event"] == "cut" and e["pass"] == 5)
     cut5.update(aborted=True, end=cut5["start"] + plan.passes[5].lead_in_s + 2.0)
     cut3 = next(e for e in stopped if e["event"] == "cut" and e["pass"] == 3)
-    cut3["holds"] = [[cut3["start"] + plan.passes[3].lead_in_s + 1.5, cut3["start"] + 30]]
+    held_at = cut3["start"] + plan.passes[3].lead_in_s + 1.5
+    cut3["holds"] = [[held_at, held_at + 30]]
+    cut3["end"] += 30  # resumed: the move ends that much later
     placed = session.placements_from_timeline(plan, stopped)
-    assert (
-        placed[3].cut.duration_s == pytest.approx(1.5) and placed[3].status is PassStatus.ANALYSED
-    )
+    longer = max(1.5, plan.passes[3].expected_cut_s - 1.5)
+    assert placed[3].cut.duration_s == pytest.approx(longer)
+    assert placed[3].status is PassStatus.ANALYSED
     assert placed[5].cut.duration_s == pytest.approx(2.0) and placed[5].status is PassStatus.ABORTED
     results = session.analyze(plan, recording, synth.RATE, "r.wav", Thresholds(), timeline=stopped)
     assert results.passes[5].status is PassStatus.ABORTED
@@ -169,6 +172,22 @@ def test_cuts_longer_than_a_minute_are_found_too(setup):
     assert audio.floor_window_s(plan) > 3 * 90
 
 
+def test_cuts_are_found_when_silence_is_most_of_the_recording(setup):
+    """A recorder left running after the run: the spindle's level is no longer the median."""
+    from test_plan import round1
+
+    plan = round1(setup)
+    recording = synth.record(plan, seed=3)
+    rng = np.random.default_rng(1)
+    silence = 0.0005 * rng.standard_normal(int(1.5 * len(recording)))
+    alone = audio.find_cuts(recording, synth.RATE, plan)
+    padded = audio.find_cuts(np.concatenate((recording, silence)), synth.RATE, plan)
+    assert sorted(padded.matches) == sorted(alone.matches)
+    for index, segment in alone.matches.items():
+        assert padded.matches[index].start_s == pytest.approx(segment.start_s, abs=1.0)
+        assert padded.matches[index].end_s == pytest.approx(segment.end_s, abs=1.0)
+
+
 def held(timeline: list, pass_id: int, offsets: tuple[float, float]) -> None:
     cut = next(e for e in timeline if e["event"] == "cut" and e["pass"] == pass_id)
     cut["holds"] = [[cut["start"] + offsets[0], cut["start"] + offsets[1]]]
@@ -180,14 +199,17 @@ def test_a_hold_is_cut_out_of_the_window_wherever_it_falls(setup):
     plan = round1(setup)
     timeline, contact = schedule(plan)
     lead = plan.passes[2].lead_in_s
-    # A hold during the lead-in: the cut after it is whole.
+    # A hold during the lead-in delays contact by as long: the cut after it is whole.
     held(timeline, 2, (0.2 * lead, 0.6 * lead))
+    delay = 0.4 * lead
+    cut2 = next(e for e in timeline if e["event"] == "cut" and e["pass"] == 2)
+    cut2["end"] += delay
     # A hold mid-cut: the longer of the two stretches around it.
     lead4 = plan.passes[4].lead_in_s
     held(timeline, 4, (lead4 + 1.0, lead4 + 2.0))
     placed = session.placements_from_timeline(plan, timeline)
-    assert placed[2].cut.start_s == pytest.approx(contact[2][0])
-    assert placed[2].cut.end_s == pytest.approx(contact[2][1])
+    assert placed[2].cut.start_s == pytest.approx(contact[2][0] + delay)
+    assert placed[2].cut.end_s == pytest.approx(contact[2][1] + delay)
     cut4 = placed[4].cut
     assert cut4.start_s == pytest.approx(contact[4][0] + 2.0) and cut4.end_s == pytest.approx(
         contact[4][1]
@@ -217,6 +239,38 @@ def test_a_cut_stopped_just_after_contact_keeps_its_step(setup):
     cut3["end"] = cut3["start"] + plan.passes[3].lead_in_s / 2
     results = session.analyze(plan, recording, synth.RATE, "r.wav", Thresholds(), timeline=stopped)
     assert results.passes[3].status is PassStatus.NOT_RUN
+
+
+def stopped_in_lead_in(plan: Plan, timeline: list, index: int) -> list:
+    """The run held during pass `index`'s lead-in, cutter still in the air, then stopped:
+    the window outlasts the lead-in in wall time, but the cutter never reached the stock."""
+    p = plan.passes[index]
+    stopped = [e for e in timeline if e.get("pass", 0) <= p.id]
+    cut = next(e for e in stopped if e["event"] == "cut" and e["pass"] == p.id)
+    moved = 0.5 * p.lead_in_s
+    cut.update(aborted=True, end=cut["start"] + moved + 10.0)
+    cut["holds"] = [[cut["start"] + moved, cut["end"]]]
+    return stopped
+
+
+def test_a_hold_before_contact_then_stop_cuts_nothing():
+    plan = Plan.load(FIXTURES / "round-02" / "plan.json")
+    timeline, _ = schedule(plan)
+    recording = synth.record(plan, seed=3)
+    # The first cut: nothing was cut, so the round stays to be run again.
+    with pytest.raises(audio.AudioError, match="ended before its first cut"):
+        session.analyze(
+            plan, recording, synth.RATE, "r.wav", Thresholds(),
+            timeline=stopped_in_lead_in(plan, timeline, 0),
+        )  # fmt: skip
+    # A later cut: not run, and the face is where the pass before it left it, with no step.
+    stopped = stopped_in_lead_in(plan, timeline, 2)
+    assert 2 not in session.placements_from_timeline(plan, stopped)
+    results = session.analyze(plan, recording, synth.RATE, "r.wav", Thresholds(), timeline=stopped)
+    assert results.passes[2].status is PassStatus.NOT_RUN
+    face, remnant = session.face_after(session.Round(None, plan, results))
+    widths = [p.width_mm for p in plan.passes]
+    assert (face, remnant) == pytest.approx((plan.face_y_start_mm + sum(widths[:2]), 0.0))
 
 
 @pytest.mark.parametrize(

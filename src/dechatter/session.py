@@ -338,9 +338,10 @@ def placements_from_timeline(plan: Plan, timeline: list) -> dict[int, Placement]
     """Pass index -> where the widget recorded it running; None without such a record.
 
     The widget times each pass's cut move, from sending it to Idle at its end, and the
-    dwell before it. The cutter meets the stock a lead-in after the move starts and leaves
-    it as long before it ends; a cut held part-way is analysed up to the hold. A pass with
-    no cut window never ran.
+    dwell before it. The cutter meets the stock a lead-in of motion after the move starts
+    and leaves it as long before it ends; the machine stands still during a hold, so a hold
+    in the lead-in delays contact by as long, and a hold in the cut is left out of what is
+    analysed. A pass with no cut window, or stopped before contact, never ran.
     """
     starts = [e["t"] for e in timeline if e.get("event") == "record"]
     if not starts:
@@ -354,11 +355,14 @@ def placements_from_timeline(plan: Plan, timeline: list) -> dict[int, Placement]
         if cut is None:
             continue
         aborted = bool(cut.get("aborted"))
-        start = cut["start"] - t0 + p.lead_in_s
-        end = cut["end"] - t0 - (0.0 if aborted else p.lead_in_s)
-        if aborted and end <= start:
+        holds = [(a - t0, b - t0) for a, b in cut.get("holds") or []]
+        start = _after_motion(cut["start"] - t0, p.lead_in_s, holds)
+        end = cut["end"] - t0
+        if not aborted:
+            end = -_after_motion(-end, p.lead_in_s, [(-b, -a) for a, b in holds])
+        stretch = _longest_free(start, end, holds)
+        if stretch is None:
             continue  # stopped before the cutter met the stock: not run
-        stretch = _longest_free(start, end, [(a - t0, b - t0) for a, b in cut.get("holds") or []])
         status = PassStatus.ABORTED if aborted else PassStatus.ANALYSED
         dwell = dwells.get(p.id)
         air = None if dwell is None else audio.Segment(dwell["start"] - t0, dwell["end"] - t0)
@@ -366,9 +370,24 @@ def placements_from_timeline(plan: Plan, timeline: list) -> dict[int, Placement]
     return found
 
 
-def _longest_free(start: float, end: float, holds: list[tuple[float, float]]) -> audio.Segment:
-    """The longest stretch of [start, end] without a hold in it: the machine stood still
-    during a hold, and the sound of a still cutter is no cut."""
+def _after_motion(t: float, motion_s: float, holds: list[tuple[float, float]]) -> float:
+    """When a machine moving from time t, standing still during each hold, has moved for
+    motion_s seconds."""
+    for hold_start, hold_end in sorted(holds):
+        if hold_end <= t:
+            continue
+        if hold_start >= t + motion_s:
+            break
+        motion_s -= max(hold_start - t, 0.0)
+        t = hold_end
+    return t + motion_s
+
+
+def _longest_free(
+    start: float, end: float, holds: list[tuple[float, float]]
+) -> audio.Segment | None:
+    """The longest stretch of [start, end] without a hold in it, None if there is none: the
+    machine stood still during a hold, and the sound of a still cutter is no cut."""
     free, at = [], start
     for hold_start, hold_end in sorted(holds):
         if hold_start > at:
@@ -377,7 +396,7 @@ def _longest_free(start: float, end: float, holds: list[tuple[float, float]]) ->
     if at < end:
         free.append(audio.Segment(at, end))
     free = [s for s in free if s.duration_s > 0]
-    return max(free, key=lambda s: s.duration_s, default=audio.Segment(start, start))
+    return max(free, key=lambda s: s.duration_s, default=None)
 
 
 def _match(plan: Plan, samples: np.ndarray, rate: int, manual: list[audio.Segment] | None):

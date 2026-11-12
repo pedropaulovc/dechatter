@@ -550,6 +550,16 @@ def test_aborted_job_still_yields_results_and_a_cleanup_next_round(engine):
     assert "cleanup" in [p["kind"] for p in state["rounds"][1]["passes"]]
 
 
+def test_the_report_does_not_call_passes_likely_not_run_unheard(engine):
+    engine.call("plan", NAME, "same")
+    engine.run_round(1, abort_in_pass=9)
+    page = engine.call("report_html", NAME, "mm")
+    rows = re.findall(r"<tr><td>(\d+)</td>(.*?)</tr>", page.split("<h3>Round 1")[1])
+    trailing = [cells for pass_id, cells in rows if int(pass_id) >= 10]
+    assert trailing and all("likely not run" in cells for cells in trailing)
+    assert not any("not heard" in cells for cells in trailing)
+
+
 def test_a_widget_run_that_ended_before_its_first_cut_leaves_the_round_runnable(engine):
     engine.call("plan", NAME, "same")
     engine.call("record_start", NAME, 1)

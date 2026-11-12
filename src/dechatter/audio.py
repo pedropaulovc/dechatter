@@ -36,7 +36,11 @@ FLOOR_PASSES = 3
 FLOOR_MIN_S = 80.0
 FLOOR_PERCENTILE_PER_AIR = 40  # percentile per unit of the smallest air share of a pass
 FLOOR_PERCENTILE = (5, 25)
-QUIET_DB = 20.0  # this far under the recording's median is silence, not the spindle
+# Silence is this far under the loud part of the recording (its 90th percentile: the cuts,
+# or the spindle). Not under the median: a recorder left running after the run makes the
+# median silence. The spindle sits 10-15 dB under its cuts in the recordings at hand.
+LOUD_PERCENTILE = 90
+QUIET_DB = 30.0
 LOWEST_THRESHOLD_DB = 1.0
 
 
@@ -145,7 +149,7 @@ def local_floor(level_db: np.ndarray, window_s: float, percentile: float) -> np.
     out by ranking it above everything, so the floor beside it is the spindle's.
     """
     size = max(1, int(window_s / HOP_S))
-    quiet = level_db < np.median(level_db) - QUIET_DB
+    quiet = level_db < np.percentile(level_db, LOUD_PERCENTILE) - QUIET_DB
     ranked = np.where(quiet, level_db.max(), level_db)
     return ndimage.percentile_filter(ranked, percentile, size=size, mode="reflect")
 

@@ -263,7 +263,9 @@ def render(session_dir: Path, units: Units) -> str:
             verdict = (
                 "" if result is None or p.kind is not PassKind.TEST else _verdict(result.verdict)
             )
-            if result is not None and result.status is PassStatus.NOT_RUN and not result.verdict:
+            # A pass not run, or by its sound likely not run, shows no verdict, not "not heard".
+            not_run = (PassStatus.NOT_RUN, PassStatus.LIKELY_NOT_RUN)
+            if result is not None and result.status in not_run and not result.verdict:
                 verdict = ""
             if result is not None and session.spindle_fit(result) is SpindleFit.EDGE:
                 verdict += " (spindle speed at the edge: check)"

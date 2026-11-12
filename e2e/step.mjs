@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Run a round's blocks through real cncjs with the widget's own stepper, as the widget does,
 // and check what it recorded. Usage:
-//   node e2e/step.mjs blocks.json [--speed N] [--stop-in-cut K] [--url URL] [--port PATH]
+//   node e2e/step.mjs blocks.json [--speed N] [--stop-in-cut K [--stop-at cut|send]] [--url URL] [--port PATH]
 // blocks.json comes from e2e/round_steps.py. A manual-spindle round is continued after 1 s
 // at each speed. Exits 0 with PASS when the round ran to its end, every cut window lasted
 // about as long as its move, and no M0 was sent.
@@ -21,9 +21,16 @@ const opt = (name, dflt) => {
 const url = opt('--url', 'http://localhost:8000');
 const port = opt('--port', join(cache, 'ttyGRBL'));
 const speed = Number(opt('--speed', '1'));
-// Press Stop halfway through the K-th cut: the run must hold, reset once the hold is
-// complete, end STOPPED, and leave the controller out of alarm.
+// Press Stop during the K-th cut: 300 ms into it (cut), or right after its move is sent,
+// before cncjs reports anything new (send). The run must hold, reset only after the
+// controller reports the hold complete (or Idle) following that hold, never unlock, end
+// STOPPED, and leave the controller out of alarm.
 const stopInCut = Number(opt('--stop-in-cut', '0'));
+const stopAt = opt('--stop-at', 'cut');
+if (!['cut', 'send'].includes(stopAt)) {
+  console.error(`--stop-at is cut or send, not ${stopAt}`);
+  process.exit(2);
+}
 let cutsStarted = 0;
 const blocks = JSON.parse(readFileSync(args[0], 'utf8'));
 
@@ -56,7 +63,8 @@ const stepper = new Stepper({
   onChange: (s) => {
     if (stopInCut && s.phase === PHASE.MOVING && s.block?.step === 'cut') {
       cutsStarted += 1;
-      if (cutsStarted === stopInCut) setTimeout(() => s.stop(), 300);
+      // onChange runs before the move is sent: setImmediate stops right after the send.
+      if (cutsStarted === stopInCut) (stopAt === 'send' ? setImmediate : (f) => setTimeout(f, 300))(() => s.stop());
     }
     if (s.phase === PHASE.SET_SPINDLE) {
       log(`set the spindle to ${s.block.rpm} rpm`);
@@ -78,8 +86,22 @@ const start = async () => {
   log(`run ended: ${phase} ${stepper.reason}`);
   if (stopInCut) {
     await new Promise((r) => setTimeout(r, 1000));
-    const ok = phase === PHASE.STOPPED && !sent.includes('$X') && lastState !== 'Alarm';
-    log(`${ok ? 'PASS' : 'FAIL'}: stopped in cut ${stopInCut}: ${phase}, controller ${lastState}, aborted window: ${JSON.stringify(windows.at(-1))}`);
+    // What reached the controller, and when it said it had stopped.
+    const hold = written.find((w) => w.what === 'feedhold');
+    const reset = written.find((w) => w.what === 'reset');
+    const settled = hold && reports.find((r) => r.t >= hold.t && r.settled);
+    const problems = [
+      phase !== PHASE.STOPPED && `ended ${phase}`,
+      !hold && 'no feed hold was sent',
+      !reset && 'no reset was sent',
+      hold && reset && !settled && 'no Hold:0 or Idle was reported after the hold',
+      settled && reset && reset.t < settled.t && `reset ${(settled.t - reset.t).toFixed(3)} s before the hold was reported complete`,
+      written.some((w) => w.what === 'unlock') && 'an unlock ($X) was sent',
+      lastState === 'Alarm' && 'the controller is in alarm',
+    ].filter(Boolean);
+    const ok = problems.length === 0;
+    const at = (w) => (w ? `${(w.t - t0) / 1000}s` : 'never');
+    log(`${ok ? 'PASS' : `FAIL (${problems.join('; ')})`}: stopped in cut ${stopInCut} at ${stopAt}: ${phase}; hold ${at(hold)}, ${settled?.state ?? 'nothing'} ${at(settled)}, reset ${at(reset)}; controller ${lastState}; aborted window: ${JSON.stringify(windows.at(-1))}`);
     socket.emit('close', port, () => process.exit(ok ? 0 : 1));
     return;
   }
@@ -113,11 +135,27 @@ socket.on('startup', () => socket.emit('open', port, { controllerType: 'Grbl', b
 socket.on('controller:settings', () => setTimeout(start, 500));
 socket.on('serialport:open', () => setTimeout(start, 1500));
 let lastState = '';
-socket.on('controller:state', (_t, state) => (lastState = state?.status?.activeState) && stepper.controller({ activeState: state?.status?.activeState, subState: state?.status?.subState, wpos: state?.status?.wpos }));
+const reports = []; // { t, state, settled }: each controller state cncjs reported
+socket.on('controller:state', (_t, state) => {
+  const { activeState, subState, wpos } = state?.status ?? {};
+  lastState = activeState;
+  const settled = activeState === 'Idle' || (activeState === 'Hold' && subState === 0);
+  reports.push({ t: Date.now(), state: activeState === 'Hold' ? `Hold:${subState}` : activeState, settled });
+  stepper.controller({ activeState, subState, wpos });
+});
+// What cncjs wrote to the controller, from any sender: the realtime bytes included.
+const written = [];
+const WRITES = [['feedhold', (d) => d.includes('!')], ['reset', (d) => d.includes('\x18')], ['unlock', (d) => /^\$X/m.test(d)]];
+socket.on('serialport:write', (data) => {
+  for (const [what, test] of WRITES) {
+    if (test(String(data))) written.push({ t: Date.now(), what });
+  }
+});
 socket.on('serialport:read', (line) => {
   if (/^(error|ALARM):/.test(line)) {
     log(`serialport:read ${line}`);
-    stepper.error(line);
+    if (line.startsWith('ALARM:')) stepper.alarm(line);
+    else stepper.error(line);
   }
 });
 socket.on('disconnect', () => stepper.disconnected());

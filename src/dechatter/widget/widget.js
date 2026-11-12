@@ -37,7 +37,8 @@ const cnc = {
   units: null,
 };
 // The round the widget is running, one block at a time: { stepper, round, name }, else null.
-// It is set the moment Start is pressed, with no stepper yet, so a second Start finds it.
+// It is set the moment Start is pressed, so a second Start finds it and what cncjs reports
+// while the round is being prepared reaches the stepper. The session stays pinned to it.
 let run = null;
 const mic = new Mic();
 let boot = 'Starting'; // what the engine is loading; null once it is ready
@@ -458,7 +459,7 @@ function setPort(port) {
   if (port !== cnc.port) {
     showIn(null);
     cnc.activeState = '';
-    run?.stepper?.disconnected();
+    run?.stepper.disconnected();
   }
   cnc.port = port;
   cnc.link = port ? 'ready' : 'no-port';
@@ -495,7 +496,7 @@ async function connectCncjs() {
   });
   socket.on('disconnect', () => {
     cnc.link = 'offline';
-    run?.stepper?.disconnected(); // the machine finishes the one move it has, then stands
+    run?.stepper.disconnected(); // the machine finishes the one move it has, then stands
     render();
   });
   socket.on('error', (err) => {
@@ -506,11 +507,18 @@ async function connectCncjs() {
   socket.on('serialport:open', ({ port }) => setPort(port));
   socket.on('serialport:close', () => setPort(''));
   socket.on('serialport:read', (line) => {
-    // A refused block, or an alarm, ends the run: nothing more is sent.
-    if (run?.stepper && /^(error|ALARM):/.test(String(line))) {
-      note('controller', { line: String(line) });
-      run.stepper.error(String(line));
+    // A refused block ends the run: the stepper holds and resets. An alarm ends it too, but
+    // the controller has stopped the machine itself: nothing is sent.
+    const text = String(line);
+    if (!run || !/^(error|ALARM):/.test(text)) {
+      return;
     }
+    note('controller', { line: text });
+    if (text.startsWith('ALARM:')) {
+      run.stepper.alarm(text);
+      return;
+    }
+    run.stepper.error(text);
   });
   socket.on('controller:settings', (_type, settings) => {
     cnc.reportInches = String(settings?.settings?.$13 ?? '0') === '1';
@@ -520,7 +528,7 @@ async function connectCncjs() {
     // cncjs's own sender started a job while the widget runs a round: two senders on one
     // machine. The widget's round stops.
     if (workflow === 'running') {
-      run?.stepper?.fail('cncjs started a job of its own while the round ran');
+      run?.stepper.fail('cncjs started a job of its own while the round ran');
     }
     render();
   });
@@ -535,7 +543,7 @@ async function connectCncjs() {
       }
     }
     cnc.subState = status.subState ?? null;
-    run?.stepper?.controller({ activeState: status.activeState, subState: cnc.subState, wpos: status.wpos });
+    run?.stepper.controller({ activeState: status.activeState, subState: cnc.subState, wpos: status.wpos });
     render();
   });
 }
@@ -562,6 +570,17 @@ function plannedRound() {
 
 // Why a round cannot start now; '' when it can.
 function startRefusal() {
+  if (run) {
+    return 'A round is already running.';
+  }
+  if (!mic.open) {
+    return 'Enable the microphone first.';
+  }
+  return machineRefusal();
+}
+
+// Why the machine cannot take a round now; '' when it can.
+function machineRefusal() {
   if (cnc.link !== 'ready') {
     return 'Open the machine\'s port in cncjs first.';
   }
@@ -577,12 +596,6 @@ function startRefusal() {
   if (cnc.activeState === 'Hold' || cnc.activeState === 'Door') {
     return `The machine is in ${cnc.activeState}. Resume or reset it in cncjs first.`;
   }
-  if (run) {
-    return 'A round is already running.';
-  }
-  if (!mic.open) {
-    return 'Enable the microphone first.';
-  }
   return '';
 }
 
@@ -596,30 +609,34 @@ async function startRound(round) {
     return;
   }
   const name = current;
-  run = { stepper: null, round: round.round, name }; // before any wait: Start is now refused
+  // Before any wait: Start is now refused, and a lost link, an error or alarm line or a
+  // job of cncjs's own while the round is prepared ends the stepper before it sends a thing.
+  const stepper = new Stepper({
+    io: {
+      send: (lines) => command('gcode', lines),
+      feedhold: () => command('feedhold'),
+      cyclestart: () => command('cyclestart'),
+      reset: () => command('reset'),
+    },
+    reportInches: cnc.reportInches,
+    onChange: () => render(),
+    onWindow: ({ kind, ...window }) => note(kind, window),
+  });
+  // cncjs reports the controller only when it changes: start from what it said last.
+  stepper.controller({ activeState: cnc.activeState, subState: cnc.subState, wpos: cnc.wpos });
+  run = { stepper, round: round.round, name };
   render();
-  let stepper;
+  let blocks;
   try {
     await mic.resume(); // capture has to be running before the first cut
-    const blocks = await engine('steps', name, round.round, cnc.units);
-    stepper = new Stepper({
-      io: {
-        send: (lines) => command('gcode', lines),
-        feedhold: () => command('feedhold'),
-        cyclestart: () => command('cyclestart'),
-        reset: () => command('reset'),
-      },
-      reportInches: cnc.reportInches,
-      onChange: () => render(),
-      onWindow: ({ kind, ...window }) => note(kind, window),
-    });
-    // cncjs reports the controller only when it changes: start from what it said last.
-    stepper.controller({ activeState: cnc.activeState, subState: cnc.subState, wpos: cnc.wpos });
+    blocks = await engine('steps', name, round.round, cnc.units);
     timeline = [];
     mic.record();
     note('record', { round: round.round, units: cnc.units });
-    state = await engine('record_start', name, round.round); // this call's own answer
-    run = { stepper, round: round.round, name, blocks };
+    const started = await engine('record_start', name, round.round);
+    if (name === current) {
+      state = started;
+    }
   } catch (err) {
     if (mic.recording) {
       mic.finish();
@@ -629,16 +646,39 @@ async function startRound(round) {
     render();
     return;
   }
+  // The machine may have changed during those waits.
+  const late = machineRefusal();
+  if (late) {
+    stepper.fail(late);
+  }
   render();
-  const outcome = await stepper.run(run.blocks);
+  const outcome = await stepper.run(blocks);
   note('run', { outcome, reason: stepper.reason });
   const samples = mic.finish();
   run = null;
-  await act('record_stop', samples, mic.rate, JSON.stringify(timeline));
+  await stopRecording(name, samples);
   if (outcome === PHASE.FAILED) {
     // Both, when the analysis refused too: why the round ended, then why it was not analysed.
     const analysis = $('error').hidden ? '' : ` ${$('error').textContent}`;
-    showError(`The round ended early: ${stepper.reason}. The cuts made before it count.${analysis}`);
+    showError(`The round ended early: ${stepper.reason.replace(/\.$/, '')}. The cuts made before it count.${analysis}`);
+  }
+}
+
+// Store the run's recording with the session it was started in.
+async function stopRecording(name, samples) {
+  requests += 1;
+  render();
+  try {
+    const stopped = await engine('record_stop', name, samples, mic.rate, JSON.stringify(timeline));
+    if (name === current) {
+      state = stopped;
+    }
+    showError('');
+  } catch (err) {
+    showError(err.message);
+  } finally {
+    requestDone();
+    render();
   }
 }
 
@@ -677,9 +717,13 @@ function renderSessions() {
     ...names.map((name) => el('option', { value: name }, name)),
   );
   select.value = names.includes(current) ? current : '';
-  select.disabled = busy() || dialog !== 'closed' || mic.recording;
+  // A run records into its own session: another one cannot be opened, made or imported.
+  const pinned = busy() || dialog !== 'closed' || mic.recording || run !== null;
+  select.disabled = pinned;
+  $('new-session').disabled = pinned;
+  $('import').disabled = pinned;
   $('summary').textContent = state ? summary(state) : '';
-  $('edit-setup').disabled = !state || busy() || mic.recording;
+  $('edit-setup').disabled = !state || pinned;
   // Export reads only what is stored: it works while a round runs, without that round.
   $('export').disabled = setupStatus !== 'loads' || busy();
   // Also for a session that failed to load: deleting it is the way to be rid of it.
@@ -772,11 +816,11 @@ function buildRunView(current) {
   view.doing = el('p', {});
   view.ask = el('p', { className: 'instruction', hidden: true });
   view.askText = el('span', {});
-  view.continue = button('Continue', () => current.stepper?.continueSpindle(), { className: 'primary' });
+  view.continue = button('Continue', () => current.stepper.continueSpindle(), { className: 'primary' });
   view.ask.append(view.askText, view.continue);
-  view.hold = button('Hold', () => current.stepper?.hold());
-  view.resume = button('Resume', () => current.stepper?.resume(), { className: 'primary' });
-  view.stop = button('Stop', () => current.stepper?.stop(), { className: 'danger' });
+  view.hold = button('Hold', () => current.stepper.hold());
+  view.resume = button('Resume', () => current.stepper.resume(), { className: 'primary' });
+  view.stop = button('Stop', () => current.stepper.stop(), { className: 'danger' });
   view.stuck = el('p', { className: 'instruction', hidden: true });
   view.root = el('div', {},
     view.title,
@@ -792,17 +836,18 @@ function buildRunView(current) {
 function updateRunView(view) {
   const { stepper, round } = view.run;
   view.title.firstChild.textContent = `Recording round ${round}: `;
-  const block = stepper?.block;
+  const block = stepper.block;
   const where = block?.pass_id === null || block?.pass_id === undefined ? '' : `, pass ${block.pass_id}`;
-  const doing = stepper?.phase === PHASE.HELD ? 'Held' : (STEP_TEXT[block?.step] ?? 'Starting');
-  view.doing.textContent = `${doing}${where} (block ${Math.max((stepper?.index ?? 0) + 1, 1)} of ${stepper?.total || '…'}).`;
-  const asking = stepper?.phase === PHASE.SET_SPINDLE;
+  const doing = stepper.phase === PHASE.HELD ? 'Held' : (STEP_TEXT[block?.step] ?? 'Starting');
+  view.doing.textContent = `${doing}${where} (block ${Math.max((stepper.index ?? 0) + 1, 1)} of ${stepper.total || '…'}).`;
+  const asking = stepper.phase === PHASE.SET_SPINDLE;
   view.ask.hidden = !asking;
   view.askText.textContent = asking ? `Set the spindle to ${block.rpm} rpm, then ` : '';
-  view.hold.hidden = stepper?.phase !== PHASE.MOVING;
-  view.resume.hidden = stepper?.phase !== PHASE.HELD;
-  view.stop.disabled = !stepper || stepper.phase === PHASE.STOPPING;
-  const stuck = stepper ? stall(stepper) : '';
+  view.hold.hidden = stepper.phase !== PHASE.MOVING;
+  view.resume.hidden = stepper.phase !== PHASE.HELD;
+  // Nothing moves before the first block: a double-clicked Start must not land on Stop.
+  view.stop.disabled = stepper.phase === PHASE.READY || stepper.finished || stepper.phase === PHASE.STOPPING;
+  const stuck = stall(stepper);
   view.stuck.hidden = !stuck;
   view.stuck.textContent = stuck;
 }
