@@ -17,6 +17,7 @@ class Machine {
     this.log = [];
     this.moving = false;
     this.onMove = null; // a test's hook into a move under way
+    this.settles = true; // feed hold completes
     this.io = {
       send: (lines) => {
         this.log.push(...lines);
@@ -26,10 +27,15 @@ class Machine {
           setImmediate(() => this.move(lines));
         }
       },
-      feedhold: () => this.log.push('!'),
+      feedhold: () => {
+        this.log.push('!');
+        // A controller decelerates, then reports the hold complete (Hold:0), unless told not to.
+        if (this.settles) {
+          setImmediate(() => this.report('Hold', 0));
+        }
+      },
       cyclestart: () => this.log.push('~'),
       reset: () => this.log.push('^X'),
-      unlock: () => this.log.push('$X'),
     };
   }
 
@@ -40,8 +46,8 @@ class Machine {
     await tick();
   };
 
-  report(activeState) {
-    this.stepper.controller({ activeState, wpos: this.wpos });
+  report(activeState, subState = null) {
+    this.stepper.controller({ activeState, subState, wpos: this.wpos });
   }
 
   async move(lines) {
@@ -253,4 +259,59 @@ test('a move to where the machine already stands is done without a new report', 
   machine.move = async function () {}; // cncjs reports nothing: nothing changed
   const blocks = [{ step: 'setup', lines: ['G21 G90 G94 G17', 'G0 Z10'], pass_id: null, rpm: null, seconds: null, target: { z: 10 } }];
   assert.equal(await stepper.run(blocks), PHASE.DONE);
+});
+
+test('stop resets only once the hold is complete, and never without it', async () => {
+  const settled = new Machine();
+  const { stepper } = settled.stepper_for();
+  settled.onMove = async (lines) => {
+    if (lines[0] === 'G1 X68 F500') {
+      settled.moving = false;
+      settled.report('Run');
+      await stepper.stop();
+    }
+  };
+  assert.equal(await stepper.run(round([1])), PHASE.STOPPED);
+  assert.deepEqual(settled.log.slice(-2), ['!', '^X'], 'reset after Hold:0');
+
+  const moving = new Machine();
+  moving.settles = false; // it never reports the hold complete
+  const second = moving.stepper_for().stepper;
+  moving.onMove = async (lines) => {
+    if (lines[0] === 'G1 X68 F500') {
+      moving.moving = false;
+      moving.report('Run');
+      second.stop();
+    }
+  };
+  assert.equal(await second.run(round([1])), PHASE.FAILED);
+  assert.equal(moving.log.at(-1), '!', 'no reset while it may still move');
+  assert.match(second.reason, /did not report the hold complete, so it was not reset/);
+});
+
+test('an alarm ends the run without a reset or an unlock: the operator clears it', async () => {
+  const machine = new Machine();
+  const { stepper } = machine.stepper_for();
+  machine.onMove = async (lines) => {
+    if (lines[0] === 'G1 X68 F500') {
+      machine.moving = false;
+      machine.report('Alarm');
+    }
+  };
+  assert.equal(await stepper.run(round([1])), PHASE.FAILED);
+  assert.ok(!machine.log.includes('^X') && !machine.log.includes('!') && !machine.log.includes('$X'));
+  assert.match(stepper.reason, /alarm.*home, or unlock/);
+});
+
+test('a hold already in place when a move is sent holds that move', async () => {
+  const machine = new Machine();
+  const { stepper } = machine.stepper_for();
+  stepper.controller({ activeState: 'Hold', subState: 0, wpos: machine.wpos });
+  const blocks = [{ step: 'setup', lines: ['G21 G90 G94 G17', 'G0 Z10'], pass_id: null, rpm: null, seconds: null, target: { z: 10 } }];
+  machine.move = async function () {}; // held: nothing moves
+  const running = stepper.run(blocks);
+  await tick();
+  assert.equal(stepper.phase, PHASE.HELD);
+  stepper.disconnected();
+  assert.equal(await running, PHASE.FAILED);
 });

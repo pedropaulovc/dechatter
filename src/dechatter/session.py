@@ -55,7 +55,14 @@ class PassStatus(StrEnum):
     ANALYSED = "analysed"
     ABORTED = "aborted"  # the cut stopped early (feed hold); analysed on what was recorded
     MISSING = "missing"  # run, but not found in the recording
-    NOT_RUN = "not run"  # the run ended before it: stopped, or never reached
+    # Found by sound alone: no cut heard after an earlier one. Likeliest not run, but it may
+    # have run unheard, so a verdict may still be set by hand.
+    LIKELY_NOT_RUN = "likely not run"
+    NOT_RUN = "not run"  # the widget's run never reached it (or never touched the stock)
+
+
+# Passes without a cut heard in them.
+UNHEARD = frozenset({PassStatus.MISSING, PassStatus.LIKELY_NOT_RUN, PassStatus.NOT_RUN})
 
 
 @dataclass(frozen=True)
@@ -308,8 +315,7 @@ def face_after(last: Round) -> tuple[float, float]:
     if last.results is None:
         raise SessionError(f"{last.path.name} has no results; run `dechatter analyze` first")
     widths = [p.width_mm for p in last.plan.passes]
-    unheard = (PassStatus.MISSING, PassStatus.NOT_RUN)
-    attempted = [i for i, p in enumerate(last.results.passes) if p.status not in unheard]
+    attempted = [i for i, p in enumerate(last.results.passes) if p.status not in UNHEARD]
     start = last.plan.face_y_start_mm
     if not attempted:
         return start, 0.0
@@ -347,15 +353,31 @@ def placements_from_timeline(plan: Plan, timeline: list) -> dict[int, Placement]
         cut = cuts.get(p.id)
         if cut is None:
             continue
-        holds = cut.get("holds") or []
-        cut_short = bool(cut.get("aborted")) or bool(holds)
+        aborted = bool(cut.get("aborted"))
         start = cut["start"] - t0 + p.lead_in_s
-        end = (holds[0][0] if holds else cut["end"]) - t0 - (0.0 if cut_short else p.lead_in_s)
-        status = PassStatus.ABORTED if cut.get("aborted") else PassStatus.ANALYSED
+        end = cut["end"] - t0 - (0.0 if aborted else p.lead_in_s)
+        if aborted and end <= start:
+            continue  # stopped before the cutter met the stock: not run
+        stretch = _longest_free(start, end, [(a - t0, b - t0) for a, b in cut.get("holds") or []])
+        status = PassStatus.ABORTED if aborted else PassStatus.ANALYSED
         dwell = dwells.get(p.id)
         air = None if dwell is None else audio.Segment(dwell["start"] - t0, dwell["end"] - t0)
-        found[index] = Placement(audio.Segment(start, max(end, start)), status, air)
+        found[index] = Placement(stretch, status, air)
     return found
+
+
+def _longest_free(start: float, end: float, holds: list[tuple[float, float]]) -> audio.Segment:
+    """The longest stretch of [start, end] without a hold in it: the machine stood still
+    during a hold, and the sound of a still cutter is no cut."""
+    free, at = [], start
+    for hold_start, hold_end in sorted(holds):
+        if hold_start > at:
+            free.append(audio.Segment(at, min(hold_start, end)))
+        at = max(at, hold_end)
+    if at < end:
+        free.append(audio.Segment(at, end))
+    free = [s for s in free if s.duration_s > 0]
+    return max(free, key=lambda s: s.duration_s, default=audio.Segment(start, start))
 
 
 def _match(plan: Plan, samples: np.ndarray, rate: int, manual: list[audio.Segment] | None):
@@ -397,13 +419,22 @@ def analyze(
         None if manual is not None or timeline is None else placements_from_timeline(plan, timeline)
     )
     windowed = placed is not None
+    if windowed and not placed:
+        raise audio.AudioError(
+            "the run ended before its first cut, so there is nothing to analyse; the round is "
+            "still planned: run it again"
+        )
     if placed is None:
         placed = _match(plan, samples, rate, manual)
     last = max(placed, default=-1)
     results = []
     previous_end = 0.0
     for index, p in enumerate(plan.passes):
-        unplaced = PassStatus.NOT_RUN if windowed or index > last else PassStatus.MISSING
+        unplaced = PassStatus.MISSING
+        if index > last:
+            unplaced = PassStatus.NOT_RUN if windowed else PassStatus.LIKELY_NOT_RUN
+        if windowed and index < last:
+            unplaced = PassStatus.NOT_RUN  # the run passed it by without cutting: never cut
         base = PassResult(p.id, p.kind, p.rpm, p.width_mm, unplaced)
         if index not in placed:
             results.append(base)
@@ -432,7 +463,9 @@ def analyze(
             )
         except detect.TooShort as exc:
             log.warning("pass %d: %s", p.id, exc)
-            results.append(dataclasses.replace(base, status=PassStatus.MISSING))
+            # A cut stopped part-way still left its step on the face, heard or not.
+            short = PassStatus.ABORTED if place.status is PassStatus.ABORTED else PassStatus.MISSING
+            results.append(dataclasses.replace(base, status=short))
             continue
         results.append(
             PassResult(

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Run a round's blocks through real cncjs with the widget's own stepper, as the widget does,
 // and check what it recorded. Usage:
-//   node e2e/step.mjs blocks.json [--speed N] [--url URL] [--port PATH]
+//   node e2e/step.mjs blocks.json [--speed N] [--stop-in-cut K] [--url URL] [--port PATH]
 // blocks.json comes from e2e/round_steps.py. A manual-spindle round is continued after 1 s
 // at each speed. Exits 0 with PASS when the round ran to its end, every cut window lasted
 // about as long as its move, and no M0 was sent.
@@ -21,6 +21,10 @@ const opt = (name, dflt) => {
 const url = opt('--url', 'http://localhost:8000');
 const port = opt('--port', join(cache, 'ttyGRBL'));
 const speed = Number(opt('--speed', '1'));
+// Press Stop halfway through the K-th cut: the run must hold, reset once the hold is
+// complete, end STOPPED, and leave the controller out of alarm.
+const stopInCut = Number(opt('--stop-in-cut', '0'));
+let cutsStarted = 0;
 const blocks = JSON.parse(readFileSync(args[0], 'utf8'));
 
 const require = createRequire(join(cache, 'cncjs', 'node_modules', 'cncjs', 'package.json'));
@@ -48,9 +52,12 @@ const stepper = new Stepper({
     feedhold: () => command('feedhold'),
     cyclestart: () => command('cyclestart'),
     reset: () => command('reset'),
-    unlock: () => command('unlock'),
   },
   onChange: (s) => {
+    if (stopInCut && s.phase === PHASE.MOVING && s.block?.step === 'cut') {
+      cutsStarted += 1;
+      if (cutsStarted === stopInCut) setTimeout(() => s.stop(), 300);
+    }
     if (s.phase === PHASE.SET_SPINDLE) {
       log(`set the spindle to ${s.block.rpm} rpm`);
       setTimeout(() => s.continueSpindle(), 1000);
@@ -69,6 +76,13 @@ const start = async () => {
   log(`running ${blocks.length} blocks`);
   const phase = await stepper.run(blocks);
   log(`run ended: ${phase} ${stepper.reason}`);
+  if (stopInCut) {
+    await new Promise((r) => setTimeout(r, 1000));
+    const ok = phase === PHASE.STOPPED && !sent.includes('$X') && lastState !== 'Alarm';
+    log(`${ok ? 'PASS' : 'FAIL'}: stopped in cut ${stopInCut}: ${phase}, controller ${lastState}, aborted window: ${JSON.stringify(windows.at(-1))}`);
+    socket.emit('close', port, () => process.exit(ok ? 0 : 1));
+    return;
+  }
   if (phase !== PHASE.DONE) {
     socket.emit('close', port, () => fail(`ended ${phase}`));
     return;
@@ -98,7 +112,8 @@ socket.on('startup', () => socket.emit('open', port, { controllerType: 'Grbl', b
 // A port opened afresh announces its settings; one left open replays its state.
 socket.on('controller:settings', () => setTimeout(start, 500));
 socket.on('serialport:open', () => setTimeout(start, 1500));
-socket.on('controller:state', (_t, state) => stepper.controller({ activeState: state?.status?.activeState, wpos: state?.status?.wpos }));
+let lastState = '';
+socket.on('controller:state', (_t, state) => (lastState = state?.status?.activeState) && stepper.controller({ activeState: state?.status?.activeState, subState: state?.status?.subState, wpos: state?.status?.wpos }));
 socket.on('serialport:read', (line) => {
   if (/^(error|ALARM):/.test(line)) {
     log(`serialport:read ${line}`);

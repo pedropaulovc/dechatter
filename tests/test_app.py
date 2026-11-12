@@ -544,10 +544,40 @@ def test_aborted_job_still_yields_results_and_a_cleanup_next_round(engine):
     engine.call("plan", NAME, "same")
     state = engine.run_round(1, abort_in_pass=9)
     statuses = [p["status"] for p in state["rounds"][0]["passes"]]
-    assert statuses[9] == "aborted" and set(statuses[10:]) == {"not run"}
+    assert statuses[9] == "aborted" and set(statuses[10:]) == {"likely not run"}
 
     state = engine.call("plan", NAME, "same")
     assert "cleanup" in [p["kind"] for p in state["rounds"][1]["passes"]]
+
+
+def test_a_widget_run_that_ended_before_its_first_cut_leaves_the_round_runnable(engine):
+    engine.call("plan", NAME, "same")
+    engine.call("record_start", NAME, 1)
+    timeline = json.dumps([
+        {"t": 1000.0, "event": "record"},
+        {"t": 1001.0, "event": "dwell", "pass": 0, "start": 1000.2, "end": 1001.0},
+        {"t": 1001.5, "event": "run", "outcome": "stopped", "reason": "stopped by the operator"},
+    ])  # fmt: skip
+    noise = memoryview(np.random.default_rng(0).normal(0, 0.01, 48000 * 2).astype(np.float32))
+    with pytest.raises(RuntimeError, match="ended before its first cut"):
+        engine.call("record_stop", NAME, noise, 48000.0, timeline)
+    state = engine.call("state", NAME)
+    assert state["next"] == "run" and not state["rounds"][0]["analysed"]
+    assert state["rounds"][0]["has_recording"]
+
+
+def test_a_verdict_can_be_set_on_a_pass_likely_not_run_but_not_on_one_never_run(engine):
+    engine.call("plan", NAME, "same")
+    state = engine.run_round(1, abort_in_pass=9)
+    assert state["rounds"][0]["passes"][12]["status"] == "likely not run"
+    state = engine.call("set_verdict", NAME, 1, 12, "stable")
+    assert state["rounds"][0]["passes"][12]["status"] == "analysed"
+    path = session.round_dir(engine.root / NAME, 1) / session.RESULTS_FILE
+    results = json.loads(path.read_text())
+    results["passes"][13]["status"] = "not run"
+    path.write_text(json.dumps(results))
+    with pytest.raises(RuntimeError, match="pass 13 of round 1 was never run"):
+        engine.call("set_verdict", NAME, 1, 13, "stable")
 
 
 def test_requests_out_of_order_are_refused(engine):

@@ -92,9 +92,12 @@ a page the microphone on those. Then, in the widget:
    So it knows when every cut starts and ends, and records those times with the sound; at
    most one move is ever queued, so if the tab closes or the connection drops the machine
    finishes that move and stands. Hold, Resume and Stop are in the widget (cncjs's own feed
-   hold works too); Stop holds, lets the machine decelerate, then resets it. Start is
-   refused while cncjs runs a job of its own, while the machine is in alarm, or before its
-   G20/G21 mode is known. To check the toolpath first, raise Z zero and run the round in the
+   hold works too). Stop holds, waits until the controller reports the hold complete, then
+   resets it; if the hold never completes it does not reset, and says so. An alarm stops
+   the round and is left for you to clear in cncjs (home, or unlock): the widget never
+   unlocks. Start is refused while cncjs runs a job of its own, while the machine is in
+   alarm or held, or before its G20/G21 mode is known, and a job cncjs starts during the
+   round stops the round. To check the toolpath first, raise Z zero and run the round in the
    air, then Reset the session (next to the session list) and set Z zero back on the top of
    the stock.
 5. Recording starts with Start and stops when the last pass ends, or on Stop. The widget
@@ -197,15 +200,16 @@ without cutting, such as drive whine.
 
 When the widget ran the round, it recorded where every cut and every dwell is, and those
 windows are used as they are: the cut from where the cutter meets the stock to where it
-leaves it, the dwell before it as the air reference. A pass the run never reached is "not
-run".
+leaves it, without any time the machine was held, and the dwell before it as the air
+reference. A pass the run never reached is "not run". A run that ended before its first cut
+is not analysed, and the round stays planned to run again.
 
 A recording made otherwise (the command line, a phone) is searched for its cuts by their
 level over the spindle's own noise around them, since the spindle gets louder as it speeds
 up and a light cut is only a few dB over it. The cuts found are matched in order to the
 planned passes by how long each should last; at one speed the narrowest cuts are the ones
 that can go unheard, so those are the ones taken as missing. Passes after the last cut heard
-are "not run", and a pass whose spindle speed was found at the edge of its ±5% search is
+are "likely not run" (a verdict can still be set by hand, should one have run unheard), and a pass whose spindle speed was found at the edge of its ±5% search is
 flagged ("speed?" in the widget). If matching fails, mark the cuts yourself and pass
 `--segments labels.txt` (start and end seconds per pass; an Audacity label export works).
 

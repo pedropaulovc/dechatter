@@ -170,7 +170,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
     print(" pass kind       rpm  width  status    verdict   peak Hz  prom  vs air")
     for p in results.passes:
-        if p.status in (PassStatus.MISSING, PassStatus.NOT_RUN):
+        if p.status in session.UNHEARD:
             print(f"  {p.id:3d} {p.kind:<8} {p.rpm:5d} {p.width_mm:6.2f}  {p.status}")
             continue
         air = "     -" if p.excess_db is None else f"{p.excess_db:6.1f}"

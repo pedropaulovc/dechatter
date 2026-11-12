@@ -151,3 +151,90 @@ def test_a_spindle_speed_found_at_the_edge_of_its_search_is_flagged():
     assert session.spindle_fit(result(2250 * 1.05)) is SpindleFit.EDGE
     missing = PassResult(1, "test", 2250, 3.0, PassStatus.NOT_RUN)
     assert session.spindle_fit(missing) is None
+
+
+def test_cuts_longer_than_a_minute_are_found_too(setup):
+    """The floor's window follows the plan: it must hold air on both sides of the longest cut."""
+    import dataclasses
+
+    from test_plan import round1
+
+    plan = round1(setup)
+    long = tuple(dataclasses.replace(p, expected_cut_s=90.0) for p in plan.passes[:4])
+    plan = dataclasses.replace(plan, passes=long)
+    recording = synth.record(plan, seed=5)
+    found = audio.find_cuts(recording, synth.RATE, plan)
+    assert sorted(found.matches) == [0, 1, 2, 3]
+    assert all(s.duration_s == pytest.approx(90, abs=2) for s in found.matches.values())
+    assert audio.floor_window_s(plan) > 3 * 90
+
+
+def held(timeline: list, pass_id: int, offsets: tuple[float, float]) -> None:
+    cut = next(e for e in timeline if e["event"] == "cut" and e["pass"] == pass_id)
+    cut["holds"] = [[cut["start"] + offsets[0], cut["start"] + offsets[1]]]
+
+
+def test_a_hold_is_cut_out_of_the_window_wherever_it_falls(setup):
+    from test_plan import round1
+
+    plan = round1(setup)
+    timeline, contact = schedule(plan)
+    lead = plan.passes[2].lead_in_s
+    # A hold during the lead-in: the cut after it is whole.
+    held(timeline, 2, (0.2 * lead, 0.6 * lead))
+    # A hold mid-cut: the longer of the two stretches around it.
+    lead4 = plan.passes[4].lead_in_s
+    held(timeline, 4, (lead4 + 1.0, lead4 + 2.0))
+    placed = session.placements_from_timeline(plan, timeline)
+    assert placed[2].cut.start_s == pytest.approx(contact[2][0])
+    assert placed[2].cut.end_s == pytest.approx(contact[2][1])
+    cut4 = placed[4].cut
+    assert cut4.start_s == pytest.approx(contact[4][0] + 2.0) and cut4.end_s == pytest.approx(
+        contact[4][1]
+    )
+
+    recording = synth.record(plan, seed=3)
+    results = session.analyze(plan, recording, synth.RATE, "r.wav", Thresholds(), timeline=timeline)
+    assert results.passes[2].status is PassStatus.ANALYSED and results.passes[2].verdict is not None
+
+
+def test_a_cut_stopped_just_after_contact_keeps_its_step(setup):
+    from test_plan import round1
+
+    plan = round1(setup)
+    timeline, _ = schedule(plan)
+    stopped = [e for e in timeline if e.get("pass", 0) <= 3]
+    cut3 = next(e for e in stopped if e["event"] == "cut" and e["pass"] == 3)
+    cut3.update(aborted=True, end=cut3["start"] + plan.passes[3].lead_in_s + 0.2)
+    recording = synth.record(plan, seed=3)
+    results = session.analyze(plan, recording, synth.RATE, "r.wav", Thresholds(), timeline=stopped)
+    # Too short to hear, but the cutter reached the face: aborted, no verdict.
+    assert results.passes[3].status is PassStatus.ABORTED and results.passes[3].verdict is None
+    face, remnant = session.face_after(session.Round(None, plan, results))
+    assert remnant == plan.passes[3].width_mm
+
+    # Stopped during the lead-in: the cutter never met the stock.
+    cut3["end"] = cut3["start"] + plan.passes[3].lead_in_s / 2
+    results = session.analyze(plan, recording, synth.RATE, "r.wav", Thresholds(), timeline=stopped)
+    assert results.passes[3].status is PassStatus.NOT_RUN
+
+
+@pytest.mark.parametrize(
+    "ended",
+    [
+        "stopped by the operator",
+        "error:22 (Undefined feed rate)",
+        "the connection to cncjs or the machine was lost",
+    ],
+)
+def test_a_run_that_ended_before_its_first_cut_leaves_the_round_to_run_again(ended, setup):
+    from test_plan import round1
+
+    plan = round1(setup)
+    timeline = [
+        {"t": 1000.0, "event": "record"},
+        {"t": 1002.0, "event": "run", "outcome": "stopped", "reason": ended},
+    ]
+    recording = synth.record(plan, seed=3)[: synth.RATE * 3]
+    with pytest.raises(audio.AudioError, match="ended before its first cut"):
+        session.analyze(plan, recording, synth.RATE, "r.wav", Thresholds(), timeline=timeline)

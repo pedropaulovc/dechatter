@@ -29,10 +29,14 @@ THRESHOLD_STEPS = 32
 TRAILING_SKIP = 0.25
 # A cut is told from the spindle running in the air by its level over the floor around it:
 # the spindle's own noise rises with its speed, by 8 dB or more across a round, while a light
-# cut is only a few dB over the spindle. The floor is a low percentile over a window wide
-# enough to hold the air between cuts on either side of the longest one.
-FLOOR_WINDOW_S = 80.0
-FLOOR_PERCENTILE = 25
+# cut is only a few dB over the spindle. The floor is a low percentile of the level over a
+# window spanning a few passes, the percentile lower the less of a pass is spent in the air
+# (dwell and lead-ins), so that it lands on air even beside long cuts.
+FLOOR_PASSES = 3
+FLOOR_MIN_S = 80.0
+FLOOR_PERCENTILE_PER_AIR = 40  # percentile per unit of the smallest air share of a pass
+FLOOR_PERCENTILE = (5, 25)
+QUIET_DB = 20.0  # this far under the recording's median is silence, not the spindle
 LOWEST_THRESHOLD_DB = 1.0
 
 
@@ -120,10 +124,30 @@ def envelope_db(samples: np.ndarray, rate: int) -> np.ndarray:
     return 10 * np.log10(mean + 1e-14)
 
 
-def local_floor(level_db: np.ndarray) -> np.ndarray:
-    """The level the spindle alone makes around each moment."""
-    size = max(1, int(FLOOR_WINDOW_S / HOP_S))
-    return ndimage.percentile_filter(level_db, FLOOR_PERCENTILE, size=size, mode="reflect")
+def floor_window_s(plan: Plan) -> float:
+    longest = max(p.expected_cut_s + 2 * p.lead_in_s for p in plan.passes)
+    return max(FLOOR_MIN_S, FLOOR_PASSES * (longest + plan.dwell_s))
+
+
+def floor_percentile(plan: Plan) -> float:
+    def air(p) -> float:
+        return plan.dwell_s + 2 * p.lead_in_s
+
+    share = min(air(p) / (air(p) + p.expected_cut_s) for p in plan.passes)
+    low, high = FLOOR_PERCENTILE
+    return float(np.clip(FLOOR_PERCENTILE_PER_AIR * share, low, high))
+
+
+def local_floor(level_db: np.ndarray, window_s: float, percentile: float) -> np.ndarray:
+    """The level the spindle alone makes around each moment.
+
+    Silence (before the spindle starts, or after it stops) is no spindle noise: it is left
+    out by ranking it above everything, so the floor beside it is the spindle's.
+    """
+    size = max(1, int(window_s / HOP_S))
+    quiet = level_db < np.median(level_db) - QUIET_DB
+    ranked = np.where(quiet, level_db.max(), level_db)
+    return ndimage.percentile_filter(ranked, percentile, size=size, mode="reflect")
 
 
 def segments_above(level_db: np.ndarray, threshold_db: float, min_s: float) -> list[Segment]:
@@ -197,7 +221,7 @@ def find_cuts(samples: np.ndarray, rate: int, plan: Plan) -> Alignment:
 
 def find_cuts_in(level: np.ndarray, plan: Plan) -> Alignment:
     """Sweep the threshold over the local floor; keep the one whose cuts best fit the plan."""
-    over = level - local_floor(level)
+    over = level - local_floor(level, floor_window_s(plan), floor_percentile(plan))
     low, high = LOWEST_THRESHOLD_DB, max(float(np.percentile(over, 98)), LOWEST_THRESHOLD_DB + 1)
     min_s = 0.5 * min(p.expected_cut_s for p in plan.passes)
     thresholds = np.linspace(low, high, THRESHOLD_STEPS + 2)[1:-1]

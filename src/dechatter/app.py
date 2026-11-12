@@ -238,8 +238,9 @@ class App:
         passes = []
         for p in target.results.passes:
             if p.id == pass_id:
-                unheard = (PassStatus.MISSING, PassStatus.NOT_RUN)
-                status = PassStatus.ANALYSED if p.status in unheard else p.status
+                if p.status is PassStatus.NOT_RUN:
+                    raise SessionError(f"pass {pass_id} of round {number} was never run")
+                status = PassStatus.ANALYSED if p.status in session.UNHEARD else p.status
                 p = session.PassResult(**{**asdict(p), "verdict": verdict, "status": status})
             passes.append(p)
         if all(p.id != pass_id or p.kind is not PassKind.TEST for p in passes):
