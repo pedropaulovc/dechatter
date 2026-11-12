@@ -81,6 +81,33 @@ class StabilityMap:
         return np.cumsum(limit[:, ::-1], axis=1)[:, ::-1][:, 1:]
 
 
+@dataclass(frozen=True)
+class Coarse:
+    """A map thinned out for display: at most `speeds` x `widths` cells, edges kept."""
+
+    speeds: np.ndarray
+    widths: np.ndarray
+    p: np.ndarray  # P(stable), shape (speeds, widths)
+
+
+DISPLAY_SPEEDS = 48
+DISPLAY_WIDTHS = 24
+
+
+def coarse(stability: StabilityMap) -> Coarse:
+    speeds = np.unique(
+        np.linspace(0, len(stability.speeds) - 1, DISPLAY_SPEEDS).round().astype(int)
+    )
+    widths = np.unique(
+        np.linspace(0, len(stability.widths) - 1, DISPLAY_WIDTHS).round().astype(int)
+    )
+    return Coarse(
+        stability.speeds[speeds],
+        stability.widths[widths],
+        stability.p_stable()[np.ix_(speeds, widths)],
+    )
+
+
 def sweet_spot_speeds(chatter_hz: float, flutes: int, low_rpm: float, high_rpm: float):
     """(lobe, rpm) where tooth passing divides the chatter frequency: n = 60 f / (flutes k)."""
     first = max(1, int(np.ceil(60 * chatter_hz / (flutes * high_rpm))))

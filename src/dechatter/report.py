@@ -21,8 +21,6 @@ from .session import Round, VerdictSource
 
 REPORT_FILE = "report.html"
 CUTS_PER_DEPTH = 3
-MAP_SPEEDS = 48
-MAP_WIDTHS = 24
 MM3_PER_IN3 = MM_PER_INCH**3
 
 # Map plot geometry, in SVG units.
@@ -70,27 +68,16 @@ def _table(head: Iterable[str], rows: Iterable[Iterable[str]], cls: str = "") ->
     return f'<table class="{cls}"><thead><tr>{header}</tr></thead><tbody>{body}</tbody></table>'
 
 
-def _planned_setup_text(session_dir: Path, rounds: list[Round]) -> tuple[str, str]:
-    """(where it comes from, setup file text): the latest round's copy, else the session's."""
-    for r in reversed(rounds):
-        copy = r.path / session.SETUP_FILE
-        if copy.exists():
-            return f"as round {r.plan.round} was planned", copy.read_text(encoding="utf-8")
-    return "as saved", (session_dir / session.SETUP_FILE).read_text(encoding="utf-8")
-
-
 def _dates(rounds: list[Round]) -> str:
-    days = sorted(r.plan.planned_on for r in rounds if r.plan.planned_on)
+    days = sorted(r.plan.planned_on for r in rounds)
     if not days:
-        return "not recorded"
+        return "none yet"
     return days[0] if days[0] == days[-1] else f"{days[0]} to {days[-1]}"
 
 
 def _map_svg(stability: bayes.StabilityMap, cuts: list[bayes.Observation], units, cfg) -> str:
-    speeds = np.unique(np.linspace(0, len(stability.speeds) - 1, MAP_SPEEDS).round().astype(int))
-    widths = np.unique(np.linspace(0, len(stability.widths) - 1, MAP_WIDTHS).round().astype(int))
-    p = stability.p_stable()[np.ix_(speeds, widths)]
-    rpm, mm = stability.speeds[speeds], stability.widths[widths]
+    shown = bayes.coarse(stability)
+    p, rpm, mm = shown.p, shown.speeds, shown.widths
     width_px, height_px = PLOT_W - LEFT - RIGHT, PLOT_H - TOP - BOTTOM
     cell_w, cell_h = width_px / len(rpm), height_px / len(mm)
 
@@ -252,7 +239,7 @@ def render(session_dir: Path, units: Units) -> str:
         state = "analysed" if r.results else "not analysed"
         log.append(
             f"<h3>Round {r.plan.round}: {_e(_length(r.plan.axial_depth_mm, units))} deep, "
-            f"{_e(r.plan.planner)} planner, planned {_e(r.plan.planned_on or 'on an unknown date')}"
+            f"{_e(r.plan.planner)} planner, planned {_e(r.plan.planned_on)}"
             f", {state}</h3>"
             + _table(
                 ["Pass", "Kind", "rpm", "Width", "Feed", "Status", "Verdict", "Verdict set"],
@@ -263,7 +250,7 @@ def render(session_dir: Path, units: Units) -> str:
     if not log:
         log.append("<p>No round has been planned yet.</p>")
 
-    origin, setup_text = _planned_setup_text(session_dir, rounds)
+    setup_text = (session_dir / session.SETUP_FILE).read_text(encoding="utf-8")
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -296,7 +283,9 @@ Grey: not settled by the cuts made. Circles are stable cuts, crosses chatter.</p
 </section>
 <section>
 <h2>Setup</h2>
-<p class="note">{_e(origin)}.</p>
+<p class="note">The session's setup.toml, which this report was computed from. Each round
+keeps a copy of the setup it was planned from; those may differ from this one in what
+may change after a cut, such as the safe height or the speed limits.</p>
 <pre>{_e(setup_text)}</pre>
 </section>
 <footer>dechatter {_e(__version__)}</footer>

@@ -1,6 +1,6 @@
 [project]
 name = "dechatter"
-version = "0.1.1"
+dynamic = ["version"]
 description = "Find chatter-free milling parameters from test cuts and a phone recording"
 readme = "README.md"
 license = "MIT"
@@ -21,6 +21,9 @@ dev = ["pytest>=8", "ruff>=0.7"]
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/dechatter/__init__.py"
 
 [tool.ruff]
 line-length = 100

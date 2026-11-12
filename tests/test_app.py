@@ -301,18 +301,25 @@ def test_the_search_can_be_widened_or_narrowed_after_a_round_was_cut(engine):
     engine.call("plan", NAME, "same")
     state = engine.run_round(1)
     cuts = len(state["observations"])
-    widest = max(p["width_mm"] for p in state["rounds"][0]["passes"])
+    tests = [p for p in state["rounds"][0]["passes"] if p["kind"] == "test"]
 
-    # Narrower than cuts already made: those stay in their round, but leave the map and
-    # the recommendations.
+    # Narrower than cuts already made. Those stay in their round. A stable one proves the
+    # narrower widths stable, so it counts at the widest width searched; chatter that wide
+    # says nothing about them. Neither is recommended.
     narrowed = json.loads(json.dumps(form))
-    narrowed["cut"]["width_max_mm"] = round(widest * 0.6, 2)
+    narrowed["cut"]["width_max_mm"] = 1.0
     state = engine.call("save_setup", NAME, json.dumps(narrowed))
-    assert 0 < len(state["observations"]) < cuts
-    assert all(o["width_mm"] <= widest * 0.6 for o in state["observations"])
-    assert all(b["width_mm"] <= widest * 0.6 for b in state["best"])
+    top = state["map"]["widths"][-1]
+    assert top == 1.0
+    wide = [p for p in tests if p["width_mm"] > top]
+    assert wide and any(p["verdict"] == "stable" for p in wide)
+    chatter = sum(p["verdict"] == "unstable" for p in wide)
+    assert len(state["observations"]) == cuts - chatter
+    clamped = [o for o in state["observations"] if o["width_mm"] == top]
+    assert len(clamped) >= sum(p["verdict"] == "stable" for p in wide)
+    assert all(o["verdict"] == "stable" for o in clamped if o["width_mm"] == top)
+    assert all(b["width_mm"] <= top for b in state["best"])
     assert len(state["rounds"][0]["passes"]) > cuts
-    assert state["map"]["widths"][-1] <= widest * 0.6
 
     form["machine"]["max_rpm"] = 5000
     form["cut"]["speed_max_rpm"] = 4500
@@ -321,6 +328,47 @@ def test_the_search_can_be_widened_or_narrowed_after_a_round_was_cut(engine):
     state = engine.call("plan", NAME, "fresh")
     planned = [p["rpm"] for p in state["rounds"][1]["passes"] if p["kind"] == "test"]
     assert max(planned) > 3000 and max(planned) <= 4500
+
+
+def test_cuts_at_the_grid_edges_count_whatever_the_steps(engine):
+    form = engine.call("setup_form", NAME)["values"]
+    # The widest fraction lands on 4.8 mm: the width grid rounds the 4.7625 mm limit up.
+    form["planner"]["round1_width_fractions"] = [0.2, 0.5, 1.0]
+    engine.call("save_setup", NAME, json.dumps(form))
+    engine.call("plan", NAME, "same")
+    state = engine.run_round(1)
+    tests = [p for p in state["rounds"][0]["passes"] if p["kind"] == "test"]
+    assert max(p["width_mm"] for p in tests) == 4.8
+    assert len(state["observations"]) == len(tests)
+    edge = {(p["rpm"], p["verdict"]) for p in tests if p["width_mm"] == 4.8}
+    assert edge == {(o["rpm"], o["verdict"]) for o in state["observations"] if o["width_mm"] == 4.8}
+    measured = {(p["rpm"], p["width_mm"]) for p in tests}
+    state = engine.call("plan", NAME, "same")
+    planned = {
+        (p["rpm"], p["width_mm"]) for p in state["rounds"][1]["passes"] if p["kind"] == "test"
+    }
+    assert not planned & measured, "a cell already cut is not proposed again"
+
+    # A coarser speed step moves the snapped bounds inside the speeds already cut (1250 rpm
+    # becomes 1300); those cuts still count.
+    assert min(p["rpm"] for p in tests) == 1250
+    form["planner"]["speed_step_rpm"] = 100
+    state = engine.call("save_setup", NAME, json.dumps(form))
+    assert state["discarded_round"] == 2
+    assert len(state["observations"]) == len(tests)
+    assert min(o["rpm"] for o in state["observations"]) == 1250
+
+
+def test_export_works_even_when_the_report_cannot_be_made(engine):
+    engine.call("plan", NAME, "same")
+    engine.run_round(1)
+    results = session.round_dir(engine.root / NAME, 1) / session.RESULTS_FILE
+    results.write_text("{ not json", encoding="utf-8")
+    archive = zipfile.ZipFile(io.BytesIO(engine.call("export_zip", NAME, "mm")))
+    names = archive.namelist()
+    assert f"{NAME}/report.html" not in names
+    assert f"{NAME}/round-01/results.json" in names and f"{NAME}/round-01/recording.wav" in names
+    assert archive.read(f"{NAME}/round-01/results.json") == b"{ not json"
 
 
 def test_narrowing_the_speeds_after_cutting_recommends_and_plans_only_inside_them(engine):
@@ -617,6 +665,10 @@ def test_the_command_line_writes_the_report(engine, tmp_path, capsys):
     assert cli.main(["report", str(engine.root / NAME), "--html", str(out), "--units", "in"]) == 0
     assert out.read_text(encoding="utf-8").startswith("<!doctype html>")
     assert " in (" in out.read_text(encoding="utf-8")
+    with pytest.raises(SystemExit) as refused:
+        cli.main(["report", str(engine.root / NAME), "--units", "in"])
+    assert refused.value.code == 2
+    assert "--units applies to the HTML report only" in capsys.readouterr().err
 
 
 def test_export_round_trips_into_another_browser(engine, tmp_path):

@@ -32,7 +32,11 @@ What changed for people who use the dechatter widget and command line. The forma
 - The machine's speed range and power, the cut's speed and width limits and shallower
   depths, the machine's name, the safe height, clearance, plunge feed, truing width, stock
   width and the planner's settings may change at any time. Cuts outside narrowed limits stay
-  in their round but leave the map and the recommendations.
+  in their round but are not recommended. On the map, a stable cut wider than a narrowed
+  width limit counts as stable at the widest width searched; chatter that wide, and cuts at
+  speeds outside the limits, are left out. Cuts at the edges of the search, such as a width
+  the grid rounds just above the limit, or speeds a coarser speed step no longer reaches,
+  keep counting.
 - The setup wizard shows on each step only what has to be answered about the machine, tool
   and stock. Settings with a default or a computed value sit in a collapsed Advanced section,
   showing what an empty entry becomes; a section holding a changed setting opens by itself.
@@ -44,7 +48,8 @@ What changed for people who use the dechatter widget and command line. The forma
   (feed, removal rate, spindle power), the stability map, every round's passes with
   verdicts set by hand marked, and the setup. The widget offers it on convergence and beside
   the best cuts, exports include it as `report.html`, and `dechatter report <session>
-  --html <file> [--units in]` writes it.
+  --html <file> [--units in]` writes it. An export still succeeds, without the report, if
+  the report cannot be made.
 - An (i) button on every wizard field with a longer explanation: what it changes, its
   default, and whether it may change after a cut.
 

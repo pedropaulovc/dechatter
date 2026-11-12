@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import asdict, dataclass
+from datetime import date
 from enum import StrEnum
 from pathlib import Path
 
@@ -58,8 +59,8 @@ class Plan:
     dwell_s: float
     plunge_s: float  # feed move from the clearance plane down to depth, beside the stock
     passes: tuple[Pass, ...]
+    planned_on: str  # ISO date
     schema: int = SCHEMA
-    planned_on: str | None = None  # ISO date
 
     @property
     def consumed_mm(self) -> float:
@@ -92,15 +93,23 @@ class Envelope:
     speed_max_rpm: int
     width_max_mm: float
     mrr_limit_mm3_min: float
+    # The speed bounds before they are snapped to the planner's speed step, and the widest
+    # width on the grid, which rounds to the width step and can lie above width_max_mm. A
+    # cut made inside them was inside the search, whatever the steps were then.
+    speed_low_rpm: float
+    speed_high_rpm: float
+    width_top_mm: float
+
+    def holds_speed(self, rpm: float) -> bool:
+        return (
+            self.speed_low_rpm - SPEED_TOLERANCE_RPM
+            <= rpm
+            <= self.speed_high_rpm + SPEED_TOLERANCE_RPM
+        )
 
     def contains(self, rpm: float, width_mm: float) -> bool:
         """Whether a cut lies in the region searched now; bounds may change after cutting."""
-        return (
-            self.speed_min_rpm - SPEED_TOLERANCE_RPM
-            <= rpm
-            <= self.speed_max_rpm + SPEED_TOLERANCE_RPM
-            and width_mm <= self.width_max_mm + WIDTH_TOLERANCE_MM
-        )
+        return self.holds_speed(rpm) and width_mm <= self.width_top_mm + WIDTH_TOLERANCE_MM
 
     def speeds(self, step_rpm: int) -> np.ndarray:
         return np.arange(self.speed_min_rpm, self.speed_max_rpm + 1, step_rpm, dtype=float)
@@ -118,10 +127,10 @@ def envelope(setup: Setup) -> Envelope:
     surface_limit = (
         materials.surface_speed_m_min(material, setup.tool.material) * 1000 / (math.pi * diameter)
     )
-    speed_max = min(setup.machine.max_rpm, surface_limit, setup.cut.speed_max_rpm or math.inf)
-    speed_max = int(speed_max // step * step)
-    speed_min = max(setup.machine.min_rpm, setup.cut.speed_min_rpm or speed_max / 4)
-    speed_min = int(math.ceil(speed_min / step) * step)
+    speed_high = min(setup.machine.max_rpm, surface_limit, setup.cut.speed_max_rpm or math.inf)
+    speed_max = int(speed_high // step * step)
+    speed_low = max(setup.machine.min_rpm, setup.cut.speed_min_rpm or speed_max / 4)
+    speed_min = int(math.ceil(speed_low / step) * step)
     if speed_min >= speed_max:
         raise PlanError(f"empty speed range: {speed_min}..{speed_max} rpm")
 
@@ -131,12 +140,17 @@ def envelope(setup: Setup) -> Envelope:
         * materials.weight_derate(setup.machine.weight_kg)
     )
     usable_w = setup.machine.spindle_power_w * setup.planner.power_fraction * SPINDLE_EFFICIENCY
+    width_max = setup.cut.width_max_mm or diameter / 2
+    width_step = setup.planner.width_step_mm
     return Envelope(
         chip_load_mm=round(chip_load, 4),
         speed_min_rpm=speed_min,
         speed_max_rpm=speed_max,
-        width_max_mm=setup.cut.width_max_mm or diameter / 2,
+        width_max_mm=width_max,
         mrr_limit_mm3_min=usable_w / material.specific_energy_j_mm3 * 60,
+        speed_low_rpm=speed_low,
+        speed_high_rpm=speed_high,
+        width_top_mm=width_step * max(1, int(round(width_max / width_step))),
     )
 
 
@@ -235,6 +249,7 @@ def assemble(
             2,
         ),
         passes=tuple(passes),
+        planned_on=date.today().isoformat(),
     )
 
 

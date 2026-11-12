@@ -165,8 +165,14 @@ class Sessions:
 
     def export_zip(self, name: str, machine_units: str) -> bytes:
         """The session directory as a zip, usable with the command line as it is, with the
-        report as of now."""
+        report as of now. Export is the way out of the browser's storage, so a report that
+        cannot be made is left out rather than stopping it."""
         self._app(name)
+        try:
+            page = report.render(self._dir(name), gcode.Units(machine_units))
+        except Exception:
+            log.exception("%s: exporting without %s", name, report.REPORT_FILE)
+            page = None
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
             for path in sorted(self._dir(name).rglob("*")):
@@ -177,7 +183,8 @@ class Sessions:
                     continue
                 if path.is_file():
                     archive.write(path, f"{name}/{inside.as_posix()}")
-            archive.writestr(f"{name}/{report.REPORT_FILE}", self.report_html(name, machine_units))
+            if page is not None:
+                archive.writestr(f"{name}/{report.REPORT_FILE}", page)
         return buffer.getvalue()
 
     def import_zip(self, data: bytes) -> str:

@@ -25,8 +25,6 @@ log = logging.getLogger(__name__)
 
 RECORDING_FILE = "recording.wav"
 TIMELINE_FILE = "timeline.json"
-MAP_SPEEDS = 48
-MAP_WIDTHS = 24
 TOP_RESULTS = 5
 PROGRAM_ID_LENGTH = 6
 
@@ -78,12 +76,7 @@ class App:
         stability = bayes.build_map(
             session.at_depth(self.setup, depth), self.env, session.evidence(rounds, depth, self.env)
         )
-        speeds = np.unique(
-            np.linspace(0, len(stability.speeds) - 1, MAP_SPEEDS).round().astype(int)
-        )
-        widths = np.unique(
-            np.linspace(0, len(stability.widths) - 1, MAP_WIDTHS).round().astype(int)
-        )
+        shown = bayes.coarse(stability)
 
         upcoming, next_depth = Next.PLAN, self.setup.cut.axial_depth_mm
         if rounds and rounds[-1].results is None:
@@ -127,9 +120,9 @@ class App:
                 for best in session.best_cuts(self.setup, self.env, rounds)[:TOP_RESULTS]
             ],
             "map": {
-                "speeds": stability.speeds[speeds].tolist(),
-                "widths": stability.widths[widths].round(2).tolist(),
-                "p": stability.p_stable()[np.ix_(speeds, widths)].round(3).tolist(),
+                "speeds": shown.speeds.tolist(),
+                "widths": shown.widths.round(2).tolist(),
+                "p": shown.p.round(3).tolist(),
             },
         }
 

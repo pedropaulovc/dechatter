@@ -8,7 +8,6 @@ import logging
 import shutil
 import uuid
 from dataclasses import asdict, dataclass
-from datetime import date
 from enum import StrEnum
 from pathlib import Path
 
@@ -72,16 +71,10 @@ class PassResult:
 class VerdictSource(StrEnum):
     DETECTOR = "detector"
     OPERATOR = "operator"  # overruled or set by hand, in the widget or in results.json
-    UNRECORDED = "unrecorded"  # analysed before the detector's verdict was kept
 
 
 def verdict_source(p: PassResult) -> VerdictSource:
-    if p.detected is not None:
-        return VerdictSource.DETECTOR if p.verdict is p.detected else VerdictSource.OPERATOR
-    if p.prominence_db is None:
-        # Nothing was detected: any verdict is the operator's.
-        return VerdictSource.DETECTOR if p.verdict is None else VerdictSource.OPERATOR
-    return VerdictSource.UNRECORDED
+    return VerdictSource.DETECTOR if p.verdict is p.detected else VerdictSource.OPERATOR
 
 
 @dataclass(frozen=True)
@@ -107,7 +100,7 @@ class Results:
                     "kind": PassKind(p["kind"]),
                     "status": PassStatus(p["status"]),
                     "verdict": Verdict(p["verdict"]) if p["verdict"] else None,
-                    "detected": Verdict(p["detected"]) if p.get("detected") else None,
+                    "detected": Verdict(p["detected"]) if p["detected"] else None,
                 }
             )
             for p in data.pop("passes")
@@ -138,24 +131,41 @@ def load_rounds(session: Path) -> list[Round]:
 DEPTH_TOLERANCE_MM = 1e-6
 
 
-def _cuts(rounds: list[Round], env: Envelope, wanted) -> list[Observation]:
-    """Classified test cuts, inside the envelope, of the rounds whose depth `wanted` accepts.
-
-    A cut outside the speeds and widths searched now (the bounds may have been narrowed
-    since it was made) stays in its round, but neither informs the map nor is recommended.
-    """
+def _tests(rounds: list[Round], wanted) -> list[Observation]:
+    """Classified test cuts of the rounds whose depth `wanted` accepts, as they were made."""
     return [
         Observation(p.rpm, p.width_mm, p.verdict, p.chatter_hz)
         for r in rounds
         if r.results is not None and wanted(r.plan.axial_depth_mm)
         for p in r.results.passes
-        if p.kind is PassKind.TEST and p.verdict is not None and env.contains(p.rpm, p.width_mm)
+        if p.kind is PassKind.TEST and p.verdict is not None
     ]
 
 
+def _at(depth_mm: float):
+    return lambda depth: abs(depth - depth_mm) <= DEPTH_TOLERANCE_MM
+
+
+def _cuts(rounds: list[Round], env: Envelope, wanted) -> list[Observation]:
+    """What the cuts tell the map searched now; its bounds may have narrowed since.
+
+    A cut at a speed outside the search, or chatter wider than the widest width searched,
+    says nothing about the cells searched. A stable cut that wide proves every narrower
+    width stable, so it counts as stable at the widest width. The cuts stay in their rounds.
+    """
+    found = []
+    for o in _tests(rounds, wanted):
+        if env.contains(o.rpm, o.width_mm):
+            found.append(o)
+            continue
+        if env.holds_speed(o.rpm) and o.verdict is Verdict.STABLE:
+            found.append(Observation(o.rpm, env.width_top_mm, o.verdict, o.chatter_hz))
+    return found
+
+
 def observations(rounds: list[Round], depth_mm: float, env: Envelope) -> list[Observation]:
-    """The test cuts made at one depth, inside the envelope."""
-    return _cuts(rounds, env, lambda depth: abs(depth - depth_mm) <= DEPTH_TOLERANCE_MM)
+    """The test cuts made at one depth, as the map searched now sees them."""
+    return _cuts(rounds, env, _at(depth_mm))
 
 
 def evidence(rounds: list[Round], depth_mm: float, env: Envelope) -> list[Observation]:
@@ -192,7 +202,8 @@ class StableCut:
 
 
 def best_cuts(setup: Setup, env: Envelope, rounds: list[Round]) -> list[StableCut]:
-    """Every stable test cut of the session, at whatever depth, highest removal rate first."""
+    """Every stable test cut of the session inside the search now, at whatever depth,
+    highest removal rate first."""
     cut_depths = sorted({r.plan.axial_depth_mm for r in rounds}, reverse=True)
     found = [
         StableCut(
@@ -202,8 +213,8 @@ def best_cuts(setup: Setup, env: Envelope, rounds: list[Round]) -> list[StableCu
             o.width_mm,
         )
         for depth in cut_depths
-        for o in observations(rounds, depth, env)
-        if o.verdict is Verdict.STABLE
+        for o in _tests(rounds, _at(depth))
+        if o.verdict is Verdict.STABLE and env.contains(o.rpm, o.width_mm)
     ]
     return sorted(found, key=lambda cut: -cut.mrr_mm3_min)
 
@@ -379,7 +390,6 @@ def plan_next(session: Path, source: SetupFile, env: Envelope, stock: Stock) -> 
         )
     at = at_depth(setup, stage.depth_mm)
     plan = assemble(at, env, number, stage.planner, face, remnant, stage.tests)
-    plan = dataclasses.replace(plan, planned_on=date.today().isoformat())
     _write_round(session, source.text, at, plan)
     return Planned(plan, stage.expected_improvement)
 

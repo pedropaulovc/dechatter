@@ -162,7 +162,8 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
 def cmd_report(args: argparse.Namespace) -> int:
     if args.html:
-        args.html.write_text(report.render(args.session, Units(args.units)), encoding="utf-8")
+        units = Units(args.units or Units.MM)
+        args.html.write_text(report.render(args.session, units), encoding="utf-8")
         print(f"wrote {args.html}")
         return 0
     setup = load_setup(args.session / session.SETUP_FILE)
@@ -222,8 +223,7 @@ def build_parser() -> argparse.ArgumentParser:
     summary.add_argument(
         "--units",
         choices=[u.value for u in Units],
-        default=Units.MM.value,
-        help="lengths in the report: the machine's mm (G21) or in (G20); mm are shown beside",
+        help="with --html: lengths in the machine's mm (G21, the default) or in (G20)",
     )
     summary.set_defaults(run=cmd_report)
 
@@ -237,7 +237,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if getattr(args, "units", None) and not args.html:
+        parser.error("--units applies to the HTML report only: add --html <file>")
     logging.basicConfig(
         level=logging.INFO if args.verbose else logging.WARNING, format="%(levelname)s %(message)s"
     )

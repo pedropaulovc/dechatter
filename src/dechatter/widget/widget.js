@@ -232,7 +232,7 @@ function download(blob, filename) {
 // Both carry the report, whose lengths follow the machine's units (mm until known).
 async function exportSession() {
   try {
-    const bytes = await engine('export_zip', current, cnc.units ?? 'mm');
+    const bytes = await engine('export_zip', current, units());
     download(new Blob([bytes], { type: 'application/zip' }), `${current}.zip`);
   } catch (err) {
     showError(err.message);
@@ -241,7 +241,7 @@ async function exportSession() {
 
 async function downloadReport() {
   try {
-    const page = await engine('report_html', current, cnc.units ?? 'mm');
+    const page = await engine('report_html', current, units());
     download(new Blob([page], { type: 'text/html' }), `${current}-report.html`);
   } catch (err) {
     showError(err.message);

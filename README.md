@@ -251,8 +251,8 @@ Every change users can notice adds a line under `## [Unreleased]` in
 [`CHANGELOG.md`](CHANGELOG.md), in the same pull request: what they will notice and, for a
 breaking change, what to do about it.
 
-To release, set the same version in `pyproject.toml`, `package.json` and
-`src/dechatter/__init__.py`, rename `## [Unreleased]` in `CHANGELOG.md` to
+To release, set the same version in `src/dechatter/__init__.py` (`__version__`, which
+`pyproject.toml` reads) and `package.json`, rename `## [Unreleased]` in `CHANGELOG.md` to
 `## [X.Y.Z] - YYYY-MM-DD` above a fresh empty Unreleased section (and update the links at
 its end), merge to `main`, and push a tag `vX.Y.Z` on that commit. The `release` workflow
 refuses a tag without that dated section, tests on Linux and Windows, builds the widget
