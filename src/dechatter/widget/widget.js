@@ -568,6 +568,14 @@ function renderStep() {
     return;
   }
 
+  if (state.next === 'setup') {
+    step.append(
+      el('p', {}, 'This session still holds the example setup, not your machine. Fill it in before planning.'),
+      el('p', {}, button('Open the setup wizard', editSetup, { className: 'primary' })),
+    );
+    return;
+  }
+
   if (state.next === 'plan') {
     const first = state.rounds.length === 0;
     const stock = el('select', {}, el('option', { value: 'same' }, 'same block'), el('option', { value: 'fresh' }, 'fresh block, face at Y0'));
@@ -584,6 +592,9 @@ function renderStep() {
     const next = shallower
       ? `${state.depth_mm} mm depth is settled. Next come cuts ${state.next_depth_mm} mm deep, starting from the widths that were stable.`
       : 'Plan the next cuts from what was measured.';
+    if (state.discarded_round !== null) {
+      step.append(el('p', {}, `Round ${state.discarded_round} had not been run and was planned from the old setup, so it was discarded. Plan it again.`));
+    }
     step.append(el('p', {}, first ? 'Plan a coarse grid of test cuts.' : next));
     step.append(el('p', {}, plan, ...(first ? [] : [' on the ', stock])));
     return;

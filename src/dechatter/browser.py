@@ -71,18 +71,34 @@ class Sessions:
         }
 
     def save_setup(self, name: str, values_json: str) -> dict:
-        """Replace the setup if it is valid; an invalid one leaves the session untouched."""
+        """Replace the setup if it is valid and fits the rounds; else leave the session untouched.
+
+        A round planned but not yet run is discarded when the setup changes, so the next
+        one is planned from the new setup.
+        """
+        current = self._app(name)
+        if current.recording_round is not None:
+            raise SessionError(
+                f"round {current.recording_round} is being recorded; change the setup after it"
+            )
         text = dump_setup(json.loads(values_json)).encode("utf-8")
         path = self._dir(name) / session.SETUP_FILE
         previous = path.read_bytes()
         self._apps.pop(name, None)
         try:
             path.write_bytes(text)
-            return self._app(name).state()
+            app = self._app(name)
+            stale = session.stale_round(self._dir(name), current.setup, app.setup)
+            shown = app.state()
         except Exception:
             path.write_bytes(previous)
             self._apps.pop(name, None)
             raise
+        if stale is None:
+            return shown
+        session.discard_round(stale)
+        app.discarded_round = stale.plan.round
+        return app.state()
 
     def state(self, name: str) -> dict:
         return self._app(name).state()

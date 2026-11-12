@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import shutil
 from dataclasses import asdict, dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -13,7 +14,7 @@ import numpy as np
 
 from . import audio, bayes, detect, gcode
 from .bayes import Observation
-from .config import Setup
+from .config import Setup, SetupSource, setup_source
 from .detect import Thresholds, Verdict
 from .plan import (
     Envelope,
@@ -327,6 +328,12 @@ class Planned:
 
 def plan_next(session: Path, setup: Setup, env: Envelope, stock: Stock) -> Planned:
     """Plan the next round and write its directory, or report convergence."""
+    if setup_source(session / SETUP_FILE) is SetupSource.TEMPLATE:
+        raise PlanError(
+            f"{SETUP_FILE} is still the example template, not your machine: fill in the "
+            "machine, tool, cut and stock (the widget's setup wizard, or edit the file) "
+            "before planning"
+        )
     rounds = load_rounds(session)
     face, remnant = face_after(rounds[-1]) if rounds else (0.0, 0.0)
     if stock is Stock.FRESH:
@@ -345,6 +352,45 @@ def plan_next(session: Path, setup: Setup, env: Envelope, stock: Stock) -> Plann
     plan = assemble(at, env, number, stage.planner, face, remnant, stage.tests)
     _write_round(session, at, plan)
     return Planned(plan, stage.expected_improvement)
+
+
+# What a test cut and its sound depend on. The planner's settings only steer which cuts
+# come next and how the evidence is weighed, so changing them leaves every measurement valid.
+MEASURED_SECTIONS = ("machine", "tool", "cut", "stock", "program")
+
+
+def _unrun(r: Round) -> bool:
+    """Planned and nothing more: no recording, timeline or results beside the plan."""
+    return r.results is None and {p.name for p in r.path.iterdir()} <= {PLAN_FILE, PROGRAM_FILE}
+
+
+def stale_round(session: Path, old: Setup, new: Setup) -> Round | None:
+    """The unrun round a setup change leaves stale, to be planned again from the new setup.
+
+    A change to what was measured is refused once any round was run: its stability map
+    belongs to the old setup. The planner's settings may change at any time.
+    """
+    if old == new:
+        return None
+    rounds = load_rounds(session)
+    if not rounds:
+        return None
+    run = [r for r in rounds if not _unrun(r)]
+    changed = [name for name in MEASURED_SECTIONS if getattr(old, name) != getattr(new, name)]
+    if run and changed:
+        sections = ", ".join(f"[{name}]" for name in changed)
+        raise SessionError(
+            f"round {run[-1].plan.round} was cut with the current setup, and its stability map "
+            f"belongs to it. To change {sections}, start a new session"
+        )
+    if not _unrun(rounds[-1]):
+        return None
+    return rounds[-1]
+
+
+def discard_round(r: Round) -> None:
+    shutil.rmtree(r.path)
+    log.info("discarded unrun round %d: the setup it was planned from changed", r.plan.round)
 
 
 def _write_round(session: Path, setup: Setup, plan: Plan) -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import zipfile
 
 import numpy as np
@@ -64,8 +65,10 @@ class Engine:
 
 @pytest.fixture
 def engine(tmp_path) -> Engine:
+    """A session whose setup was saved through the wizard with the values it offered."""
     engine = Engine(tmp_path / "sessions")
     engine.call("create", NAME)
+    engine.call("save_setup", NAME, json.dumps(engine.call("setup_form", NAME)["values"]))
     return engine
 
 
@@ -152,12 +155,82 @@ def test_a_shallower_depth_is_tried_from_the_stable_widths_and_wins_where_the_ma
 def test_a_deeper_cut_is_refused_on_a_block_whose_face_is_only_flat_higher_up(engine):
     engine.call("plan", NAME, "same")
     engine.run_round(1)
-    form = engine.call("setup_form", NAME)["values"]
-    form["cut"]["axial_depth_mm"] = 8.0
-    engine.call("save_setup", NAME, json.dumps(form))
+    # Only a setup file edited by hand can ask for it; the wizard refuses such a change.
+    path = engine.root / NAME / session.SETUP_FILE
+    text = path.read_text(encoding="utf-8")
+    path.write_text(text.replace("axial_depth_mm = 5.0", "axial_depth_mm = 8.0"), encoding="utf-8")
+    engine.sessions = browser.Sessions(engine.root)
     with pytest.raises(RuntimeError, match="only flat down to 5 mm"):
         engine.call("plan", NAME, "same")
     assert engine.call("plan", NAME, "fresh")["rounds"][-1]["depth_mm"] == 8.0
+
+
+def test_planning_waits_until_the_template_setup_is_filled_in(engine):
+    engine.call("create", "untouched")
+    state = engine.call("state", "untouched")
+    assert state["next"] == "setup"
+    with pytest.raises(RuntimeError, match="still the example template"):
+        engine.call("plan", "untouched", "same")
+    assert not list((engine.root / "untouched").glob("round-*"))
+
+    # Saving the wizard, even on the values it offered, describes the machine.
+    form = engine.call("setup_form", "untouched")["values"]
+    form["tool"]["flutes"] = 2
+    assert engine.call("save_setup", "untouched", json.dumps(form))["next"] == "plan"
+    state = engine.call("plan", "untouched", "same")
+    assert state["next"] == "run"
+    plan = Plan.load(session.round_dir(engine.root / "untouched", 1) / session.PLAN_FILE)
+    assert plan.flutes == 2
+
+
+def test_a_setup_change_discards_the_round_planned_from_the_old_one(engine):
+    engine.call("plan", NAME, "same")
+    form = engine.call("setup_form", NAME)["values"]
+    assert engine.call("save_setup", NAME, json.dumps(form))["rounds"], "no change, round kept"
+
+    form["machine"]["spindle"] = "manual"
+    form["machine"]["max_rpm"] = 2800
+    state = engine.call("save_setup", NAME, json.dumps(form))
+    assert state["rounds"] == [] and state["discarded_round"] == 1 and state["next"] == "plan"
+    assert not session.round_dir(engine.root / NAME, 1).exists()
+
+    state = engine.call("plan", NAME, "same")
+    assert state["discarded_round"] is None
+    assert max(p["rpm"] for p in state["rounds"][0]["passes"]) <= 2800
+    program = engine.call("program", NAME, 1, "mm").splitlines()
+    assert not [line for line in program if re.match(r"M3\b|S\d", line)]
+    assert [line for line in program if line.startswith("M0")]
+
+
+def test_a_setup_change_after_a_round_was_cut_is_refused_but_planner_settings_may_change(engine):
+    engine.call("plan", NAME, "same")
+    engine.run_round(1)
+    folder = engine.root / NAME
+    before = {p: p.read_bytes() for p in folder.rglob("*") if p.is_file()}
+    form = engine.call("setup_form", NAME)["values"]
+
+    changed = json.loads(json.dumps(form))
+    changed["tool"]["flutes"] = 2
+    changed["tool"]["diameter_mm"] = 12.7
+    with pytest.raises(RuntimeError, match=r"start a new session"):
+        engine.call("save_setup", NAME, json.dumps(changed))
+    assert {p: p.read_bytes() for p in folder.rglob("*") if p.is_file()} == before
+    assert engine.call("setup_form", NAME)["values"] == form
+
+    form["planner"]["batch_size"] = 6
+    state = engine.call("save_setup", NAME, json.dumps(form))
+    assert state["rounds"][0]["analysed"] and state["discarded_round"] is None
+
+
+def test_a_round_that_was_recorded_but_not_analysed_counts_as_cut(engine):
+    engine.call("plan", NAME, "same")
+    with pytest.raises(RuntimeError, match="no cut"):
+        engine.run_round(1, gain=0.0)
+    form = engine.call("setup_form", NAME)["values"]
+    form["stock"]["width_mm"] = 40.0
+    with pytest.raises(RuntimeError, match=r"round 1 was cut.*\[stock\]"):
+        engine.call("save_setup", NAME, json.dumps(form))
+    assert engine.call("state", NAME)["rounds"][0]["has_recording"]
 
 
 def test_operator_verdict_overrules_the_detector_and_feeds_the_planner(engine):

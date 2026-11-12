@@ -31,6 +31,11 @@ class ToolMaterial(StrEnum):
     HSS = "hss"
 
 
+class SetupSource(StrEnum):
+    TEMPLATE = "template"  # the example `init` and the widget write, as written: not this machine
+    FILLED_IN = "filled-in"
+
+
 class SpindleControl(StrEnum):
     PROGRAM = "program"  # the G-code starts the spindle and sets its speed
     MANUAL = "manual"  # the operator does, at a program pause before each speed
@@ -147,6 +152,15 @@ def load_setup(path: Path) -> Setup:
     setup = Setup(**built)
     _validate(setup)
     return setup
+
+
+def setup_source(path: Path) -> SetupSource:
+    """Whether the setup file is still the template. Whitespace alone does not fill it in:
+    an editor that only re-wrapped lines or line endings left the example values in place.
+    """
+    if path.read_text(encoding="utf-8").split() == TEMPLATE.split():
+        return SetupSource.TEMPLATE
+    return SetupSource.FILLED_IN
 
 
 def _toml_value(value: object) -> str:

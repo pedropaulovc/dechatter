@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 
 from . import audio, bayes, session
-from .config import SpindleControl, load_setup
+from .config import SetupSource, SpindleControl, load_setup, setup_source
 from .detect import Thresholds, Verdict
 from .plan import PassKind, envelope, feed_mm_min
 from .session import PassStatus, SessionError, Stock
@@ -30,6 +30,7 @@ TOP_RESULTS = 5
 
 
 class Next(StrEnum):
+    SETUP = "setup"  # the setup is still the template: fill it in before planning
     PLAN = "plan"  # plan the first or the next round
     RUN = "run"  # a round is planned: load it, cut it, record it
     CONVERGED = "converged"
@@ -42,6 +43,7 @@ class App:
         self.setup = load_setup(session_dir / session.SETUP_FILE)
         self.env = envelope(self.setup)
         self.recording_round: int | None = None
+        self.discarded_round: int | None = None  # unrun round a setup change threw away
 
     def program_name(self, number: int) -> str:
         return f"dechatter-{self.session_dir.resolve().name}-round-{number:02d}.nc"
@@ -74,6 +76,9 @@ class App:
             stage = session.next_stage(self.setup, self.env, rounds)
             upcoming = Next.PLAN if stage.tests else Next.CONVERGED
             next_depth = stage.depth_mm
+        template = setup_source(self.session_dir / session.SETUP_FILE) is SetupSource.TEMPLATE
+        if upcoming is Next.PLAN and template:
+            upcoming = Next.SETUP
 
         tool, cut = self.setup.tool, self.setup.cut
         manual = self.setup.machine.spindle is SpindleControl.MANUAL
@@ -90,6 +95,7 @@ class App:
             "next_depth_mm": next_depth,
             "depth_mm": depth,
             "recording_round": self.recording_round,
+            "discarded_round": self.discarded_round,
             "rounds": [self._round_json(r) for r in rounds],
             "observations": [
                 {"rpm": o.rpm, "width_mm": o.width_mm, "verdict": o.verdict} for o in observations
@@ -144,6 +150,7 @@ class App:
 
     def plan(self, stock: Stock) -> None:
         session.plan_next(self.session_dir, self.setup, self.env, stock)
+        self.discarded_round = None
 
     def program(self, number: int) -> str:
         return (self._round(number).path / session.PROGRAM_FILE).read_text(encoding="ascii")

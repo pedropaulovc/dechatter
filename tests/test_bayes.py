@@ -113,9 +113,16 @@ def true_optimum(setup, env) -> float:
     )
 
 
+def fill_in(work) -> None:
+    """Describe the machine, as the user does after `init`, keeping the template's values."""
+    path = work / session.SETUP_FILE
+    path.write_text(path.read_text().replace('name = "PM-30MV"', 'name = "mill"'))
+
+
 def test_session_converges_near_the_true_optimum_from_recordings_alone(tmp_path, setup):
     work = tmp_path / "session"
     assert cli.main(["init", str(work)]) == 0
+    fill_in(work)
     for _ in range(10):
         planned = len(session.load_rounds(work))
         assert cli.main(["plan", str(work), "--new-stock"]) == 0
@@ -138,9 +145,25 @@ def test_session_converges_near_the_true_optimum_from_recordings_alone(tmp_path,
     assert len(cuts) <= 40
 
 
+def test_plan_refuses_until_the_setup_is_filled_in(tmp_path, capsys):
+    work = tmp_path / "session"
+    cli.main(["init", str(work)])
+    path = work / session.SETUP_FILE
+    # Re-wrapping lines or line endings in an editor fills nothing in.
+    path.write_text(path.read_text().replace("\n", "\r\n  ") + "\n\n", newline="")
+    assert cli.main(["plan", str(work)]) == 1
+    assert "still the example template" in capsys.readouterr().err
+    assert session.load_rounds(work) == []
+
+    fill_in(work)
+    assert cli.main(["plan", str(work)]) == 0
+    assert [r.plan.round for r in session.load_rounds(work)] == [1]
+
+
 def test_plan_refuses_until_the_last_round_is_analysed(tmp_path, capsys):
     work = tmp_path / "session"
     cli.main(["init", str(work)])
+    fill_in(work)
     assert cli.main(["plan", str(work)]) == 0
     assert cli.main(["plan", str(work)]) == 1
     assert "dechatter analyze" in capsys.readouterr().err
