@@ -41,7 +41,7 @@ def test_surface_speed_limit_caps_spindle_speed(write_setup):
 
 
 def test_power_cap_excludes_heavy_cuts(write_setup):
-    weak = load_setup(write_setup(p=("spindle_power_w = 1500", "spindle_power_w = 60")))
+    weak = load_setup(write_setup(p=("spindle_power_hp = 2.0", "spindle_power_hp = 0.08")))
     env = envelope(weak)
     tests = grid_tests(weak, env)
     full = load_setup(write_setup())
@@ -157,3 +157,13 @@ def test_manual_spindle_tests_the_same_cuts_as_program_control(setup, write_setu
 def test_unknown_setup_key_is_rejected(write_setup):
     with pytest.raises(ConfigError, match="flute_count"):
         load_setup(write_setup(k=("flutes = 3", "flute_count = 3")))
+
+
+def test_spindle_power_is_given_in_hp_and_the_old_watts_key_is_refused(write_setup):
+    half = load_setup(write_setup(p=("spindle_power_hp = 2.0", "spindle_power_hp = 1.0")))
+    assert half.machine.spindle_power_w == pytest.approx(745.7)
+    assert envelope(half).mrr_limit_mm3_min == pytest.approx(
+        envelope(load_setup(write_setup())).mrr_limit_mm3_min / 2
+    )
+    with pytest.raises(ConfigError, match="spindle_power_w is now spindle_power_hp"):
+        load_setup(write_setup(p=("spindle_power_hp = 2.0", "spindle_power_w = 1500")))

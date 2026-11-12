@@ -277,7 +277,7 @@ def test_a_setup_change_after_a_round_was_cut_is_refused_where_it_was_measured(e
     # free.
     form["machine"]["name"] = "renamed mill"
     form["machine"]["min_rpm"] = 600
-    form["machine"]["spindle_power_w"] = 1200.0
+    form["machine"]["spindle_power_hp"] = 1.5
     form["cut"]["other_depths_mm"] = [2.5]
     form["cut"]["speed_min_rpm"] = 1500
     form["program"]["safe_z_mm"] = 20.0

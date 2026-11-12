@@ -41,14 +41,21 @@ class SpindleControl(StrEnum):
     MANUAL = "manual"  # the operator does, at a program pause before each speed
 
 
+WATTS_PER_HP = 745.7
+
+
 @dataclass(frozen=True)
 class Machine:
     max_rpm: int
-    spindle_power_w: float
+    spindle_power_hp: float  # rated motor power, as mill spindles are usually rated
     weight_kg: float
     min_rpm: int = 500
     name: str = ""
     spindle: SpindleControl = SpindleControl.PROGRAM
+
+    @property
+    def spindle_power_w(self) -> float:
+        return self.spindle_power_hp * WATTS_PER_HP
 
 
 @dataclass(frozen=True)
@@ -144,6 +151,11 @@ def parse_setup(text: str, origin: str) -> Setup:
         data = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"{origin} is not valid TOML: {exc}") from exc
+    if "spindle_power_w" in data.get("machine", {}):
+        raise ConfigError(
+            "[machine] spindle_power_w is now spindle_power_hp: the spindle motor's rated "
+            f"power in horsepower (1 hp = {WATTS_PER_HP} W)"
+        )
     sections = {f.name: f for f in dataclasses.fields(Setup)}
     unknown = set(data) - set(sections)
     if unknown:
@@ -270,7 +282,7 @@ TEMPLATE = """\
 name = "PM-30MV"
 max_rpm = 5000
 min_rpm = 500
-spindle_power_w = 1500   # rated spindle motor power
+spindle_power_hp = 2.0   # rated spindle motor power, in hp
 spindle = "program"      # program: the G-code sets the speed (M3 S) | manual: the program
                          # pauses (M0) before each speed and you set it on the machine
 weight_kg = 250          # derates the starting chip load on light machines

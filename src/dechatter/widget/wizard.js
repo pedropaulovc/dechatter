@@ -18,7 +18,7 @@ export const STEPS = [
       { at: 'machine.name', advanced: true, label: 'Name', type: 'text', optional: true },
       { at: 'machine.max_rpm', label: 'Highest spindle speed', type: 'int', unit: 'rpm' },
       { at: 'machine.min_rpm', label: 'Lowest usable spindle speed', type: 'int', unit: 'rpm' },
-      { at: 'machine.spindle_power_w', label: 'Spindle motor power', type: 'number', unit: 'W' },
+      { at: 'machine.spindle_power_hp', label: 'Spindle motor power', type: 'number', unit: 'hp' },
       { at: 'machine.weight_kg', label: 'Machine weight', type: 'number', unit: 'kg', note: 'Light machines start with a lighter chip load.' },
       {
         at: 'machine.spindle',

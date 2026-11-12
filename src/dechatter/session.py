@@ -370,7 +370,7 @@ FREE_AFTER_CUT = frozenset(
         "machine.name",
         "machine.min_rpm",
         "machine.max_rpm",
-        "machine.spindle_power_w",
+        "machine.spindle_power_hp",
         "cut.width_max_mm",
         "cut.speed_min_rpm",
         "cut.speed_max_rpm",
