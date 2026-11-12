@@ -734,40 +734,31 @@ def test_a_reset_is_refused_while_recording_and_undone_if_it_fails(engine, monke
     assert not list((engine.root / NAME).glob(".discarded-*"))
     assert [r["round"] for r in engine.call("state", NAME)["rounds"]] == [1, 2]
 
-    # A round that cannot be put back either is kept where no sweep deletes it.
+    # A round that cannot be put back either stays in .reset-*, named in the error.
     def fail_back(self, target):
-        if self.name == "round-02" or (self.name == "round-01" and ".discarded-" in str(self)):
+        if self.name == "round-02" or (self.name == "round-01" and ".reset-" in str(self)):
             raise OSError("storage refused")
         return real(self, target)
 
     monkeypatch.setattr(Path, "rename", fail_back)
-    stuck = r"round-01 could not be put back and are in .*\.reset-failed-"
-    with pytest.raises(RuntimeError, match=stuck):
+    with pytest.raises(RuntimeError, match=r"round-01 could not be put back and are in .*\.reset-"):
         engine.call("reset", NAME)
     monkeypatch.undo()
-    kept = list((engine.root / NAME).glob(".reset-failed-*"))
+    folder = engine.root / NAME
+    kept = list(folder.glob(".reset-*"))
     assert len(kept) == 1 and (kept[0] / "round-01" / "recording.wav").exists()
-    session.sweep_discarded(engine.root / NAME)
-    assert kept[0].exists()
-    kept[0].rename(engine.root / NAME / "round-01")
+    original = (kept[0] / "round-01" / session.PLAN_FILE).read_bytes()
 
-    # Nor can the aside be renamed: the error names where the round is, and sweeps keep it.
-    def fail_more(self, target):
-        if self.name.startswith(".discarded-reset-"):
-            raise OSError("storage refused")
-        return fail_back(self, target)
-
-    monkeypatch.setattr(Path, "rename", fail_more)
-    with pytest.raises(
-        RuntimeError, match=r"round-01 could not be put back and are in .*\.discarded-reset-"
-    ):
-        engine.call("reset", NAME)
-    monkeypatch.undo()
-    aside = list((engine.root / NAME).glob(".discarded-reset-*"))
-    assert len(aside) == 1 and (aside[0] / "round-01").exists()
-    session.sweep_discarded(engine.root / NAME)
-    Engine(engine.root).call("names")
-    assert aside[0].exists()
+    # Reset again and plan a new round 1: the name is reused, yet no sweep takes the
+    # original, and Export carries it.
+    assert engine.call("reset", NAME)["rounds"] == []
+    engine.call("plan", NAME, "same")
+    session.sweep_discarded(folder)
+    Engine(engine.root).call("setup_form", NAME)  # opening the session sweeps too
+    assert (kept[0] / "round-01" / session.PLAN_FILE).read_bytes() == original
+    names = zipfile.ZipFile(io.BytesIO(engine.call("export_zip", NAME, "mm"))).namelist()
+    assert f"{NAME}/{kept[0].name}/round-01/recording.wav" in names
+    assert not list(folder.glob(".discarded-*"))
 
 
 def test_a_reset_goes_ahead_when_the_report_cannot_be_removed(engine, monkeypatch):
@@ -788,7 +779,7 @@ def test_a_reset_goes_ahead_when_the_report_cannot_be_removed(engine, monkeypatc
     assert not list((engine.root / NAME).glob(".discarded-*"))
 
 
-def test_reset_and_export_go_by_whether_the_setup_loads(engine, tmp_path, capsys):
+def test_reset_and_export_go_by_whether_the_setup_loads(engine):
     assert engine.call("setup_status", NAME) == {"status": "loads", "reason": ""}
     # Rounds that do not load leave the setup loading: the session can be exported and reset.
     engine.call("plan", NAME, "same")

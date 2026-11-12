@@ -42,10 +42,12 @@ let current = localStorage.getItem(SESSION_KEY) ?? '';
 let state = null; // the current session, as the engine last reported it
 let editing = null; // { values, defaults, materials, computed, step } while the setup wizard is open, else null
 let timeline = []; // what cncjs reported since the job last started; saved with the recording
-// What the session controls are doing: idle; busy while an engine request is in flight;
-// confirming while a delete or reset is being confirmed, so its session cannot change.
-let controls = 'idle';
-const busy = () => controls === 'busy';
+// Engine requests in flight; the controls wait while there are any.
+let requests = 0;
+const busy = () => requests > 0;
+// The delete or reset confirmation: closed, being prepared, or open. While it is not
+// closed, the session it names cannot change.
+let dialog = 'closed';
 // Whether the open session's setup loads ('loads' | 'refused'), as the engine checks it;
 // null with no session open. Reset and Export need it to load; the rounds need not.
 let setupStatus = null;
@@ -93,8 +95,7 @@ function showError(message) {
 
 // Run one request that answers with the session's new state.
 async function act(method, ...args) {
-  const before = controls;
-  controls = 'busy';
+  requests += 1;
   render();
   try {
     state = await engine(method, current, ...args);
@@ -102,7 +103,7 @@ async function act(method, ...args) {
   } catch (err) {
     showError(err.message);
   } finally {
-    controls = before === 'busy' ? 'idle' : before;
+    requests -= 1;
     syncRecording();
     render();
   }
@@ -124,12 +125,20 @@ async function openSession(name) {
 // Whether a session's setup loads, apart from its rounds: a session whose rounds do not
 // load can still be reset and exported.
 async function checkSetup(name) {
+  requests += 1;
+  render();
   try {
     const { status } = await engine('setup_status', name);
-    setupStatus = name === current ? status : setupStatus;
+    if (name === current) {
+      setupStatus = status;
+    }
   } catch (err) {
-    setupStatus = null;
-    showError(err.message);
+    if (name === current) {
+      setupStatus = null;
+      showError(err.message);
+    }
+  } finally {
+    requests -= 1;
   }
 }
 
@@ -332,7 +341,7 @@ async function ask(action) {
     showError(refusal);
     return;
   }
-  controls = 'confirming';
+  dialog = 'preparing';
   render();
   try {
     // A session whose setup does not load (from dechatter 0.1.x, or damaged) cannot be
@@ -344,8 +353,9 @@ async function ask(action) {
     $('confirm-go').textContent = verb;
     Object.assign($('confirm-dialog').dataset, { session: name, action });
     $('confirm-dialog').showModal();
+    dialog = 'open';
   } catch (err) {
-    controls = 'idle';
+    dialog = 'closed';
     showError(err.message);
     render();
   }
@@ -359,11 +369,15 @@ async function confirmed() {
     showError(refusal);
     return;
   }
+  requests += 1;
+  render();
   try {
     showError('');
     await ACTIONS[action].run(name);
   } catch (err) {
     showError(err.message);
+  } finally {
+    requests -= 1;
   }
   render();
 }
@@ -569,7 +583,7 @@ function syncRecording() {
 }
 
 async function loadProgram(round) {
-  controls = 'busy';
+  requests += 1;
   render();
   try {
     // Capture has to be running before the job can start; the listener below does not wait.
@@ -587,7 +601,7 @@ async function loadProgram(round) {
   } catch (err) {
     showError(err.message);
   } finally {
-    controls = 'idle';
+    requests -= 1;
     render();
   }
 }
@@ -627,13 +641,13 @@ function renderSessions() {
     ...names.map((name) => el('option', { value: name }, name)),
   );
   select.value = names.includes(current) ? current : '';
-  select.disabled = controls !== 'idle' || mic.recording;
+  select.disabled = busy() || dialog !== 'closed' || mic.recording;
   $('summary').textContent = state ? summary(state) : '';
   $('edit-setup').disabled = !state || busy() || mic.recording;
   $('export').disabled = setupStatus !== 'loads' || busy() || mic.recording;
   // Also for a session that failed to load: deleting it is the way to be rid of it.
   for (const [id, verb] of [['delete-session', 'Delete'], ['reset-session', 'Reset']]) {
-    $(id).disabled = !names.includes(current) || controls !== 'idle' || Boolean(busyRefusal(current, verb));
+    $(id).disabled = !names.includes(current) || busy() || Boolean(busyRefusal(current, verb)) || dialog !== 'closed';
   }
   // Reset keeps the setup, so the setup has to load; Delete is the way out otherwise.
   $('reset-session').disabled ||= setupStatus !== 'loads';
@@ -949,7 +963,7 @@ $('delete-session').onclick = () => ask('delete');
 $('reset-session').onclick = () => ask('reset');
 // The page's error line is behind the dialog: say there how the export went.
 $('confirm-dialog').addEventListener('close', () => {
-  controls = 'idle';
+  dialog = 'closed';
   render();
 });
 $('confirm-export').onclick = async () => {

@@ -655,24 +655,10 @@ def set_aside(r: Round) -> Path:
     return aside
 
 
-def _holds_lost_rounds(session: Path, leftover: Path) -> bool:
-    """A reset's aside, not marked done, that holds rounds the session no longer has: a
-    failed reset left them there."""
-    if not leftover.name.startswith(f"{DISCARDED}reset-") or (leftover / RESET_DONE).exists():
-        return False
-    return any(not (session / r.name).exists() for r in leftover.glob("round-*"))
-
-
-RESET_DONE = "reset-done"  # in a reset's aside that could not be renamed done
-
-
 def sweep_discarded(session: Path) -> None:
-    """Delete what is left of rounds discarded earlier; one that will not go is left, and
-    so is a failed reset's aside that still holds rounds the session lost."""
+    """Delete what is left of rounds discarded earlier (`.discarded-*` only); one that will
+    not go is left for the next sweep."""
     for leftover in session.glob(f"{DISCARDED}*"):
-        if _holds_lost_rounds(session, leftover):
-            log.warning("keeping %s: it holds rounds a failed reset could not put back", leftover)
-            continue
         try:
             shutil.rmtree(leftover)
         except OSError as exc:
@@ -695,26 +681,30 @@ class Contents:
     recordings: int
 
 
-def _put_back(session: Path, aside: Path, moved: list[Path], marker: str, exc: OSError) -> None:
-    """Return the rounds a failed reset moved; keep any that will not go back from the sweep."""
+# A reset moves the rounds into `.reset-<hex>`, which no sweep touches and Export keeps.
+# Only once every round is in it is it renamed `.discarded-<hex>` and deleted. So a reset
+# that fails part-way, or cannot rename its folder, leaves rounds only where they are safe:
+# back in the session, or in `.reset-<hex>`, which the error names.
+RESETTING = ".reset-"
+
+
+def _put_back(session: Path, aside: Path, moved: list[Path], exc: OSError) -> None:
+    """Return the rounds a failed reset moved; any that will not go back stay in `aside`."""
     stuck = []
     for folder in reversed(moved):
         try:
             (aside / folder.name).rename(folder)
         except OSError:
             stuck.append(folder.name)
-    if not stuck:
-        aside.rmdir()
-        return
-    kept = session / f".reset-failed-{marker}"
+    if stuck:
+        raise SessionError(
+            f"could not reset {session.name}: {exc}; {', '.join(stuck)} could not be put "
+            f"back and are in {aside}"
+        ) from exc
     try:
-        aside.rename(kept)
-    except OSError:
-        kept = aside  # the sweep keeps it all the same: it holds rounds the session lost
-    raise SessionError(
-        f"could not reset {session.name}: {exc}; {', '.join(stuck)} could not be put back "
-        f"and are in {kept}"
-    ) from exc
+        aside.rmdir()
+    except OSError as cleanup:
+        log.warning("reset %s: could not remove the empty %s: %s", session.name, aside, cleanup)
 
 
 def contents(session: Path) -> Contents:
@@ -725,13 +715,12 @@ def contents(session: Path) -> Contents:
 def reset(session: Path) -> None:
     """Discard every round and the report, keeping the setup: the session starts over.
 
-    The rounds are not read, so a damaged one goes too. They are moved aside together and
-    only then deleted. If moving one fails, those already moved are put back; any that
-    cannot be are left in a folder the sweep keeps, named in the error.
+    The rounds are not read, so a damaged one goes too. See RESETTING for how they are
+    kept safe until the reset has succeeded.
     """
     sweep_discarded(session)
     marker = uuid.uuid4().hex[:8]
-    aside = session / f"{DISCARDED}reset-{marker}"
+    aside = session / f"{RESETTING}{marker}"
     try:
         aside.mkdir()
         moved: list[Path] = []
@@ -740,29 +729,25 @@ def reset(session: Path) -> None:
                 folder.rename(aside / folder.name)
                 moved.append(folder)
         except OSError as exc:
-            _put_back(session, aside, moved, marker, exc)
+            _put_back(session, aside, moved, exc)
             raise
     except OSError as exc:
         raise SessionError(f"could not reset {session.name}: {exc}") from exc
     log.info("reset %s: discarded %d rounds", session.name, len(moved))
-    # Mark the aside as meant to go, so a sweep deletes it should this delete fail.
-    try:
-        done = aside.with_name(f"{DISCARDED}done-{marker}")
-        aside.rename(done)
-        aside = done
-    except OSError:
-        try:
-            (aside / RESET_DONE).touch()
-        except OSError as exc:
-            log.warning("reset %s: %s holds discarded rounds: %s", session.name, aside, exc)
     try:
         (session / REPORT_FILE).unlink(missing_ok=True)
     except OSError as exc:
         log.warning("reset %s: could not remove %s: %s", session.name, REPORT_FILE, exc)
+    discarded = session / f"{DISCARDED}{marker}"
     try:
-        shutil.rmtree(aside)
+        aside.rename(discarded)
     except OSError as exc:
-        log.warning("could not delete %s yet: %s", aside.name, exc)
+        log.warning("reset %s: the discarded rounds stay in %s: %s", session.name, aside, exc)
+        return
+    try:
+        shutil.rmtree(discarded)
+    except OSError as exc:
+        log.warning("could not delete %s yet: %s", discarded.name, exc)
 
 
 def _write_round(session: Path, setup_text: str, setup: Setup, plan: Plan) -> None:

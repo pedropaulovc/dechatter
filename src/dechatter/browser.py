@@ -113,10 +113,11 @@ class Sessions:
     def setup_status(self, name: str) -> dict:
         """Whether a session's setup loads, its rounds aside: reset and export need it to.
 
-        Nothing is kept: opening the session loads it as usual.
+        The session it loads is kept, for the state asked next.
         """
+        self._existing(name)
         try:
-            App(self._existing(name), self.thresholds)
+            self._app(name)
         except EXPECTED as exc:
             return {"status": SetupLoad.REFUSED, "reason": str(exc)}
         return {"status": SetupLoad.LOADS, "reason": ""}
