@@ -62,11 +62,11 @@ def _print_known(setup: Setup, env: Envelope, rounds: list[session.Round]) -> No
             f"  S{cut.rpm:.0f}  width {cut.width_mm:.2f} mm  depth {cut.depth_mm:g} mm"
             f"  F{feed:.0f} mm/min  {cut.mrr_mm3_min / 1000:.2f} cm3/min"
         )
-    for sweep in session.sweeps(rounds):
-        _print_sweep(setup, sweep)
+    for sweep in session.sweeps(rounds, env):
+        _print_sweep(sweep)
 
 
-def _print_sweep(setup: Setup, sweep: session.Sweep) -> None:
+def _print_sweep(sweep: session.Sweep) -> None:
     where = f"S{sweep.rpm:.0f} width {sweep.width_mm:.2f} mm depth {sweep.depth_mm:g} mm"
     found = sweep.stable_chip_load_mm
     if found is None:
@@ -140,7 +140,9 @@ def cmd_plan(args: argparse.Namespace) -> int:
             f"converged: no further cut is expected to add {setup.planner.stop_improvement:.0%} "
             f"removal rate (best candidate {planned.expected_improvement:.1%})"
         )
-        if session.to_sweep(setup, env, rounds):
+        found = session.best_cuts(setup, env, rounds)
+        sweep = session.swept(found, session.sweeps(rounds, env))
+        if session.to_sweep(setup, env, found, sweep):
             print(
                 f"to find how far the chip load can go at the best cut: "
                 f"dechatter plan {args.session} --sweep"

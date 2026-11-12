@@ -207,7 +207,7 @@ def render(session_dir: Path, units: Units) -> str:
         )
     if not recommended:
         recommended.append("<p>No stable cut has been measured yet.</p>")
-    for sweep in session.sweeps(rounds):
+    for sweep in session.sweeps(rounds, env):
         where = (
             f"Chip-load sweep, round {sweep.round}: {sweep.rpm:.0f} rpm, "
             f"{_length(sweep.width_mm, units)} wide, {_length(sweep.depth_mm, units)} deep"

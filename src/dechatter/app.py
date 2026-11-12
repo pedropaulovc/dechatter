@@ -77,15 +77,16 @@ class App:
         )
         shown = bayes.coarse(stability)
 
+        found = session.best_cuts(self.setup, self.env, rounds)
+        sweep = session.swept(found, session.sweeps(rounds, self.env))
         upcoming, next_depth = Next.PLAN, self.setup.cut.axial_depth_mm
         if rounds and rounds[-1].results is None:
             upcoming, next_depth = Next.RUN, depth
         if rounds and rounds[-1].results is not None:
-            stage = session.next_stage(self.setup, self.env, rounds)
+            stage = session.next_stage(self.setup, self.env, rounds, found)
             upcoming = Next.PLAN if stage.tests else Next.CONVERGED
             next_depth = stage.depth_mm
-        sweep = session.swept(self.setup, self.env, rounds)
-        if upcoming is Next.CONVERGED and session.to_sweep(self.setup, self.env, rounds):
+        if upcoming is Next.CONVERGED and session.to_sweep(self.setup, self.env, found, sweep):
             upcoming = Next.SWEEP
         template = setup_source(self.source.text) is SetupSource.TEMPLATE
         if upcoming is Next.PLAN and template:
@@ -119,7 +120,7 @@ class App:
                     "feed_mm_min": round(feed_mm_min(self.setup, self.env, best.rpm)),
                     "mrr_cm3_min": round(best.mrr_mm3_min / 1000, 2),
                 }
-                for best in session.best_cuts(self.setup, self.env, rounds)[:TOP_RESULTS]
+                for best in found[:TOP_RESULTS]
             ],
             "map": {
                 "speeds": shown.speeds.tolist(),

@@ -11,11 +11,12 @@ What changed for people who use the dechatter widget and command line. The forma
 ### Changed
 
 - **Breaking:** the spindle motor power is given in horsepower. `spindle_power_w` in
-  `[machine]` is now `spindle_power_hp` (1 hp = 745.7 W), and the wizard asks for hp. A
-  setup that still has `spindle_power_w` is refused.
+  `[machine]` is now `spindle_power_hp` (1 hp = 745.7 W), and the wizard asks for hp.
 - **Breaking:** sessions from 0.1.x do not load in 0.2.0, in the widget or the command line:
   their setup, plans and results are in the older format. Start a new session for each
-  tool. dechatter refuses them with a message that says so.
+  tool. dechatter refuses them with a message that says so: a 0.1.x setup (it has
+  `spindle_power_w`) is named as one, and a round in the older format says it was written
+  by an older dechatter. A round damaged otherwise is named with its file and the problem.
 - **Breaking:** once a round has been cut (recorded or analysed), the setup can no longer
   change in anything that shapes the cut or its sound: the machine's weight and spindle
   control, the tool, the work material, depth, direction and chip load, the stock length,
@@ -33,7 +34,8 @@ What changed for people who use the dechatter widget and command line. The forma
   depths, the machine's name, the safe height, clearance, plunge feed, truing width, stock
   width and the planner's settings may change at any time. Cuts outside narrowed limits stay
   in their round but are not recommended, nor are cuts over a lowered power cap, and the
-  chip-load sweep is offered only for a cut the power cap leaves room to sweep. On the map, a stable cut wider than a narrowed
+  chip-load sweep is offered only for a cut the power cap leaves room to sweep. A sweep's
+  result stays within the power cap as it is now. On the map, a stable cut wider than a narrowed
   width limit counts as stable at the widest width searched; chatter that wide, and cuts at
   speeds outside the limits, are left out. Cuts at the edges of the search, such as a width
   the grid rounds just above the limit, or speeds a coarser speed step no longer reaches,

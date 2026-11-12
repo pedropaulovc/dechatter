@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 import pytest
 
 from dechatter import gcode
-from dechatter.config import ConfigError, load_setup
+from dechatter.config import ConfigError, load_setup, parse_setup
 from dechatter.plan import (
     SWEEP_PASSES,
     PassKind,
@@ -190,3 +191,9 @@ def test_a_chip_load_sweep_steps_lightest_first_inside_the_power_cap(setup, writ
     assert 0 < len(capped) < SWEEP_PASSES
     with pytest.raises(ConfigError, match="chip_load_sweep_low < chip_load_sweep_high"):
         load_setup(write_setup(s=("chip_load_sweep_high = 1.7", "chip_load_sweep_high = 0.5")))
+
+
+def test_a_setup_from_dechatter_0_1_is_refused_with_what_to_do():
+    old = (Path(__file__).parent / "fixtures" / "setup-0.1.1.toml").read_text()
+    with pytest.raises(ConfigError, match=r"from dechatter 0\.1\.x.*start a new session"):
+        parse_setup(old, "setup.toml")

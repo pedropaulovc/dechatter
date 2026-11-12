@@ -8,6 +8,7 @@ import re
 import shutil
 import zipfile
 from datetime import date
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -390,36 +391,54 @@ def test_narrowing_the_speeds_after_cutting_recommends_and_plans_only_inside_the
     assert planned and all(p["rpm"] <= 2000 for p in planned)
 
 
-def test_a_session_from_an_older_dechatter_is_refused_cleanly(engine, capsys):
-    """Rounds as 0.1.x wrote them: no setup copy, no planned date, no detector verdict."""
+def test_a_session_from_an_older_dechatter_is_refused_cleanly(engine, tmp_path, capsys):
+    # A 0.1.x session stops at its setup, with what to do.
+    old = tmp_path / "old-session"
+    old.mkdir()
+    setup_011 = (Path(__file__).parent / "fixtures" / "setup-0.1.1.toml").read_text()
+    (old / session.SETUP_FILE).write_text(setup_011.replace("PM-30MV", "my mill"))
+    for command in (["plan"], ["report"]):
+        assert cli.main([command[0], str(old)]) == 1
+        err = capsys.readouterr().err
+        assert "from dechatter 0.1.x" in err and "start a new session" in err
+
+    # Rounds in the older format: their schema says so.
     engine.call("plan", NAME, "same")
     engine.run_round(1)
     folder = session.round_dir(engine.root / NAME, 1)
-    plan = json.loads((folder / session.PLAN_FILE).read_text())
-    del plan["planned_on"]
-    (folder / session.PLAN_FILE).write_text(json.dumps(plan))
-    results = json.loads((folder / session.RESULTS_FILE).read_text())
-    for p in results["passes"]:
-        del p["detected"]
-    (folder / session.RESULTS_FILE).write_text(json.dumps(results))
-    (folder / session.SETUP_FILE).unlink()
-
-    older = "round-01 was written by an older dechatter, or is damaged .*Start a new session"
-    fresh = Engine(engine.root)
+    plan_path, results_path = folder / session.PLAN_FILE, folder / session.RESULTS_FILE
+    plan, results = json.loads(plan_path.read_text()), json.loads(results_path.read_text())
+    older = dict(plan, schema=1)
+    del older["planned_on"]
+    plan_path.write_text(json.dumps(older))
+    message = r"round-01/plan.json was written by an older dechatter \(schema 1\)\. Start a new"
     for method, args in [("state", ()), ("plan", ("same",)), ("program", (1, "mm"))]:
-        with pytest.raises(RuntimeError, match=older):
-            fresh.call(method, NAME, *args)
+        with pytest.raises(RuntimeError, match=message):
+            Engine(engine.root).call(method, NAME, *args)
     for command in (["plan"], ["report"], ["analyze", str(folder / "recording.wav")]):
         assert cli.main([command[0], str(engine.root / NAME), *command[1:]]) == 1
-        assert re.search(older, capsys.readouterr().err)
-
-    # Each piece alone is enough.
-    (folder / session.SETUP_FILE).write_text("[machine]\n")
-    with pytest.raises(RuntimeError, match=r"older dechatter.*planned_on"):
+        assert re.search(message, capsys.readouterr().err)
+    plan_path.write_text(json.dumps(plan))
+    results_path.write_text(json.dumps(dict(results, schema=1)))
+    with pytest.raises(RuntimeError, match=r"results.json was written by an older dechatter"):
         Engine(engine.root).call("state", NAME)
-    plan["planned_on"] = "2026-11-10"
-    (folder / session.PLAN_FILE).write_text(json.dumps(plan))
-    with pytest.raises(RuntimeError, match=r"older dechatter.*detected"):
+
+    # Anything else is damage to repair by hand, named with its file.
+    broken = dict(
+        results, passes=[{k: v for k, v in p.items() if k != "detected"} for p in results["passes"]]
+    )
+    results_path.write_text(json.dumps(broken))
+    with pytest.raises(
+        RuntimeError,
+        match=r"round-01/results.json cannot be read \(missing 'detected'\)\. Fix it by hand",
+    ):
+        Engine(engine.root).call("state", NAME)
+    results_path.write_text("{ not json")
+    with pytest.raises(RuntimeError, match=r"round-01/results.json cannot be read \(Expecting"):
+        Engine(engine.root).call("state", NAME)
+    results_path.write_text(json.dumps(results))
+    (folder / session.SETUP_FILE).unlink()
+    with pytest.raises(RuntimeError, match=r"round-01/setup.toml is missing"):
         Engine(engine.root).call("state", NAME)
 
 
@@ -671,25 +690,62 @@ def test_a_chip_load_sweep_follows_convergence_and_stays_off_the_map(engine, set
     assert "Chip-load sweep, round" in page and "chip-load sweep, planned" in page
 
 
-def test_a_lowered_power_cap_leaves_heavier_cuts_unrecommended(engine, setup):
-    state = converge(engine, setup)
-    best = state["best"][0]
+def cap_power(engine, mrr_cm3_min: float, **planner) -> dict:
+    """Set the spindle power so that the power cap is this removal rate."""
     path = engine.root / NAME / session.SETUP_FILE
-    before = envelope(load_setup(path))
-    form = engine.call("setup_form", NAME)["values"]
-    # A cap at 80% of the best cut's removal rate.
-    ratio = 0.8 * best["mrr_cm3_min"] * 1000 / before.mrr_limit_mm3_min
-    form["machine"]["spindle_power_hp"] = round(form["machine"]["spindle_power_hp"] * ratio, 3)
-    state = engine.call("save_setup", NAME, json.dumps(form))
     limit = envelope(load_setup(path)).mrr_limit_mm3_min / 1000
-    assert state["best"] and all(b["mrr_cm3_min"] <= limit + 0.01 for b in state["best"])
-    assert best not in state["best"]
+    form = engine.call("setup_form", NAME)["values"]
+    form["machine"]["spindle_power_hp"] *= mrr_cm3_min / limit
+    form["planner"].update(planner)
+    return engine.call("save_setup", NAME, json.dumps(form))
+
+
+def test_a_lowered_power_cap_leaves_heavier_cuts_unrecommended(engine, setup):
+    best = converge(engine, setup)["best"][0]
+    state = cap_power(engine, 0.8 * best["mrr_cm3_min"])
+    assert state["best"] and best not in state["best"]
+    assert all(b["mrr_cm3_min"] <= 0.8 * best["mrr_cm3_min"] + 0.01 for b in state["best"])
     page = engine.call("report_html", NAME, "mm")
     shares = [int(share) for share in re.findall(r"hp \((\d+)%\)", page)]
     assert shares and max(shares) <= 60, "under the cap: at most the power fraction"
-    if state["next"] == "sweep":
-        state = engine.call("plan_sweep", NAME, "fresh")
-        assert state["rounds"][-1]["planner"] == "sweep"
+    assert state["next"] == "sweep"
+    assert engine.call("plan_sweep", NAME, "fresh")["rounds"][-1]["planner"] == "sweep"
+
+
+def test_no_sweep_is_offered_when_the_power_cap_leaves_it_no_room(engine, setup, capsys):
+    best = converge(engine, setup)["best"][0]
+    # The sweep starts above the session's chip load, and the cap sits at the best cut.
+    state = cap_power(engine, best["mrr_cm3_min"] * 1.001, chip_load_sweep_low=1.2)
+    assert state["best"][0] == best
+    assert state["next"] == "converged" and state["sweep"] is None
+    with pytest.raises(RuntimeError, match="leaves no chip load to sweep"):
+        engine.call("plan_sweep", NAME, "fresh")
+    assert cli.main(["plan", str(engine.root / NAME)]) == 0
+    out = capsys.readouterr().out
+    assert "converged" in out and "--sweep" not in out
+
+
+def test_the_sweep_result_stays_within_a_lowered_power_cap(engine, setup, capsys):
+    best = converge(engine, setup)["best"][0]
+    sweep = engine.call("plan_sweep", NAME, "fresh")["rounds"][-1]
+    engine.run_round(sweep["round"])
+    loads = [p["chip_load_mm"] for p in sweep["passes"] if p["kind"] == "test"]
+    # Passes at 0.6, 0.875, 1.15, 1.425 and 1.7 times the chip load, all stable: under a cap
+    # at 1.1 times the best cut, the second is the result.
+    state = cap_power(engine, 1.1 * best["mrr_cm3_min"])
+    assert state["best"][0] == best and state["next"] == "converged"
+    assert state["sweep"]["chip_load_mm"] == loads[1]
+    assert state["sweep"]["mrr_cm3_min"] <= 1.1 * best["mrr_cm3_min"]
+    assert cli.main(["report", str(engine.root / NAME)]) == 0
+    assert f"stable up to {loads[1]:g} mm/tooth" in capsys.readouterr().out
+    recommended = engine.call("report_html", NAME, "mm").split("<h2>Stability map")[0]
+    assert f"{loads[1]:.3f} mm" in recommended and f"{loads[2]:.3f} mm" not in recommended
+
+    # Under a cap below the lightest pass, the sweep has no result.
+    state = cap_power(engine, 0.5 * best["mrr_cm3_min"])
+    assert state["sweep"] is None and "Chip-load sweep, round" not in engine.call(
+        "report_html", NAME, "mm"
+    )
 
 
 def converged_report(engine, setup, units: str) -> str:

@@ -1,0 +1,48 @@
+# dechatter setup: one file per tool assembly (machine + holder + cutter + stickout).
+# Change any of those four and the stability map no longer applies: start a new session.
+
+[machine]
+name = "PM-30MV"
+max_rpm = 5000
+min_rpm = 500
+spindle_power_w = 1500   # rated spindle motor power
+spindle = "program"      # program: the G-code sets the speed (M3 S) | manual: the program
+                         # pauses (M0) before each speed and you set it on the machine
+weight_kg = 250          # derates the starting chip load on light machines
+
+[tool]
+diameter_mm = 9.525
+flutes = 3
+stickout_mm = 30.0       # recorded for traceability; shifts chatter frequencies
+holder = "ER32"
+material = "carbide"     # carbide | hss
+
+[cut]
+material = "aluminum-6061"   # see `dechatter materials`
+axial_depth_mm = 5.0         # the deepest cut; the test steps speed and radial width at it
+# other_depths_mm = [2.5]    # shallower depths to compare once that one is settled
+direction = "conventional"   # conventional | climb
+# width_max_mm = 4.7         # default: half the tool diameter
+# chip_load_mm = 0.05        # default: from the material table, derated by machine weight
+# speed_min_rpm = 1250       # default: a quarter of the top test speed
+# speed_max_rpm = 5000       # default: min(machine max, material surface-speed limit)
+
+[stock]
+length_mm = 60.0   # along X: every pass cuts the full length
+width_mm = 30.0    # along Y: material the test may consume from the front face
+
+[program]
+dwell_s = 4.0            # spindle-at-speed pause before each pass; also the air-cut reference
+clearance_mm = 3.0
+safe_z_mm = 10.0
+plunge_feed_mm_min = 150.0
+truing_width_mm = 0.2
+coolant = "none"         # none | flood | mist (coolant noise hurts detection)
+
+[planner]
+round1_speeds = 5
+round1_width_fractions = [0.1, 0.2, 0.35]   # of width_max
+batch_size = 8
+min_probability = 0.8      # each cut is this likely stable, if the cut before it passes
+probability_floor = 0.5    # ... and this likely stable on measured data alone
+stop_improvement = 0.05    # converged when no cut promises this much more removal rate

@@ -23,6 +23,7 @@ from .plan import (
     Plan,
     PlanError,
     PlannerKind,
+    SchemaError,
     assemble,
     grid_tests,
     mrr_mm3_min,
@@ -31,7 +32,7 @@ from .plan import (
 
 log = logging.getLogger(__name__)
 
-SCHEMA = 1
+SCHEMA = 2  # 2: dechatter 0.2.0 (the detector's own verdict)
 SETUP_FILE = "setup.toml"
 PLAN_FILE = "plan.json"
 PROGRAM_FILE = "program.nc"
@@ -93,7 +94,7 @@ class Results:
     def load(path: Path) -> Results:
         data = json.loads(path.read_text(encoding="utf-8"))
         if data.get("schema") != SCHEMA:
-            raise SessionError(f"{path}: unsupported results schema {data.get('schema')}")
+            raise SchemaError(path, data.get("schema"), SCHEMA)
         passes = tuple(
             PassResult(
                 **{
@@ -120,22 +121,33 @@ def round_dir(session: Path, number: int) -> Path:
     return session / f"round-{number:02d}"
 
 
+def _read(path: Path, load):
+    """A round's file, or a SessionError that says what to do about it."""
+    try:
+        return load(path)
+    except SchemaError as exc:
+        raise SessionError(f"{path.parent.name}/{exc}. Start a new session") from exc
+    except (KeyError, TypeError, ValueError) as exc:
+        problem = f"missing {exc}" if isinstance(exc, KeyError) else str(exc)
+        raise SessionError(
+            f"{path.parent.name}/{path.name} cannot be read ({problem}). Fix it by hand, or "
+            "remove the round"
+        ) from exc
+
+
 def load_rounds(session: Path) -> list[Round]:
-    """The session's rounds. One in another format than this version writes, or missing
-    the copy of its setup, is refused: the session cannot be used."""
+    """The session's rounds. A round this version cannot read is refused, and with it the
+    session, with what to do: start a new session for an older one, else repair it."""
     rounds = []
     for plan_path in sorted(session.glob(f"round-*/{PLAN_FILE}")):
-        results_path = plan_path.with_name(RESULTS_FILE)
-        try:
-            if not plan_path.with_name(SETUP_FILE).exists():
-                raise SessionError(f"no {SETUP_FILE}")
-            plan = Plan.load(plan_path)
-            results = Results.load(results_path) if results_path.exists() else None
-        except (SessionError, PlanError, KeyError, TypeError, ValueError) as exc:
+        plan = _read(plan_path, Plan.load)
+        if not plan_path.with_name(SETUP_FILE).exists():
             raise SessionError(
-                f"{plan_path.parent.name} was written by an older dechatter, or is damaged "
-                f"({exc!s}). Start a new session"
-            ) from exc
+                f"{plan_path.parent.name}/{SETUP_FILE} is missing: the copy of the setup the "
+                "round was planned from. Put it back, or remove the round"
+            )
+        results_path = plan_path.with_name(RESULTS_FILE)
+        results = _read(results_path, Results.load) if results_path.exists() else None
         rounds.append(Round(plan_path.parent, plan, results))
     return rounds
 
@@ -247,12 +259,12 @@ class Stage:
     expected_improvement: float
 
 
-def next_stage(setup: Setup, env: Envelope, rounds: list[Round]) -> Stage:
-    """The first depth, in session order, that still has a cut worth making."""
+def next_stage(setup: Setup, env: Envelope, rounds: list[Round], found: list[StableCut]) -> Stage:
+    """The first depth, in session order, that still has a cut worth making; `found` is
+    the session's best cuts, which set the removal rate to beat."""
     base = setup.cut.axial_depth_mm
     if not rounds:
         return Stage(base, PlannerKind.GRID, grid_tests(setup, env), 0.0)
-    found = best_cuts(setup, env, rounds)
     target = found[0].mrr_mm3_min if found else 0.0
     stage = Stage(base, PlannerKind.BAYES, [], 0.0)
     for depth in depths(setup):
@@ -427,7 +439,7 @@ def plan_next(session: Path, source: SetupFile, env: Envelope, stock: Stock) -> 
     rounds = _rounds_to_plan_after(session, source)
     if rounds:
         face_after(rounds[-1])  # the last round must have been analysed
-    stage = next_stage(source.setup, env, rounds)
+    stage = next_stage(source.setup, env, rounds, best_cuts(source.setup, env, rounds))
     if not stage.tests:
         return Planned(None, stage.expected_improvement)
     plan = _place(session, source, env, rounds, stock, stage.depth_mm, stage.planner, stage.tests)
@@ -443,9 +455,9 @@ def plan_sweep(session: Path, source: SetupFile, env: Envelope, stock: Stock) ->
     rounds = _rounds_to_plan_after(session, source)
     if rounds:
         face_after(rounds[-1])
-    if next_stage(source.setup, env, rounds).tests:
-        raise PlanError("the stability map has not converged yet: plan the next round first")
     found = best_cuts(source.setup, env, rounds)
+    if next_stage(source.setup, env, rounds, found).tests:
+        raise PlanError("the stability map has not converged yet: plan the next round first")
     if not found:
         raise PlanError("no stable cut has been measured to sweep")
     best = found[0]
@@ -459,11 +471,12 @@ def _sweep_of(setup: Setup, env: Envelope, best: StableCut) -> list:
     return sweep_tests(at_depth(setup, best.depth_mm), env, best.rpm, best.width_mm)
 
 
-def to_sweep(setup: Setup, env: Envelope, rounds: list[Round]) -> StableCut | None:
-    """The best cut, when a chip-load sweep of it is still to run and the power cap leaves
-    it a chip load to try."""
-    found = best_cuts(setup, env, rounds)
-    if not found or swept(setup, env, rounds) is not None:
+def to_sweep(
+    setup: Setup, env: Envelope, found: list[StableCut], sweep: Sweep | None
+) -> StableCut | None:
+    """The best cut, when a chip-load sweep of it is still to run (`sweep`, from `swept`,
+    is None) and the power cap leaves it a chip load to try."""
+    if not found or sweep is not None:
         return None
     return found[0] if _sweep_of(setup, env, found[0]) else None
 
@@ -484,11 +497,12 @@ class Sweep:
     mrr_mm3_min: float | None
 
 
-def sweeps(rounds: list[Round]) -> list[Sweep]:
+def sweeps(rounds: list[Round], env: Envelope) -> list[Sweep]:
     """The analysed chip-load sweeps, oldest first.
 
     Passes run lightest first, so the result is the last chip load stable before the first
-    pass that chattered, aborted unheard or was not found.
+    pass that chattered, aborted unheard or was not found, and within the power cap now.
+    A sweep stable only above that cap has no result.
     """
     found = []
     for r in rounds:
@@ -496,13 +510,18 @@ def sweeps(rounds: list[Round]) -> list[Sweep]:
             continue
         verdicts = {p.id: p.verdict for p in r.results.passes}
         tests = [p for p in r.plan.passes if p.kind is PassKind.TEST]
-        stable = None
+        depth = r.plan.axial_depth_mm
+        stable, capped = None, False
         for p in tests:
             if verdicts.get(p.id) is not Verdict.STABLE:
                 break
+            if depth * p.width_mm * p.feed_mm_min > env.mrr_limit_mm3_min:
+                capped = True
+                break
             stable = p
+        if stable is None and capped:
+            continue
         first = tests[0]
-        depth = r.plan.axial_depth_mm
         found.append(
             Sweep(
                 r.plan.round,
@@ -518,13 +537,13 @@ def sweeps(rounds: list[Round]) -> list[Sweep]:
     return found
 
 
-def swept(setup: Setup, env: Envelope, rounds: list[Round]) -> Sweep | None:
-    """The sweep of the best cut as it stands, if one was run."""
-    found = best_cuts(setup, env, rounds)
+def swept(found: list[StableCut], done: list[Sweep]) -> Sweep | None:
+    """The sweep of the best cut as it stands (`found`, from best_cuts), if `done` (from
+    sweeps) holds one."""
     if not found:
         return None
     best = found[0]
-    for sweep in reversed(sweeps(rounds)):
+    for sweep in reversed(done):
         same = (
             round(sweep.rpm) == round(best.rpm)
             and abs(sweep.width_mm - best.width_mm) <= 1e-6

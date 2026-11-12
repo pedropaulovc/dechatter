@@ -168,8 +168,10 @@ def parse_setup(text: str, origin: str) -> Setup:
         raise ConfigError(f"{origin} is not valid TOML: {exc}") from exc
     if "spindle_power_w" in data.get("machine", {}):
         raise ConfigError(
-            "[machine] spindle_power_w is now spindle_power_hp: the spindle motor's rated "
-            f"power in horsepower (1 hp = {WATTS_PER_HP} W)"
+            "this setup is from dechatter 0.1.x, which this version refuses: start a new "
+            "session. (In a setup written by hand, [machine] spindle_power_w is now "
+            "spindle_power_hp: the spindle motor's rated power in horsepower, "
+            f"1 hp = {WATTS_PER_HP} W.)"
         )
     sections = {f.name: f for f in dataclasses.fields(Setup)}
     unknown = set(data) - set(sections)

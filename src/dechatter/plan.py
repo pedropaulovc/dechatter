@@ -14,7 +14,7 @@ import numpy as np
 from . import materials
 from .config import Setup, SpindleControl
 
-SCHEMA = 1
+SCHEMA = 2  # 2: dechatter 0.2.0 (planned_on, per-pass chip loads)
 SPINDLE_EFFICIENCY = 0.8
 SPEED_TOLERANCE_RPM = 0.5
 WIDTH_TOLERANCE_MM = 1e-6
@@ -22,6 +22,14 @@ WIDTH_TOLERANCE_MM = 1e-6
 
 class PlanError(RuntimeError):
     pass
+
+
+class SchemaError(PlanError):
+    """A session file in another format than this version writes."""
+
+    def __init__(self, path: Path, found: object, wanted: int):
+        age = "an older" if isinstance(found, int) and found < wanted else "another"
+        super().__init__(f"{path.name} was written by {age} dechatter (schema {found})")
 
 
 class PassKind(StrEnum):
@@ -81,7 +89,7 @@ class Plan:
     def load(path: Path) -> Plan:
         data = json.loads(path.read_text(encoding="utf-8"))
         if data.get("schema") != SCHEMA:
-            raise PlanError(f"{path}: unsupported plan schema {data.get('schema')}")
+            raise SchemaError(path, data.get("schema"), SCHEMA)
         passes = tuple(Pass(**{**p, "kind": PassKind(p["kind"])}) for p in data.pop("passes"))
         return Plan(**{**data, "planner": PlannerKind(data["planner"]), "passes": passes})
 
