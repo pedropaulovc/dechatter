@@ -65,10 +65,14 @@ a page the microphone on those. Then, in the widget:
    job never changes them, even one stopped part-way. Their comments, like the plan and the
    results, stay in millimetres.
    Nothing is planned until the wizard has been saved: a new session holds only an example
-   setup. Once a round has been cut, the wizard refuses changes other than the planner's
-   settings, since the stability map belongs to the setup it was measured with: start a new
-   session instead. A round planned but not yet run is discarded when the setup changes, so
-   the next plan uses the new setup.
+   setup. Each round keeps a copy of the setup it was planned from. Once a round has been
+   cut, the setup can no longer change in anything that shapes the cut or its sound (the
+   machine's speeds, power, weight and spindle control, the tool, the cut, the stock length,
+   the dwell and the coolant), since the stability map belongs to the setup it was measured
+   with: start a new session instead. The machine's name, the safe height, clearance, plunge
+   feed, truing width, stock width and the planner's settings may still change. A round
+   planned but not yet run is discarded when the setup changes its program, so the next
+   plan uses the new setup. `dechatter plan` refuses the same changes made by hand.
 2. Plan a round. Round 1 is a coarse grid of speeds and widths.
 3. Set the work zero at the left end of the stock, on its front face, at the top.
 4. Load the program into cncjs and press play in cncjs. The widget never starts the machine.

@@ -14,7 +14,7 @@ import numpy as np
 
 from . import audio, bayes, detect, gcode
 from .bayes import Observation
-from .config import Setup, SetupSource, setup_source
+from .config import Setup, SetupSource, load_setup, setup_source
 from .detect import Thresholds, Verdict
 from .plan import (
     Envelope,
@@ -335,6 +335,7 @@ def plan_next(session: Path, setup: Setup, env: Envelope, stock: Stock) -> Plann
             "before planning"
         )
     rounds = load_rounds(session)
+    check_measured(rounds, setup)
     face, remnant = face_after(rounds[-1]) if rounds else (0.0, 0.0)
     if stock is Stock.FRESH:
         face, remnant = 0.0, 0.0
@@ -354,48 +355,103 @@ def plan_next(session: Path, setup: Setup, env: Envelope, stock: Stock) -> Plann
     return Planned(plan, stage.expected_improvement)
 
 
-# What a test cut and its sound depend on. The planner's settings only steer which cuts
-# come next and how the evidence is weighed, so changing them leaves every measurement valid.
-MEASURED_SECTIONS = ("machine", "tool", "cut", "stock", "program")
+# The setup fields that may change once a round was cut: they move the program around the
+# cuts, or bound how much stock is left, but do not change what a cut sounds like. Every
+# other field, [planner] aside, is part of what was measured.
+FREE_AFTER_CUT = frozenset(
+    {
+        "machine.name",
+        "program.safe_z_mm",
+        "program.clearance_mm",
+        "program.plunge_feed_mm_min",
+        "program.truing_width_mm",
+        "stock.width_mm",
+    }
+)
+# Fields that are in neither a plan nor its program: an unrun round survives their change.
+OUTSIDE_PROGRAM = frozenset({"machine.name"})
+
+
+def planned_with(r: Round) -> Setup:
+    """The setup a round was planned from, as its directory keeps it."""
+    path = r.path / SETUP_FILE
+    if not path.exists():
+        raise SessionError(
+            f"{r.path.name} has no copy of the setup it was planned from: it was planned by an "
+            "older dechatter. Start a new session"
+        )
+    return load_setup(path)
+
+
+def _changes(old: Setup, new: Setup) -> list[str]:
+    """`section.field` of every setup value that differs."""
+    return [
+        f"{section.name}.{entry.name}"
+        for section in dataclasses.fields(Setup)
+        for entry in dataclasses.fields(getattr(old, section.name))
+        if getattr(getattr(old, section.name), entry.name)
+        != getattr(getattr(new, section.name), entry.name)
+    ]
+
+
+def _measured_changes(old: Setup, new: Setup) -> list[str]:
+    return [
+        change
+        for change in _changes(old, new)
+        if not change.startswith("planner.") and change not in FREE_AFTER_CUT
+    ]
 
 
 def _unrun(r: Round) -> bool:
     """Planned and nothing more: no recording, timeline or results beside the plan."""
-    return r.results is None and {p.name for p in r.path.iterdir()} <= {PLAN_FILE, PROGRAM_FILE}
+    planned = {PLAN_FILE, PROGRAM_FILE, SETUP_FILE}
+    return r.results is None and {p.name for p in r.path.iterdir()} <= planned
 
 
-def stale_round(session: Path, old: Setup, new: Setup) -> Round | None:
-    """The unrun round a setup change leaves stale, to be planned again from the new setup.
-
-    A change to what was measured is refused once any round was run: its stability map
-    belongs to the old setup. The planner's settings may change at any time.
-    """
-    if old == new:
-        return None
-    rounds = load_rounds(session)
-    if not rounds:
-        return None
-    run = [r for r in rounds if not _unrun(r)]
-    changed = [name for name in MEASURED_SECTIONS if getattr(old, name) != getattr(new, name)]
-    if run and changed:
-        sections = ", ".join(f"[{name}]" for name in changed)
+def check_measured(rounds: list[Round], setup: Setup) -> None:
+    """Refuse a setup that differs from a cut round's in what was measured."""
+    for r in reversed(rounds):
+        if _unrun(r):
+            continue
+        changed = _measured_changes(planned_with(r), setup)
+        if not changed:
+            continue
         raise SessionError(
-            f"round {run[-1].plan.round} was cut with the current setup, and its stability map "
-            f"belongs to it. To change {sections}, start a new session"
+            f"round {r.plan.round} was cut with another {', '.join(changed)}, and the "
+            "stability map belongs to the setup it was measured with. Put the setup back, or "
+            "start a new session for this one"
         )
-    if not _unrun(rounds[-1]):
+
+
+def stale_round(session: Path, setup: Setup) -> Round | None:
+    """The unrun round that `setup` would leave stale, to be planned again from it.
+
+    A setup that changes what a cut round measured is refused.
+    """
+    rounds = load_rounds(session)
+    check_measured(rounds, setup)
+    if not rounds or not _unrun(rounds[-1]):
+        return None
+    if set(_changes(planned_with(rounds[-1]), setup)) <= OUTSIDE_PROGRAM:
         return None
     return rounds[-1]
 
 
-def discard_round(r: Round) -> None:
-    shutil.rmtree(r.path)
-    log.info("discarded unrun round %d: the setup it was planned from changed", r.plan.round)
+def set_aside(r: Round) -> Path:
+    """Move a round out of the session; `restore` brings it back, deleting it is final."""
+    aside = r.path.with_name(f".discarded-{r.path.name}")
+    r.path.rename(aside)
+    return aside
+
+
+def restore(aside: Path, r: Round) -> None:
+    aside.rename(r.path)
 
 
 def _write_round(session: Path, setup: Setup, plan: Plan) -> None:
     target = round_dir(session, plan.round)
     target.mkdir()
+    shutil.copyfile(session / SETUP_FILE, target / SETUP_FILE)
     plan.save(target / PLAN_FILE)
     (target / PROGRAM_FILE).write_text(gcode.render(plan, setup, gcode.Units.MM), encoding="ascii")
     log.info("planned round %d: %d passes", plan.round, len(plan.passes))

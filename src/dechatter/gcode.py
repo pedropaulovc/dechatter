@@ -22,15 +22,15 @@ COOLANT_ON = {Coolant.FLOOD: "M8", Coolant.MIST: "M7"}
 MANUAL_NOTE = "(MANUAL SPINDLE: the program pauses before each speed. Set it, then resume.)"
 
 
-def _n(value: float) -> str:
-    return f"{value:.3f}".rstrip("0").rstrip(".")
+def _n(value: float, places: int = 3) -> str:
+    return f"{value:.{places}f}".rstrip("0").rstrip(".")
 
 
 def _length(units: Units):
     """Formats a length or feed given in mm (or mm/min) as a word in `units`."""
     if units is Units.MM:
         return _n
-    return lambda mm: f"{mm / MM_PER_INCH:.4f}".rstrip("0").rstrip(".")
+    return lambda mm: _n(mm / MM_PER_INCH, 4)
 
 
 def render(plan: Plan, setup: Setup, units: Units) -> str:

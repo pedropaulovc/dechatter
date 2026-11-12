@@ -6,6 +6,7 @@ analysis, files) is the same code the command line uses.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from dataclasses import asdict
@@ -27,6 +28,7 @@ TIMELINE_FILE = "timeline.json"
 MAP_SPEEDS = 48
 MAP_WIDTHS = 24
 TOP_RESULTS = 5
+PROGRAM_ID_LENGTH = 6
 
 
 class Next(StrEnum):
@@ -45,8 +47,16 @@ class App:
         self.recording_round: int | None = None
         self.discarded_round: int | None = None  # unrun round a setup change threw away
 
-    def program_name(self, number: int) -> str:
-        return f"dechatter-{self.session_dir.resolve().name}-round-{number:02d}.nc"
+    def program_name(self, r: session.Round) -> str:
+        """Names one planned program: a round planned again after a setup change gets a new
+        name, so a program still loaded in cncjs never passes for it."""
+        digest = hashlib.sha256()
+        for name in (session.SETUP_FILE, session.PLAN_FILE):
+            digest.update((r.path / name).read_bytes())
+        return (
+            f"dechatter-{self.session_dir.resolve().name}-round-{r.plan.round:02d}-"
+            f"{digest.hexdigest()[:PROGRAM_ID_LENGTH]}.nc"
+        )
 
     def _round(self, number: int) -> session.Round:
         for candidate in session.load_rounds(self.session_dir):
@@ -140,7 +150,7 @@ class App:
             "round": r.plan.round,
             "depth_mm": r.plan.axial_depth_mm,
             "planner": r.plan.planner,
-            "program": self.program_name(r.plan.round),
+            "program": self.program_name(r),
             "run_time_s": round(r.plan.run_time_s),
             "face_y_end_mm": round(r.plan.face_y_start_mm + r.plan.consumed_mm, 2),
             "analysed": r.results is not None,
@@ -154,8 +164,9 @@ class App:
 
     def program(self, number: int, units: gcode.Units) -> str:
         """The round's program in the machine's units. The file beside the plan is in mm."""
-        plan = self._round(number).plan
-        return gcode.render(plan, session.at_depth(self.setup, plan.axial_depth_mm), units)
+        target = self._round(number)
+        planned = session.at_depth(session.planned_with(target), target.plan.axial_depth_mm)
+        return gcode.render(target.plan, planned, units)
 
     def record_start(self, number: int) -> None:
         if self.recording_round is not None:

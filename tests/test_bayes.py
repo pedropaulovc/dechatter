@@ -167,3 +167,28 @@ def test_plan_refuses_until_the_last_round_is_analysed(tmp_path, capsys):
     assert cli.main(["plan", str(work)]) == 0
     assert cli.main(["plan", str(work)]) == 1
     assert "dechatter analyze" in capsys.readouterr().err
+
+
+def test_plan_refuses_a_setup_that_changed_what_a_cut_round_measured(tmp_path, capsys):
+    work = tmp_path / "session"
+    cli.main(["init", str(work)])
+    fill_in(work)
+    assert cli.main(["plan", str(work)]) == 0
+    first = session.load_rounds(work)[0]
+    assert (first.path / session.SETUP_FILE).read_bytes() == (
+        work / session.SETUP_FILE
+    ).read_bytes()
+    wav = first.path / "recording.wav"
+    soundfile.write(wav, synth.record(first.plan, seed=1), synth.RATE)
+    assert cli.main(["analyze", str(work), str(wav)]) == 0
+
+    path = work / session.SETUP_FILE
+    text = path.read_text()
+    path.write_text(text.replace("flutes = 3", "flutes = 2"))
+    assert cli.main(["plan", str(work)]) == 1
+    assert "tool.flutes" in capsys.readouterr().err
+    assert len(session.load_rounds(work)) == 1
+
+    path.write_text(text.replace("safe_z_mm = 10.0", "safe_z_mm = 20.0"))
+    assert cli.main(["plan", str(work)]) == 0
+    assert len(session.load_rounds(work)) == 2

@@ -11,6 +11,7 @@ import io
 import json
 import logging
 import re
+import shutil
 import zipfile
 from pathlib import Path
 
@@ -73,32 +74,37 @@ class Sessions:
     def save_setup(self, name: str, values_json: str) -> dict:
         """Replace the setup if it is valid and fits the rounds; else leave the session untouched.
 
-        A round planned but not yet run is discarded when the setup changes, so the next
-        one is planned from the new setup.
+        A round planned but not yet run is discarded when the setup changes its program, so
+        the next one is planned from the new setup.
         """
-        current = self._app(name)
-        if current.recording_round is not None:
-            raise SessionError(
-                f"round {current.recording_round} is being recorded; change the setup after it"
-            )
+        recording = self._app(name).recording_round
+        if recording is not None:
+            raise SessionError(f"round {recording} is being recorded; change the setup after it")
         text = dump_setup(json.loads(values_json)).encode("utf-8")
         path = self._dir(name) / session.SETUP_FILE
         previous = path.read_bytes()
         self._apps.pop(name, None)
+        stale, aside = None, None
         try:
             path.write_bytes(text)
             app = self._app(name)
-            stale = session.stale_round(self._dir(name), current.setup, app.setup)
+            stale = session.stale_round(self._dir(name), app.setup)
+            if stale is not None:
+                aside = session.set_aside(stale)
+                app.discarded_round = stale.plan.round
             shown = app.state()
         except Exception:
+            if aside is not None:
+                session.restore(aside, stale)
             path.write_bytes(previous)
             self._apps.pop(name, None)
             raise
-        if stale is None:
-            return shown
-        session.discard_round(stale)
-        app.discarded_round = stale.plan.round
-        return app.state()
+        if aside is not None:
+            shutil.rmtree(aside)
+            log.info(
+                "%s: discarded unrun round %d planned from the old setup", name, stale.plan.round
+            )
+        return shown
 
     def state(self, name: str) -> dict:
         return self._app(name).state()

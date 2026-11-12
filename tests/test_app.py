@@ -13,7 +13,7 @@ import synth
 from scipy import signal
 
 from dechatter import browser, session
-from dechatter.app import TIMELINE_FILE
+from dechatter.app import TIMELINE_FILE, App
 from dechatter.plan import Plan
 
 MACHINE = synth.Machine()
@@ -152,16 +152,35 @@ def test_a_shallower_depth_is_tried_from_the_stable_widths_and_wins_where_the_ma
 
 
 def test_a_deeper_cut_is_refused_on_a_block_whose_face_is_only_flat_higher_up(engine):
-    engine.call("plan", NAME, "same")
-    engine.run_round(1)
-    # Only a setup file edited by hand can ask for it; the wizard refuses such a change.
-    path = engine.root / NAME / session.SETUP_FILE
-    text = path.read_text(encoding="utf-8")
-    path.write_text(text.replace("axial_depth_mm = 5.0", "axial_depth_mm = 8.0"), encoding="utf-8")
-    engine.sessions = browser.Sessions(engine.root)
-    with pytest.raises(RuntimeError, match="only flat down to 5 mm"):
+    form = engine.call("setup_form", NAME)["values"]
+    form["cut"]["other_depths_mm"] = [4.0]
+    engine.call("save_setup", NAME, json.dumps(form))
+    machine = synth.Machine(reference_depth_mm=5.0)
+    state = engine.call("state", NAME)
+    while state["next_depth_mm"] == 5.0:
+        state = engine.call("plan", NAME, "fresh")
+        state = engine.run_round(state["rounds"][-1]["round"], machine=machine)
+    state = engine.call("plan", NAME, "fresh")
+    state = engine.run_round(state["rounds"][-1]["round"], machine=machine)
+    assert state["rounds"][-1]["depth_mm"] == 4.0
+
+    # The operator hears that a 5 mm cut was stable after all: there is more to try at 5 mm,
+    # but this block was cut flat only down to 4 mm.
+    flips = [
+        (r["round"], p["id"])
+        for r in state["rounds"]
+        if r["depth_mm"] == 5.0
+        for p in sorted(r["passes"], key=lambda p: -p["width_mm"])
+        if p["verdict"] == "unstable"
+    ]
+    for number, pass_id in flips:
+        state = engine.call("set_verdict", NAME, number, pass_id, "stable")
+        if state["next_depth_mm"] == 5.0:
+            break
+    assert state["next"] == "plan" and state["next_depth_mm"] == 5.0
+    with pytest.raises(RuntimeError, match="only flat down to 4 mm"):
         engine.call("plan", NAME, "same")
-    assert engine.call("plan", NAME, "fresh")["rounds"][-1]["depth_mm"] == 8.0
+    assert engine.call("plan", NAME, "fresh")["rounds"][-1]["depth_mm"] == 5.0
 
 
 def test_planning_waits_until_the_template_setup_is_filled_in(engine):
@@ -182,43 +201,87 @@ def test_planning_waits_until_the_template_setup_is_filled_in(engine):
     assert plan.flutes == 2
 
 
+def files(folder) -> dict:
+    return {p: p.read_bytes() for p in folder.rglob("*") if p.is_file()}
+
+
 def test_a_setup_change_discards_the_round_planned_from_the_old_one(engine):
-    engine.call("plan", NAME, "same")
+    state = engine.call("plan", NAME, "same")
+    stale_program = state["rounds"][0]["program"]
     form = engine.call("setup_form", NAME)["values"]
     assert engine.call("save_setup", NAME, json.dumps(form))["rounds"], "no change, round kept"
+    form["machine"]["name"] = "renamed mill"
+    state = engine.call("save_setup", NAME, json.dumps(form))
+    assert state["rounds"] and state["discarded_round"] is None, "not in the program: kept"
 
     form["machine"]["spindle"] = "manual"
     form["machine"]["max_rpm"] = 2800
     state = engine.call("save_setup", NAME, json.dumps(form))
     assert state["rounds"] == [] and state["discarded_round"] == 1 and state["next"] == "plan"
-    assert not session.round_dir(engine.root / NAME, 1).exists()
+    assert [p.name for p in (engine.root / NAME).iterdir()] == [session.SETUP_FILE]
 
     state = engine.call("plan", NAME, "same")
     assert state["discarded_round"] is None
     assert max(p["rpm"] for p in state["rounds"][0]["passes"]) <= 2800
+    # cncjs may still hold the old round 1: the new one must not pass for it.
+    assert state["rounds"][0]["program"] != stale_program
     program = engine.call("program", NAME, 1, "mm").splitlines()
     assert not [line for line in program if re.match(r"M3\b|S\d", line)]
     assert [line for line in program if line.startswith("M0")]
 
 
-def test_a_setup_change_after_a_round_was_cut_is_refused_but_planner_settings_may_change(engine):
+def test_a_failed_save_puts_back_the_round_it_would_have_discarded(engine, monkeypatch):
+    engine.call("plan", NAME, "same")
+    before = files(engine.root / NAME)
+    form = engine.call("setup_form", NAME)["values"]
+    form["program"]["safe_z_mm"] = 20.0
+
+    def broken(self):
+        raise RuntimeError("state failed")
+
+    monkeypatch.setattr(App, "state", broken)
+    with pytest.raises(RuntimeError, match="state failed"):
+        engine.call("save_setup", NAME, json.dumps(form))
+    monkeypatch.undo()
+    assert files(engine.root / NAME) == before
+    assert engine.call("state", NAME)["rounds"][0]["round"] == 1
+
+
+def test_a_setup_change_after_a_round_was_cut_is_refused_where_it_was_measured(engine):
     engine.call("plan", NAME, "same")
     engine.run_round(1)
     folder = engine.root / NAME
-    before = {p: p.read_bytes() for p in folder.rglob("*") if p.is_file()}
+    before = files(folder)
     form = engine.call("setup_form", NAME)["values"]
 
-    changed = json.loads(json.dumps(form))
-    changed["tool"]["flutes"] = 2
-    changed["tool"]["diameter_mm"] = 12.7
-    with pytest.raises(RuntimeError, match=r"start a new session"):
-        engine.call("save_setup", NAME, json.dumps(changed))
-    assert {p: p.read_bytes() for p in folder.rglob("*") if p.is_file()} == before
-    assert engine.call("setup_form", NAME)["values"] == form
+    for section, key, value in [
+        ("tool", "flutes", 2),
+        ("tool", "holder", "ER20"),
+        ("machine", "max_rpm", 2800),
+        ("cut", "other_depths_mm", [2.5]),
+        ("stock", "length_mm", 80.0),
+        ("program", "dwell_s", 2.0),
+        ("program", "coolant", "mist"),
+    ]:
+        changed = json.loads(json.dumps(form))
+        changed[section][key] = value
+        with pytest.raises(RuntimeError, match=rf"round 1 .*{section}\.{key}.*new session"):
+            engine.call("save_setup", NAME, json.dumps(changed))
+        assert files(folder) == before
+        assert engine.call("setup_form", NAME)["values"] == form
 
+    # Moves around the cuts, the name, the stock left and the planner are free.
+    form["machine"]["name"] = "renamed mill"
+    form["program"]["safe_z_mm"] = 20.0
+    form["program"]["clearance_mm"] = 5.0
+    form["program"]["plunge_feed_mm_min"] = 100.0
+    form["program"]["truing_width_mm"] = 0.3
+    form["stock"]["width_mm"] = 50.0
     form["planner"]["batch_size"] = 6
     state = engine.call("save_setup", NAME, json.dumps(form))
     assert state["rounds"][0]["analysed"] and state["discarded_round"] is None
+    state = engine.call("plan", NAME, "same")
+    assert [r["round"] for r in state["rounds"]] == [1, 2]
 
 
 def test_a_round_that_was_recorded_but_not_analysed_counts_as_cut(engine):
@@ -226,10 +289,30 @@ def test_a_round_that_was_recorded_but_not_analysed_counts_as_cut(engine):
     with pytest.raises(RuntimeError, match="no cut"):
         engine.run_round(1, gain=0.0)
     form = engine.call("setup_form", NAME)["values"]
-    form["stock"]["width_mm"] = 40.0
-    with pytest.raises(RuntimeError, match=r"round 1 was cut.*\[stock\]"):
+    form["stock"]["length_mm"] = 80.0
+    with pytest.raises(RuntimeError, match=r"round 1 was cut.*stock\.length_mm"):
         engine.call("save_setup", NAME, json.dumps(form))
     assert engine.call("state", NAME)["rounds"][0]["has_recording"]
+
+
+def test_a_round_keeps_the_setup_it_was_planned_from(engine):
+    engine.call("plan", NAME, "same")
+    engine.run_round(1)
+    path = engine.root / NAME / session.SETUP_FILE
+    planned = engine.call("program", NAME, 1, "mm")
+    # Edited by hand, as on the command line: the program is still the one that was cut.
+    text = path.read_text(encoding="utf-8")
+    path.write_text(text.replace("safe_z_mm = 10.0", "safe_z_mm = 25.0"), encoding="utf-8")
+    engine.sessions = browser.Sessions(engine.root)
+    assert engine.call("program", NAME, 1, "mm") == planned
+    engine.call("plan", NAME, "same")
+    assert "G0 Z25" in engine.call("program", NAME, 2, "mm").splitlines()
+
+    path.write_text(text.replace("flutes = 3", "flutes = 2"), encoding="utf-8")
+    engine.sessions = browser.Sessions(engine.root)
+    engine.run_round(2)
+    with pytest.raises(RuntimeError, match=r"round 2 was cut with another tool\.flutes"):
+        engine.call("plan", NAME, "same")
 
 
 def test_operator_verdict_overrules_the_detector_and_feeds_the_planner(engine):

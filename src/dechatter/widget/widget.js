@@ -31,6 +31,7 @@ const cnc = {
   // mm | in: the machine's G21/G20 mode as cncjs last reported it; null until it has. The
   // wizard shows lengths in it and programs are written in it, so a job never changes it.
   units: null,
+  loadedUnits: null, // mm | in: the units of the program this widget last loaded into cncjs
 };
 const mic = new Mic();
 let boot = 'Starting'; // what the engine is loading; null once it is ready
@@ -164,6 +165,12 @@ async function nextStep() {
     render();
     return;
   }
+  // A job may be running one of this session's programs; a new setup could discard it.
+  if (cnc.workflow === 'running' || cnc.workflow === 'paused') {
+    showError('A job is running in cncjs. Save the setup once it has ended.');
+    render();
+    return;
+  }
   const wizard = editing;
   await act('save_setup', JSON.stringify(wizard.values));
   if (editing !== wizard) {
@@ -260,11 +267,13 @@ function note(event, detail) {
 }
 
 function setPort(port) {
+  // Another port may be another machine: its units are unknown until cncjs reports them.
+  if (port !== cnc.port) {
+    showIn(null);
+    cnc.loadedUnits = null;
+  }
   cnc.port = port;
   cnc.link = port ? 'ready' : 'no-port';
-  if (!port) {
-    showIn(null);
-  }
   render();
 }
 
@@ -313,6 +322,7 @@ async function connectCncjs() {
   });
   socket.on('gcode:unload', () => {
     cnc.program = '';
+    cnc.loadedUnits = null;
     render();
   });
   socket.on('sender:status', (status) => {
@@ -392,13 +402,15 @@ async function loadProgram(round) {
   try {
     // Capture has to be running before the job can start; the listener below does not wait.
     await mic.resume();
-    const gcode = await engine('program', current, round.round, cnc.units);
+    const programUnits = cnc.units;
+    const gcode = await engine('program', current, round.round, programUnits);
     await new Promise((resolve, reject) => {
       cnc.socket.emit('command', cnc.port, 'gcode:load', round.program, gcode, {}, (err) =>
         err ? reject(new Error(`cncjs could not load the program: ${err.message ?? err}`)) : resolve(),
       );
     });
     cnc.program = round.program;
+    cnc.loadedUnits = programUnits;
     showError('');
   } catch (err) {
     showError(err.message);
@@ -499,6 +511,10 @@ function renderStep() {
     return;
   }
 
+  if (state.discarded_round !== null) {
+    step.append(el('p', {}, `Round ${state.discarded_round} had not been run and was planned from the old setup, so it was discarded.`));
+  }
+
   if (state.next === 'converged') {
     step.append(el('p', {}, 'Converged: no further cut is expected to add removal rate. The best stable cuts are below.'));
     return;
@@ -528,9 +544,6 @@ function renderStep() {
     const next = shallower
       ? `${state.depth_mm} mm depth is settled. Next come cuts ${state.next_depth_mm} mm deep, starting from the widths that were stable.`
       : 'Plan the next cuts from what was measured.';
-    if (state.discarded_round !== null) {
-      step.append(el('p', {}, `Round ${state.discarded_round} had not been run and was planned from the old setup, so it was discarded. Plan it again.`));
-    }
     step.append(el('p', {}, first ? 'Plan a coarse grid of test cuts.' : next));
     step.append(el('p', {}, plan, ...(first ? [] : [' on the ', stock])));
     return;
@@ -538,15 +551,25 @@ function renderStep() {
 
   const tests = round.passes.filter((p) => p.kind === 'test').length;
   const speedChanges = (r) => r.passes.filter((p, i) => i === 0 || p.rpm !== r.passes[i - 1].rpm).length;
-  const loaded = cnc.program === round.program;
+  // Loaded in other units than the machine's now: it has to be loaded again.
+  const loaded = cnc.program === round.program && cnc.loadedUnits === cnc.units;
   // The program is written in the machine's units, so they have to be known first.
   const ready = cnc.link === 'ready' && cnc.workflow === 'idle' && cnc.units !== null && mic.open;
   const load = button(loaded ? 'Reload program' : 'Load into cncjs', () => loadProgram(round), { className: loaded ? '' : 'primary', disabled: !ready });
+  // cncjs reports the mode from the controller's parser state. Until it does, the operator
+  // can say which it is: the program sets that mode itself, so a wrong choice cannot
+  // misplace a cut, only leave the machine in the other mode afterwards.
+  const declare = el('select', {}, el('option', { value: '' }, 'machine units?'), el('option', { value: 'mm' }, 'mm (G21)'), el('option', { value: 'in' }, 'inches (G20)'));
+  declare.onchange = () => {
+    showIn(declare.value || null);
+    render();
+  };
+  const unknownUnits = mic.open && cnc.link === 'ready' && cnc.units === null;
   step.append(
     el('p', {}, `Round ${round.round}: ${tests} test cuts ${round.depth_mm} mm deep, about ${minutes(round.run_time_s)} plus rapids. The front face ends at Y${round.face_y_end_mm}.`),
     el('ol', {},
       el('li', {}, 'Zero X at the left end of the stock, Y on its front face, Z on top.'),
-      el('li', {}, load, mic.open ? (cnc.link === 'ready' && cnc.units === null ? ' (waiting for cncjs to report G20 or G21)' : '') : ' (enable the microphone first)'),
+      el('li', {}, load, ...(unknownUnits ? [' cncjs has not reported G20 or G21 yet; the machine is in ', declare] : []), mic.open ? '' : ' (enable the microphone first)'),
       el('li', {}, loaded ? 'Press play in cncjs. Recording starts and stops with the job. Keep this tab open.' : 'Press play in cncjs.'),
       ...(state.spindle === 'manual' ? [el('li', {}, `The program pauses before each of its ${speedChanges(round)} spindle speeds. Set the speed shown here, then resume in cncjs.`)] : []),
     ),
