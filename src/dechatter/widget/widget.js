@@ -272,6 +272,9 @@ async function exportSession(name = current) {
   try {
     const bytes = await engine('export_zip', name, units());
     download(new Blob([bytes], { type: 'application/zip' }), `${name}.zip`);
+    if (run?.name === name) {
+      showError(`Exported ${name} without round ${run.round}: it is still running, and is stored once it ends.`);
+    }
   } catch (err) {
     showError(err.message);
   }
@@ -659,7 +662,8 @@ function renderSessions() {
   select.disabled = busy() || dialog !== 'closed' || mic.recording;
   $('summary').textContent = state ? summary(state) : '';
   $('edit-setup').disabled = !state || busy() || mic.recording;
-  $('export').disabled = setupStatus !== 'loads' || busy() || mic.recording;
+  // Export reads only what is stored: it works while a round runs, without that round.
+  $('export').disabled = setupStatus !== 'loads' || busy();
   // Also for a session that failed to load: deleting it is the way to be rid of it.
   for (const [id, verb] of [['delete-session', 'Delete'], ['reset-session', 'Reset']]) {
     $(id).disabled = !names.includes(current) || busy() || Boolean(busyRefusal(current, verb)) || dialog !== 'closed';
@@ -721,6 +725,24 @@ const STEP_TEXT = {
   end: 'Finishing',
 };
 
+const HELD_LONG_S = 60;
+const IDLE_AWAY_S = 5;
+
+// Why the run seems stuck, pointing to Stop; '' while it is not.
+function stall(stepper) {
+  const now = Date.now() / 1000;
+  if (stepper.phase === PHASE.HELD && now - stepper.holds.at(-1)[0] >= HELD_LONG_S) {
+    return `Held for ${Math.round(now - stepper.holds.at(-1)[0])} s. Resume, or Stop the round: the cuts made so far are analysed.`;
+  }
+  if (stepper.idleAway !== null && now - stepper.idleAway >= IDLE_AWAY_S) {
+    return 'The machine reports Idle, but not where this move ends. Check it in cncjs; if it will not move on, Stop the round: the cuts made so far are analysed.';
+  }
+  if (cnc.link !== 'ready') {
+    return 'The connection to cncjs or the machine is lost.';
+  }
+  return '';
+}
+
 // While the widget runs a round: where it is, and Hold, Resume, Continue and Stop.
 function runPanel({ stepper, round }) {
   const block = stepper.block;
@@ -742,6 +764,10 @@ function runPanel({ stepper, round }) {
   }
   controls.push(button('Stop', () => stepper.stop(), { className: 'danger', disabled: stepper.phase === PHASE.STOPPING }));
   panel.push(el('p', {}, ...controls.flatMap((c) => [c, ' '])));
+  const stuck = stall(stepper);
+  if (stuck) {
+    panel.push(el('p', { className: 'instruction' }, stuck));
+  }
   panel.push(el('p', { className: 'muted' }, 'Stop if a cut gets violent: the cuts made so far still count. Feed hold in cncjs works too.'));
   return panel;
 }
@@ -1063,6 +1089,8 @@ render();
 connectCncjs();
 openMic(localStorage.getItem(DEVICE_KEY) || undefined);
 setInterval(renderLevel, LEVEL_MS);
+// cncjs reports only changes: a run that stalls gets no news, so its panel is redrawn anyway.
+setInterval(() => run && renderStep(), 1000);
 
 try {
   names = await engine('names');

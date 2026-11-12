@@ -122,7 +122,9 @@ Sessions are stored in that browser (IndexedDB), per cncjs address. Export saves
 holding `setup.toml` and each round's plan, program, `recording.wav`, results and the job
 timeline of the run (each pass's cut and dwell windows), plus `report.html`. Import loads it in another browser, and unzipped it is a session
 folder the command line reads. Keep the tab open while a round runs: the recording lives in
-the page until the job ends. Reset, next to the session list, discards every round and
+the page until the round ends. Export works during a run too, without that round. If a run
+seems stuck (held for a minute, or the machine idle but not where its move ends), the widget
+says so and points to Stop, which keeps and analyses the cuts made so far. Reset, next to the session list, discards every round and
 keeps the setup, so the session starts again from round 1 and its setup can be changed
 freely (`dechatter reset <session>` on the command line); it needs a setup that loads,
 though its rounds need not. Delete removes a session for good after asking, and offers

@@ -227,6 +227,25 @@ test('targets in mm match positions reported in mm or, with $13=1, in inches', a
   assert.equal(await short.stepper.run(blocks), PHASE.FAILED, 'Idle short of the target is not the end');
 });
 
+test('an Idle report away from where the move ends is noted, so the widget can point to Stop', async () => {
+  const machine = new Machine();
+  const { stepper } = machine.stepper_for();
+  machine.move = async function () {
+    this.report('Run');
+    this.t += 1;
+    this.wpos = { ...this.wpos, z: '7.000' }; // short of the target, and idle
+    this.moving = false;
+    this.report('Idle');
+    assert.equal(stepper.idleAway, 1);
+    this.t += 5;
+    this.report('Idle');
+    assert.equal(stepper.idleAway, 1, 'since the first such report');
+    await stepper.stop();
+  };
+  const blocks = [{ step: 'setup', lines: ['G21 G90 G94 G17', 'G0 Z10'], pass_id: null, rpm: null, seconds: null, target: { z: 10 } }];
+  assert.equal(await stepper.run(blocks), PHASE.STOPPED);
+});
+
 test('a move to where the machine already stands is done without a new report', async () => {
   const machine = new Machine();
   const { stepper } = machine.stepper_for();

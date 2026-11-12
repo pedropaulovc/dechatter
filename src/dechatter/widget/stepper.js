@@ -49,6 +49,9 @@ export class Stepper {
     this.waiters = [];
     this.ended = null; // the Ended error every wait rejects with, once the run is over
     this.holds = []; // [start, end] of holds during the current block
+    // Since when the controller has said Idle somewhere other than where the block ends: a
+    // move it dropped, or a position it reports differently. null while that is not so.
+    this.idleAway = null;
     this.continued = null;
     this.halting = null;
   }
@@ -65,6 +68,8 @@ export class Stepper {
       this.fail('the controller is in alarm');
       return;
     }
+    const away = this.phase === PHASE.MOVING && activeState === 'Idle' && !this.at(this.state.wpos, this.block?.target ?? {});
+    this.idleAway = away ? (this.idleAway ?? this.now()) : null;
     const held = HOLD_STATES.has(activeState);
     if (held && this.phase === PHASE.MOVING) {
       this.holds.push([this.now(), null]);
@@ -194,6 +199,7 @@ export class Stepper {
       return;
     }
     this.holds = [];
+    this.idleAway = null;
     this.set(PHASE.MOVING);
     const start = this.now();
     this.io.send(block.lines);

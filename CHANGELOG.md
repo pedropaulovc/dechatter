@@ -46,6 +46,11 @@ What changed for people who use the dechatter widget and command line. The forma
   searched against the spindle's own noise around each cut, keeps the pass order with the
   narrowest cuts taken as the unheard ones, and marks passes after the last cut as "not run".
   A pass whose spindle speed was found at the edge of its search is flagged.
+- A recording could get stuck with no way to stop it, and Export was disabled meanwhile. The
+  recording now follows the widget's own run, which always ends (Stop, the last pass, an
+  error or a lost connection) and keeps the cuts made. A run held for a minute, or a machine
+  idle but not where its move ends, points to Stop. Export works during a run, without the
+  round in progress, and says so.
 
 ## [0.2.0] - 2026-11-12
 
