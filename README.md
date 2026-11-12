@@ -247,9 +247,17 @@ uv run validation/purdue.py ~/purdue-cache   # downloads about 370 MB once
 `e2e/` runs real cncjs against a simulated Grbl inside WSL, for driving the widget without a
 machine. See `e2e/README.md`.
 
-To release, set the same version in `pyproject.toml` and `package.json`, merge to `main`, and
-push a tag `vX.Y.Z` on that commit. The `release` workflow tests on Linux and Windows, builds
-the widget once and publishes that build to npm. npm trusts the workflow itself, so no token
+Every change users can notice adds a line under `## [Unreleased]` in
+[`CHANGELOG.md`](CHANGELOG.md), in the same pull request: what they will notice and, for a
+breaking change, what to do about it.
+
+To release, set the same version in `pyproject.toml`, `package.json` and
+`src/dechatter/__init__.py`, rename `## [Unreleased]` in `CHANGELOG.md` to
+`## [X.Y.Z] - YYYY-MM-DD` above a fresh empty Unreleased section (and update the links at
+its end), merge to `main`, and push a tag `vX.Y.Z` on that commit. The `release` workflow
+refuses a tag without that dated section, tests on Linux and Windows, builds the widget
+once, publishes that build to npm, and creates the GitHub release with the section as its
+notes. npm trusts the workflow itself, so no token
 is stored; version 0.1.0 was published by hand, because that trust can only be registered
 for a package that exists.
 
