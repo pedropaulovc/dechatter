@@ -1,6 +1,6 @@
 {
   "name": "dechatter",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "CNCjs custom widget that finds chatter-free milling speeds, widths and depths from test cuts heard through the microphone.",
   "keywords": [
     "cncjs",

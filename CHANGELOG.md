@@ -6,6 +6,8 @@ What changed for people who use the dechatter widget and command line. The forma
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-12
+
 ### Changed
 
 - **Breaking:** the spindle motor power is given in horsepower. `spindle_power_w` in
@@ -94,6 +96,7 @@ What changed for people who use the dechatter widget and command line. The forma
   Sessions export to a zip the command line reads, and import in another browser.
 - Published on npm as `dechatter`, with third-party notices for the bundled Pyodide.
 
-[Unreleased]: https://github.com/pedropaulovc/dechatter/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/pedropaulovc/dechatter/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/pedropaulovc/dechatter/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/pedropaulovc/dechatter/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/pedropaulovc/dechatter/releases/tag/v0.1.0
