@@ -54,7 +54,7 @@ jobs:
       - name: Check that the tagged commit is on main
         run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
 
-      - name: Check that the tag, package.json and pyproject.toml agree on the version
+      - name: Check that the tag, package.json, pyproject.toml and __version__ agree on the version
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: uv run python .github/release_version.py "$RELEASE_TAG"

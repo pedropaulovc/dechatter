@@ -17,7 +17,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import gcode, materials, session
+from . import gcode, materials, report, session
 from .app import App
 from .audio import AudioError
 from .config import (
@@ -158,15 +158,26 @@ class Sessions:
         self._app(name).set_verdict(number, pass_id, Verdict(verdict))
         return self.state(name)
 
-    def export_zip(self, name: str) -> bytes:
-        """The session directory as a zip, usable with the command line as it is."""
+    def report_html(self, name: str, machine_units: str) -> str:
+        """The session's printable report, lengths in `machine_units` ("mm" or "in")."""
+        self._app(name)
+        return report.render(self._dir(name), gcode.Units(machine_units))
+
+    def export_zip(self, name: str, machine_units: str) -> bytes:
+        """The session directory as a zip, usable with the command line as it is, with the
+        report as of now."""
         self._app(name)
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
             for path in sorted(self._dir(name).rglob("*")):
                 inside = path.relative_to(self._dir(name))
-                if path.is_file() and not inside.parts[0].startswith(session.DISCARDED):
+                if inside.parts[0].startswith(session.DISCARDED) or inside == Path(
+                    report.REPORT_FILE
+                ):
+                    continue
+                if path.is_file():
                     archive.write(path, f"{name}/{inside.as_posix()}")
+            archive.writestr(f"{name}/{report.REPORT_FILE}", self.report_html(name, machine_units))
         return buffer.getvalue()
 
     def import_zip(self, data: bytes) -> str:

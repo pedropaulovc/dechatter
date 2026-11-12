@@ -7,13 +7,15 @@ import json
 import re
 import shutil
 import zipfile
+from datetime import date
 
 import numpy as np
 import pytest
 import synth
 from scipy import signal
 
-from dechatter import browser, session
+import dechatter
+from dechatter import browser, cli, session
 from dechatter.app import TIMELINE_FILE, App
 from dechatter.plan import Plan
 
@@ -353,7 +355,7 @@ def test_a_session_whose_rounds_have_no_setup_copy_still_opens(engine):
     assert state["rounds"][0]["analysed"] and state["rounds"][0]["program"].endswith(".nc")
     tests = [p for p in state["rounds"][0]["passes"] if p["kind"] == "test"]
     engine.call("set_verdict", NAME, 1, tests[0]["id"], "unstable")
-    assert engine.call("export_zip", NAME)
+    assert engine.call("export_zip", NAME, "mm")
     older = "planned by an older dechatter"
     with pytest.raises(RuntimeError, match=older):
         engine.call("plan", NAME, "same")
@@ -395,7 +397,7 @@ def test_a_discarded_round_that_will_not_delete_blocks_nothing(engine, monkeypat
     state = engine.call("save_setup", NAME, json.dumps(form))
     assert state["discarded_round"] == 1 and failures
     assert list(folder.glob(".discarded-*"))
-    names = zipfile.ZipFile(io.BytesIO(engine.call("export_zip", NAME))).namelist()
+    names = zipfile.ZipFile(io.BytesIO(engine.call("export_zip", NAME, "mm"))).namelist()
     assert not [n for n in names if ".discarded-" in n]
 
     engine.call("plan", NAME, "same")
@@ -571,10 +573,58 @@ def test_session_names_cannot_escape_the_store(engine):
         engine.call("create", NAME)
 
 
+def converged_report(engine, setup, units: str) -> str:
+    form = engine.call("setup_form", NAME)["values"]
+    form["machine"]["spindle"] = "manual"
+    engine.call("save_setup", NAME, json.dumps(form))
+    state = converge(engine, setup, speed_change_s=12.0)
+    first = next(p for p in state["rounds"][0]["passes"] if p["kind"] == "test")
+    flipped = "stable" if first["verdict"] == "unstable" else "unstable"
+    engine.call("set_verdict", NAME, 1, first["id"], flipped)
+    return engine.call("report_html", NAME, units)
+
+
+def test_the_report_holds_the_results_on_one_offline_page(engine, setup):
+    page = converged_report(engine, setup, "in")
+    state = engine.call("state", NAME)
+    best = state["best"][0]
+
+    # One file: no scripts, stylesheets, images or fonts from anywhere else.
+    assert not re.search(r"<script|<link|<img|src=|url\(|@import|https?:", page)
+    assert "@page" in page and "@media print" in page
+    sections = ["Recommended cuts", "Stability map", "Round log", "Setup"]
+    positions = [page.index(f"<h2>{title}</h2>") for title in sections]
+    assert positions == sorted(positions) and page.index(NAME) < positions[0]
+    # Inches first, mm beside; the manual spindle's speed to set.
+    width_in = best["width_mm"] / 25.4
+    assert f"{width_in:.4f} in ({best['width_mm']:.2f} mm)" in page
+    assert "Set the spindle to (rpm)" in page and f"<td>{best['rpm']}</td>" in page
+    assert page.count("<svg") == len({r["depth_mm"] for r in state["rounds"]})
+    assert page.count("<td>by hand</td>") == 1
+    rounds = len(state["rounds"])
+    assert page.count("<h3>Round ") == rounds
+    assert f"planned {date.today().isoformat()}" in page
+    assert "spindle_power_hp" in page and f"dechatter {dechatter.__version__}" in page
+
+    millimetres = engine.call("report_html", NAME, "mm")
+    assert f"{best['width_mm']:.2f} mm" in millimetres and " in (" not in millimetres
+
+
+def test_the_command_line_writes_the_report(engine, tmp_path, capsys):
+    engine.call("plan", NAME, "same")
+    engine.run_round(1)
+    out = tmp_path / "report.html"
+    assert cli.main(["report", str(engine.root / NAME), "--html", str(out), "--units", "in"]) == 0
+    assert out.read_text(encoding="utf-8").startswith("<!doctype html>")
+    assert " in (" in out.read_text(encoding="utf-8")
+
+
 def test_export_round_trips_into_another_browser(engine, tmp_path):
     engine.call("plan", NAME, "same")
     before = engine.run_round(1)
-    archive = engine.call("export_zip", NAME)
+    archive = engine.call("export_zip", NAME, "mm")
+    names = zipfile.ZipFile(io.BytesIO(archive)).namelist()
+    assert f"{NAME}/report.html" in names
 
     other = Engine(tmp_path / "elsewhere")
     assert other.call("import_zip", memoryview(archive)) == NAME
@@ -582,6 +632,9 @@ def test_export_round_trips_into_another_browser(engine, tmp_path):
     assert other.call("state", NAME) == before
     with pytest.raises(RuntimeError, match="already exists"):
         other.call("import_zip", memoryview(archive))
+    # The report shipped in an export is made afresh, not carried twice.
+    again = zipfile.ZipFile(io.BytesIO(other.call("export_zip", NAME, "in"))).namelist()
+    assert again.count(f"{NAME}/report.html") == 1
 
 
 def test_import_refuses_archives_that_are_not_a_session(engine):

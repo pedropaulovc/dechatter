@@ -1,8 +1,10 @@
-"""Fail unless the release tag, package.json and pyproject.toml name the same version."""
+"""Fail unless the release tag, package.json, pyproject.toml and the package's __version__
+name the same version."""
 
 from __future__ import annotations
 
 import json
+import re
 import sys
 import tomllib
 from pathlib import Path
@@ -17,6 +19,10 @@ def main(tag: str) -> int:
         "pyproject.toml": tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))[
             "project"
         ]["version"],
+        "__init__.py": re.search(
+            r'__version__ = "([^"]+)"',
+            (ROOT / "src" / "dechatter" / "__init__.py").read_text(encoding="utf-8"),
+        )[1],
     }
     if len(set(versions.values())) == 1:
         print(f"version {versions['tag']}")

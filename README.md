@@ -87,6 +87,11 @@ a page the microphone on those. Then, in the widget:
    pass as stable or chatter, the stability map and the best cuts so far.
 6. If your ears disagree with a verdict, change it in the table. Plan the next round and
    repeat until the widget reports convergence.
+7. Download the report: one HTML page to print (Letter or A4, black and white) and keep with
+   the tool. It holds the recommended cuts per depth with feed, removal rate and spindle
+   power, the stability map, every round's passes (marking verdicts set by hand) and the
+   setup. Lengths follow the machine's G20/G21, with mm beside. It is offered on convergence
+   and any time beside the best cuts.
 
 Everything runs in the browser tab. The same Python that the command line uses runs there
 under [Pyodide](https://pyodide.org), which `dechatter widget` downloads once and copies into
@@ -97,7 +102,7 @@ browser kept any of that processing on.
 
 Sessions are stored in that browser (IndexedDB), per cncjs address. Export saves one as a zip
 holding `setup.toml` and each round's plan, program, `recording.wav`, results and the job
-timeline cncjs reported. Import loads it in another browser, and unzipped it is a session
+timeline cncjs reported, plus `report.html`. Import loads it in another browser, and unzipped it is a session
 folder the command line reads. Keep the tab open while a round runs: the recording lives in
 the page until the job ends.
 
@@ -130,6 +135,7 @@ continuous recording, run the program, stop recording after `M30`. Then:
 dechatter analyze al-10mm recording.wav   # classifies each pass
 dechatter plan al-10mm                    # next round, or "converged"
 dechatter report al-10mm                  # stability map and best cuts so far
+dechatter report al-10mm --html al-10mm.html --units in   # printable report
 ```
 
 Repeat until `plan` reports convergence. WAV, FLAC, OGG and MP3 load directly. Phone formats

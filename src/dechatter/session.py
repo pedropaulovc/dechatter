@@ -8,6 +8,7 @@ import logging
 import shutil
 import uuid
 from dataclasses import asdict, dataclass
+from datetime import date
 from enum import StrEnum
 from pathlib import Path
 
@@ -65,6 +66,22 @@ class PassResult:
     excess_db: float | None = None
     start_s: float | None = None
     end_s: float | None = None
+    detected: Verdict | None = None  # the detector's own verdict; `verdict` may be overruled
+
+
+class VerdictSource(StrEnum):
+    DETECTOR = "detector"
+    OPERATOR = "operator"  # overruled or set by hand, in the widget or in results.json
+    UNRECORDED = "unrecorded"  # analysed before the detector's verdict was kept
+
+
+def verdict_source(p: PassResult) -> VerdictSource:
+    if p.detected is not None:
+        return VerdictSource.DETECTOR if p.verdict is p.detected else VerdictSource.OPERATOR
+    if p.prominence_db is None:
+        # Nothing was detected: any verdict is the operator's.
+        return VerdictSource.DETECTOR if p.verdict is None else VerdictSource.OPERATOR
+    return VerdictSource.UNRECORDED
 
 
 @dataclass(frozen=True)
@@ -90,6 +107,7 @@ class Results:
                     "kind": PassKind(p["kind"]),
                     "status": PassStatus(p["status"]),
                     "verdict": Verdict(p["verdict"]) if p["verdict"] else None,
+                    "detected": Verdict(p["detected"]) if p.get("detected") else None,
                 }
             )
             for p in data.pop("passes")
@@ -315,6 +333,7 @@ def analyze(
                 excess_db=None if reading.excess_db is None else round(reading.excess_db, 1),
                 start_s=round(segment.start_s, 2),
                 end_s=round(segment.end_s, 2),
+                detected=reading.verdict,
             )
         )
     return Results(plan.round, recording, thresholds, tuple(results))
@@ -360,6 +379,7 @@ def plan_next(session: Path, source: SetupFile, env: Envelope, stock: Stock) -> 
         )
     at = at_depth(setup, stage.depth_mm)
     plan = assemble(at, env, number, stage.planner, face, remnant, stage.tests)
+    plan = dataclasses.replace(plan, planned_on=date.today().isoformat())
     _write_round(session, source.text, at, plan)
     return Planned(plan, stage.expected_improvement)
 

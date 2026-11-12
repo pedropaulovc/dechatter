@@ -215,20 +215,34 @@ function previousStep() {
   goToStep(editing.step - 1);
 }
 
+function download(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  // cncjs sandboxes widget frames without allow-downloads, so the cncjs page itself
+  // (same origin) starts the download.
+  const host = window.parent.document;
+  const link = host.createElement('a');
+  link.href = url;
+  link.download = filename;
+  host.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+
+// Both carry the report, whose lengths follow the machine's units (mm until known).
 async function exportSession() {
   try {
-    const bytes = await engine('export_zip', current);
-    const url = URL.createObjectURL(new Blob([bytes], { type: 'application/zip' }));
-    // cncjs sandboxes widget frames without allow-downloads, so the cncjs page itself
-    // (same origin) starts the download.
-    const host = window.parent.document;
-    const link = host.createElement('a');
-    link.href = url;
-    link.download = `${current}.zip`;
-    host.body.append(link);
-    link.click();
-    link.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    const bytes = await engine('export_zip', current, cnc.units ?? 'mm');
+    download(new Blob([bytes], { type: 'application/zip' }), `${current}.zip`);
+  } catch (err) {
+    showError(err.message);
+  }
+}
+
+async function downloadReport() {
+  try {
+    const page = await engine('report_html', current, cnc.units ?? 'mm');
+    download(new Blob([page], { type: 'text/html' }), `${current}-report.html`);
   } catch (err) {
     showError(err.message);
   }
@@ -554,7 +568,10 @@ function renderStep() {
   }
 
   if (state.next === 'converged') {
-    step.append(el('p', {}, 'Converged: no further cut is expected to add removal rate. The best stable cuts are below.'));
+    step.append(
+      el('p', {}, 'Converged: no further cut is expected to add removal rate. The best stable cuts are below.'),
+      el('p', {}, button('Download the report', downloadReport, { className: 'primary' }), ' to print and keep with the tool.'),
+    );
     return;
   }
 
@@ -765,6 +782,7 @@ $('cancel-setup').onclick = () => {
   render();
 };
 $('export').onclick = exportSession;
+$('download-report').onclick = downloadReport;
 $('import').onclick = () => $('import-file').click();
 $('import-file').onchange = () => {
   const [file] = $('import-file').files;

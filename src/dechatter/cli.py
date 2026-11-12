@@ -9,11 +9,12 @@ from pathlib import Path
 
 import numpy as np
 
-from . import audio, bayes, materials, session
+from . import audio, bayes, materials, report, session
 from .audio import AudioError
 from .config import TEMPLATE, ConfigError, Setup, load_setup, read_setup
 from .detect import Thresholds, Verdict
 from .export import ExportError, export
+from .gcode import Units
 from .plan import Envelope, PassKind, Plan, PlanError, envelope
 from .session import PassStatus, SessionError, Stock
 
@@ -160,6 +161,10 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
 
 def cmd_report(args: argparse.Namespace) -> int:
+    if args.html:
+        args.html.write_text(report.render(args.session, Units(args.units)), encoding="utf-8")
+        print(f"wrote {args.html}")
+        return 0
     setup = load_setup(args.session / session.SETUP_FILE)
     env = envelope(setup)
     rounds = session.load_rounds(args.session)
@@ -209,9 +214,18 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--excess-db", type=float, default=defaults.excess_db)
     analyze.set_defaults(run=cmd_analyze)
 
-    report = commands.add_parser("report", help="show the stability map and the best stable cuts")
-    report.add_argument("session", type=Path)
-    report.set_defaults(run=cmd_report)
+    summary = commands.add_parser(
+        "report", help="show the stability map and the best stable cuts, or write them as HTML"
+    )
+    summary.add_argument("session", type=Path)
+    summary.add_argument("--html", type=Path, help="write a printable HTML report to this file")
+    summary.add_argument(
+        "--units",
+        choices=[u.value for u in Units],
+        default=Units.MM.value,
+        help="lengths in the report: the machine's mm (G21) or in (G20); mm are shown beside",
+    )
+    summary.set_defaults(run=cmd_report)
 
     listing = commands.add_parser("materials", help="list the built-in material table")
     listing.set_defaults(run=cmd_materials)

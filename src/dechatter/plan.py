@@ -59,6 +59,7 @@ class Plan:
     plunge_s: float  # feed move from the clearance plane down to depth, beside the stock
     passes: tuple[Pass, ...]
     schema: int = SCHEMA
+    planned_on: str | None = None  # ISO date
 
     @property
     def consumed_mm(self) -> float:
