@@ -53,6 +53,14 @@ dechatter widget ~/dechatter-widget
 cncjs --mount /dechatter:$HOME/dechatter-widget
 ```
 
+To follow unreleased changes, install straight from GitHub. npm then runs the package's
+`prepare` script, which builds `web/` with `dechatter widget`, so this needs
+[uv](https://docs.astral.sh/uv/) on the PATH and network access to download Pyodide:
+
+```sh
+npm install github:pedropaulovc/dechatter#main
+```
+
 In cncjs, open Manage Widgets, enable the Custom widget, and set its URL to `/dechatter/` in
 the widget's settings. Open cncjs at `http://localhost:8000` or over HTTPS: browsers only give
 a page the microphone on those. Then, in the widget:
