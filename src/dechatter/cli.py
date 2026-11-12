@@ -193,6 +193,8 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 def cmd_reset(args: argparse.Namespace) -> int:
     if not (args.session / session.SETUP_FILE).exists():
         raise SessionError(f"{args.session} is not a session: it has no {session.SETUP_FILE}")
+    # The setup is kept, so it has to load: a 0.1.x or damaged one is refused up front.
+    envelope(load_setup(args.session / session.SETUP_FILE))
     held = session.contents(args.session)
     if not args.yes:
         try:

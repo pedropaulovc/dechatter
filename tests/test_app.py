@@ -749,6 +749,59 @@ def test_a_reset_is_refused_while_recording_and_undone_if_it_fails(engine, monke
     assert len(kept) == 1 and (kept[0] / "round-01" / "recording.wav").exists()
     session.sweep_discarded(engine.root / NAME)
     assert kept[0].exists()
+    kept[0].rename(engine.root / NAME / "round-01")
+
+    # Nor can the aside be renamed: the error names where the round is, and sweeps keep it.
+    def fail_more(self, target):
+        if self.name.startswith(".discarded-reset-"):
+            raise OSError("storage refused")
+        return fail_back(self, target)
+
+    monkeypatch.setattr(Path, "rename", fail_more)
+    with pytest.raises(
+        RuntimeError, match=r"round-01 could not be put back and are in .*\.discarded-reset-"
+    ):
+        engine.call("reset", NAME)
+    monkeypatch.undo()
+    aside = list((engine.root / NAME).glob(".discarded-reset-*"))
+    assert len(aside) == 1 and (aside[0] / "round-01").exists()
+    session.sweep_discarded(engine.root / NAME)
+    Engine(engine.root).call("names")
+    assert aside[0].exists()
+
+
+def test_a_reset_goes_ahead_when_the_report_cannot_be_removed(engine, monkeypatch):
+    engine.call("plan", NAME, "same")
+    report = engine.root / NAME / "report.html"
+    report.write_text("<!doctype html>")
+    real = Path.unlink
+
+    def refuse(self, *args, **kwargs):
+        if self.name == "report.html":
+            raise OSError("busy")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", refuse)
+    assert engine.call("reset", NAME)["rounds"] == []
+    monkeypatch.undo()
+    assert report.exists() and not list((engine.root / NAME).glob("round-*"))
+    assert not list((engine.root / NAME).glob(".discarded-*"))
+
+
+def test_reset_and_export_go_by_whether_the_setup_loads(engine, tmp_path, capsys):
+    assert engine.call("setup_status", NAME) == {"status": "loads", "reason": ""}
+    # Rounds that do not load leave the setup loading: the session can be exported and reset.
+    engine.call("plan", NAME, "same")
+    (session.round_dir(engine.root / NAME, 1) / session.SETUP_FILE).unlink()
+    fresh = Engine(engine.root)
+    with pytest.raises(RuntimeError, match="setup.toml is missing"):
+        fresh.call("state", NAME)
+    assert fresh.call("setup_status", NAME)["status"] == "loads"
+    assert (
+        f"{NAME}/setup.toml"
+        in zipfile.ZipFile(io.BytesIO(fresh.call("export_zip", NAME, "mm"))).namelist()
+    )
+    assert fresh.call("reset", NAME)["rounds"] == []
 
 
 def test_a_session_whose_setup_does_not_load_is_not_reset(engine):
@@ -758,8 +811,11 @@ def test_a_session_whose_setup_does_not_load_is_not_reset(engine):
     setup_011 = (Path(__file__).parent / "fixtures" / "setup-0.1.1.toml").read_text()
     (old / session.SETUP_FILE).write_text(setup_011)
     before = files(old)
+    status = engine.call("setup_status", "old-011")
+    assert status["status"] == "refused" and "0.1.x" in status["reason"]
     with pytest.raises(RuntimeError, match="0.1.x"):
         engine.call("reset", "old-011")
+    assert cli.main(["reset", str(old), "--yes"]) == 1
     assert files(old) == before
 
 

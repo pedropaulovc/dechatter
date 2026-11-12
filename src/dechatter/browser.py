@@ -14,6 +14,7 @@ import re
 import shutil
 import zipfile
 from dataclasses import asdict
+from enum import StrEnum
 from pathlib import Path
 
 import numpy as np
@@ -34,6 +35,12 @@ from .plan import PlanError, envelope
 from .session import SessionError, Stock
 
 log = logging.getLogger(__name__)
+
+
+class SetupLoad(StrEnum):
+    LOADS = "loads"
+    REFUSED = "refused"  # from dechatter 0.1.x, or damaged: only Delete applies
+
 
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 EXPECTED = (ConfigError, PlanError, SessionError, AudioError)
@@ -99,10 +106,20 @@ class Sessions:
         target = self._existing(name)
         self._not_recording(name, "reset")
         self._apps.pop(name, None)
-        self._app(name)
+        app = self._app(name)
         session.reset(target)
-        self._apps.pop(name, None)
-        return self.state(name)
+        return app.state()
+
+    def setup_status(self, name: str) -> dict:
+        """Whether a session's setup loads, its rounds aside: reset and export need it to.
+
+        Nothing is kept: opening the session loads it as usual.
+        """
+        try:
+            App(self._existing(name), self.thresholds)
+        except EXPECTED as exc:
+            return {"status": SetupLoad.REFUSED, "reason": str(exc)}
+        return {"status": SetupLoad.LOADS, "reason": ""}
 
     def delete(self, name: str) -> list[str]:
         """Remove a session for good, whether or not it loads; answer the names left."""

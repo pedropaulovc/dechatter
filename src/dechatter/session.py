@@ -655,9 +655,24 @@ def set_aside(r: Round) -> Path:
     return aside
 
 
+def _holds_lost_rounds(session: Path, leftover: Path) -> bool:
+    """A reset's aside, not marked done, that holds rounds the session no longer has: a
+    failed reset left them there."""
+    if not leftover.name.startswith(f"{DISCARDED}reset-") or (leftover / RESET_DONE).exists():
+        return False
+    return any(not (session / r.name).exists() for r in leftover.glob("round-*"))
+
+
+RESET_DONE = "reset-done"  # in a reset's aside that could not be renamed done
+
+
 def sweep_discarded(session: Path) -> None:
-    """Delete what is left of rounds discarded earlier; one that will not go is left."""
+    """Delete what is left of rounds discarded earlier; one that will not go is left, and
+    so is a failed reset's aside that still holds rounds the session lost."""
     for leftover in session.glob(f"{DISCARDED}*"):
+        if _holds_lost_rounds(session, leftover):
+            log.warning("keeping %s: it holds rounds a failed reset could not put back", leftover)
+            continue
         try:
             shutil.rmtree(leftover)
         except OSError as exc:
@@ -692,7 +707,10 @@ def _put_back(session: Path, aside: Path, moved: list[Path], marker: str, exc: O
         aside.rmdir()
         return
     kept = session / f".reset-failed-{marker}"
-    aside.rename(kept)
+    try:
+        aside.rename(kept)
+    except OSError:
+        kept = aside  # the sweep keeps it all the same: it holds rounds the session lost
     raise SessionError(
         f"could not reset {session.name}: {exc}; {', '.join(stuck)} could not be put back "
         f"and are in {kept}"
@@ -726,8 +744,21 @@ def reset(session: Path) -> None:
             raise
     except OSError as exc:
         raise SessionError(f"could not reset {session.name}: {exc}") from exc
-    (session / REPORT_FILE).unlink(missing_ok=True)
     log.info("reset %s: discarded %d rounds", session.name, len(moved))
+    # Mark the aside as meant to go, so a sweep deletes it should this delete fail.
+    try:
+        done = aside.with_name(f"{DISCARDED}done-{marker}")
+        aside.rename(done)
+        aside = done
+    except OSError:
+        try:
+            (aside / RESET_DONE).touch()
+        except OSError as exc:
+            log.warning("reset %s: %s holds discarded rounds: %s", session.name, aside, exc)
+    try:
+        (session / REPORT_FILE).unlink(missing_ok=True)
+    except OSError as exc:
+        log.warning("reset %s: could not remove %s: %s", session.name, REPORT_FILE, exc)
     try:
         shutil.rmtree(aside)
     except OSError as exc:

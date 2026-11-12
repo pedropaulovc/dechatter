@@ -42,8 +42,13 @@ let current = localStorage.getItem(SESSION_KEY) ?? '';
 let state = null; // the current session, as the engine last reported it
 let editing = null; // { values, defaults, materials, computed, step } while the setup wizard is open, else null
 let timeline = []; // what cncjs reported since the job last started; saved with the recording
-let busy = false; // an engine request is in flight
-let confirming = false; // a delete or reset is being confirmed: its session cannot change
+// What the session controls are doing: idle; busy while an engine request is in flight;
+// confirming while a delete or reset is being confirmed, so its session cannot change.
+let controls = 'idle';
+const busy = () => controls === 'busy';
+// Whether the open session's setup loads ('loads' | 'refused'), as the engine checks it;
+// null with no session open. Reset and Export need it to load; the rounds need not.
+let setupStatus = null;
 let stockChoice = 'same'; // survives redraws: planning on the wrong face position cuts air or too deep
 
 // ---- engine (Python in a worker) -------------------------------------------------------
@@ -88,7 +93,8 @@ function showError(message) {
 
 // Run one request that answers with the session's new state.
 async function act(method, ...args) {
-  busy = true;
+  const before = controls;
+  controls = 'busy';
   render();
   try {
     state = await engine(method, current, ...args);
@@ -96,7 +102,7 @@ async function act(method, ...args) {
   } catch (err) {
     showError(err.message);
   } finally {
-    busy = false;
+    controls = before === 'busy' ? 'idle' : before;
     syncRecording();
     render();
   }
@@ -106,11 +112,25 @@ async function openSession(name) {
   current = name;
   editing = null;
   state = null;
+  setupStatus = null;
   localStorage.setItem(SESSION_KEY, name);
   if (name) {
+    await checkSetup(name);
     await act('state');
   }
   render();
+}
+
+// Whether a session's setup loads, apart from its rounds: a session whose rounds do not
+// load can still be reset and exported.
+async function checkSetup(name) {
+  try {
+    const { status } = await engine('setup_status', name);
+    setupStatus = name === current ? status : setupStatus;
+  } catch (err) {
+    setupStatus = null;
+    showError(err.message);
+  }
 }
 
 async function newSession() {
@@ -124,6 +144,7 @@ async function newSession() {
     current = name.trim();
     localStorage.setItem(SESSION_KEY, current);
     state = null;
+    await checkSetup(current);
     await openWizard();
     showError('');
   } catch (err) {
@@ -193,7 +214,7 @@ async function nextStep() {
     goToStep(editing.step + 1);
     return;
   }
-  if (busy) {
+  if (busy()) {
     return; // already saving
   }
   // A job may be running one of this session's programs; a new setup could discard it.
@@ -311,19 +332,20 @@ async function ask(action) {
     showError(refusal);
     return;
   }
-  confirming = true;
+  controls = 'confirming';
   render();
   try {
-    // A session that did not load cannot be exported (from dechatter 0.1.x, or damaged).
-    const loads = state !== null;
+    // A session whose setup does not load (from dechatter 0.1.x, or damaged) cannot be
+    // exported; one whose rounds alone do not load can.
+    const loads = setupStatus === 'loads';
     $('confirm-question').textContent = question(name, await engine('contents', name));
-    $('confirm-note').textContent = loads ? note : `${note.split('.')[0]}. This session cannot be exported: it is from dechatter 0.1.x, or damaged.`;
+    $('confirm-note').textContent = loads ? note : `${note.split('.')[0]}. This session cannot be exported: its setup does not load (it is from dechatter 0.1.x, or damaged).`;
     $('confirm-export').hidden = !loads;
     $('confirm-go').textContent = verb;
     Object.assign($('confirm-dialog').dataset, { session: name, action });
     $('confirm-dialog').showModal();
   } catch (err) {
-    confirming = false;
+    controls = 'idle';
     showError(err.message);
     render();
   }
@@ -523,7 +545,7 @@ function plannedRound() {
 
 // Record exactly while cncjs runs the planned round's program.
 function syncRecording() {
-  if (!state || busy) {
+  if (!state || busy()) {
     return;
   }
   const round = plannedRound();
@@ -547,7 +569,7 @@ function syncRecording() {
 }
 
 async function loadProgram(round) {
-  busy = true;
+  controls = 'busy';
   render();
   try {
     // Capture has to be running before the job can start; the listener below does not wait.
@@ -565,7 +587,7 @@ async function loadProgram(round) {
   } catch (err) {
     showError(err.message);
   } finally {
-    busy = false;
+    controls = 'idle';
     render();
   }
 }
@@ -605,17 +627,16 @@ function renderSessions() {
     ...names.map((name) => el('option', { value: name }, name)),
   );
   select.value = names.includes(current) ? current : '';
-  select.disabled = busy || mic.recording || confirming;
+  select.disabled = controls !== 'idle' || mic.recording;
   $('summary').textContent = state ? summary(state) : '';
-  for (const id of ['edit-setup', 'export']) {
-    $(id).disabled = !state || busy || mic.recording;
-  }
+  $('edit-setup').disabled = !state || busy() || mic.recording;
+  $('export').disabled = setupStatus !== 'loads' || busy() || mic.recording;
   // Also for a session that failed to load: deleting it is the way to be rid of it.
   for (const [id, verb] of [['delete-session', 'Delete'], ['reset-session', 'Reset']]) {
-    $(id).disabled = !names.includes(current) || busy || confirming || Boolean(busyRefusal(current, verb));
+    $(id).disabled = !names.includes(current) || controls !== 'idle' || Boolean(busyRefusal(current, verb));
   }
   // Reset keeps the setup, so the setup has to load; Delete is the way out otherwise.
-  $('reset-session').disabled ||= state === null;
+  $('reset-session').disabled ||= setupStatus !== 'loads';
 }
 
 // The session's tool and cut in one line, lengths in the machine's units.
@@ -639,7 +660,7 @@ function renderSetup() {
   $('setup-hint').textContent = step.hint;
   $('setup-back').hidden = editing.step === 0;
   $('setup-next').textContent = editing.step === STEPS.length - 1 ? 'Save' : 'Next';
-  $('setup-next').disabled = busy;
+  $('setup-next').disabled = busy();
   $('units').textContent = UNITS_TEXT[cnc.units ?? 'unknown'];
   // Redraw the fields only when the step or the machine's units change, so typing is not
   // interrupted otherwise. A change of units drops an entry that is only half typed.
@@ -678,7 +699,7 @@ function renderStep() {
     return;
   }
 
-  if (busy) {
+  if (busy()) {
     step.append(el('p', {}, 'Working…'));
     return;
   }
@@ -776,7 +797,7 @@ function verdictCell(round, pass) {
   if (!round.analysed) {
     return el('td', {}, '');
   }
-  const select = el('select', { disabled: busy },
+  const select = el('select', { disabled: busy() },
     ...(pass.verdict ? [] : [el('option', { value: '' }, 'not heard')]),
     el('option', { value: 'stable' }, pass.status === 'aborted' ? 'stable (aborted)' : 'stable'),
     el('option', { value: 'unstable' }, pass.status === 'aborted' ? 'chatter (aborted)' : 'chatter'),
@@ -923,12 +944,12 @@ $('cancel-setup').onclick = () => {
   showError('');
   render();
 };
-$('export').onclick = exportSession;
+$('export').onclick = () => exportSession();
 $('delete-session').onclick = () => ask('delete');
 $('reset-session').onclick = () => ask('reset');
 // The page's error line is behind the dialog: say there how the export went.
 $('confirm-dialog').addEventListener('close', () => {
-  confirming = false;
+  controls = 'idle';
   render();
 });
 $('confirm-export').onclick = async () => {
