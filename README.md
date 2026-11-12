@@ -193,9 +193,18 @@ remaining spectrum and at least 10 dB above the same frequency in the dwell just
 pass, when the spindle was turning in air. The second test rejects tones the machine makes
 without cutting, such as drive whine.
 
-Passes are found in the recording by level, then matched in order to the planned passes by
-how long each cut should last. A quiet pass that goes undetected is reported as missing and
-does not shift the others. If matching fails, mark the cuts yourself and pass
+When the widget ran the round, it recorded where every cut and every dwell is, and those
+windows are used as they are: the cut from where the cutter meets the stock to where it
+leaves it, the dwell before it as the air reference. A pass the run never reached is "not
+run".
+
+A recording made otherwise (the command line, a phone) is searched for its cuts by their
+level over the spindle's own noise around them, since the spindle gets louder as it speeds
+up and a light cut is only a few dB over it. The cuts found are matched in order to the
+planned passes by how long each should last; at one speed the narrowest cuts are the ones
+that can go unheard, so those are the ones taken as missing. Passes after the last cut heard
+are "not run", and a pass whose spindle speed was found at the edge of its ±5% search is
+flagged ("speed?" in the widget). If matching fails, mark the cuts yourself and pass
 `--segments labels.txt` (start and end seconds per pass; an Audacity label export works).
 
 `results.json` in each round holds the verdicts and the numbers behind them. If your ears

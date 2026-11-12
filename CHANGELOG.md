@@ -37,6 +37,16 @@ What changed for people who use the dechatter widget and command line. The forma
   does not load cannot be exported, and the confirmation says so instead. It is refused while the session
   records or a cncjs job of its program runs.
 
+### Fixed
+
+- Cuts were matched to the wrong passes, seen on a real manual-spindle session: light cuts at
+  a low speed fell under one level threshold for the whole recording, and the rest slid onto
+  the wrong passes; passes never run had cuts forced onto them. A round the widget runs is
+  now analysed from the cut and dwell windows it recorded. A recording without them is
+  searched against the spindle's own noise around each cut, keeps the pass order with the
+  narrowest cuts taken as the unheard ones, and marks passes after the last cut as "not run".
+  A pass whose spindle speed was found at the edge of its search is flagged.
+
 ## [0.2.0] - 2026-11-12
 
 ### Changed

@@ -197,9 +197,19 @@ export class Stepper {
     this.set(PHASE.MOVING);
     const start = this.now();
     this.io.send(block.lines);
-    const end = await this.wait((state) => state.activeState === 'Idle' && this.at(state.wpos, block.target));
+    const window = (end, more = {}) => ({ kind: 'cut', pass: block.pass_id, start, end, holds: this.holds.map(([s, e]) => [s, e ?? end]), ...more });
+    let end;
+    try {
+      end = await this.wait((state) => state.activeState === 'Idle' && this.at(state.wpos, block.target));
+    } catch (err) {
+      // A cut cut short still counts, up to where it stopped.
+      if (block.step === 'cut' && err instanceof Ended) {
+        this.onWindow(window(this.endedAt, { aborted: true }));
+      }
+      throw err;
+    }
     if (block.step === 'cut') {
-      this.onWindow({ kind: 'cut', pass: block.pass_id, start, end, holds: this.holds.map(([s, e]) => [s, e ?? end]) });
+      this.onWindow(window(end));
     }
   }
 
@@ -240,6 +250,7 @@ export class Stepper {
 
   end(phase, reason) {
     this.reason = reason;
+    this.endedAt = this.now(); // where a cut under way stopped counting
     this.ended = new Ended(reason);
     for (const waiter of this.waiters.splice(0)) {
       waiter.reject(this.ended);

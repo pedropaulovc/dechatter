@@ -853,6 +853,9 @@ function verdictCell(round, pass) {
   if (!round.analysed) {
     return el('td', {}, '');
   }
+  if (pass.status === 'not run' && !pass.verdict) {
+    return el('td', { className: 'muted' }, 'not run');
+  }
   const select = el('select', { disabled: busy() },
     ...(pass.verdict ? [] : [el('option', { value: '' }, 'not heard')]),
     el('option', { value: 'stable' }, pass.status === 'aborted' ? 'stable (aborted)' : 'stable'),
@@ -861,7 +864,12 @@ function verdictCell(round, pass) {
   select.value = pass.verdict ?? '';
   select.title = pass.chatter_hz ? `peak ${Math.round(pass.chatter_hz)} Hz, ${pass.prominence_db} dB over the floor` : '';
   select.onchange = () => act('set_verdict', round.round, pass.id, select.value);
-  return el('td', { className: pass.verdict ?? '' }, select);
+  // The spindle speed heard sits at the edge of the search around this pass's: the sound
+  // may be another pass's. Worth a listen before trusting the verdict.
+  const edge = pass.spindle_fit === 'edge'
+    ? [el('span', { className: 'muted', title: 'The spindle speed heard is at the edge of what this pass could be: check it.' }, ' speed?')]
+    : [];
+  return el('td', { className: pass.verdict ?? '' }, select, ...edge);
 }
 
 function renderRound() {

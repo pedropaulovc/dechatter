@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-from scipy import signal
+from scipy import ndimage, signal
 
 from .plan import PassKind, Plan
 
@@ -25,7 +25,15 @@ HOP_S = 0.025
 MERGE_GAP_S = 0.4
 DURATION_TOLERANCE = 1.35
 THRESHOLD_STEPS = 32
-TRAILING_SKIP = 0.5
+# Passes skipped after the last cut found: the run stopped there, which is common.
+TRAILING_SKIP = 0.25
+# A cut is told from the spindle running in the air by its level over the floor around it:
+# the spindle's own noise rises with its speed, by 8 dB or more across a round, while a light
+# cut is only a few dB over the spindle. The floor is a low percentile over a window wide
+# enough to hold the air between cuts on either side of the longest one.
+FLOOR_WINDOW_S = 80.0
+FLOOR_PERCENTILE = 25
+LOWEST_THRESHOLD_DB = 1.0
 
 
 class AudioError(RuntimeError):
@@ -112,6 +120,12 @@ def envelope_db(samples: np.ndarray, rate: int) -> np.ndarray:
     return 10 * np.log10(mean + 1e-14)
 
 
+def local_floor(level_db: np.ndarray) -> np.ndarray:
+    """The level the spindle alone makes around each moment."""
+    size = max(1, int(FLOOR_WINDOW_S / HOP_S))
+    return ndimage.percentile_filter(level_db, FLOOR_PERCENTILE, size=size, mode="reflect")
+
+
 def segments_above(level_db: np.ndarray, threshold_db: float, min_s: float) -> list[Segment]:
     edges = np.flatnonzero(np.diff(np.concatenate(([0], level_db > threshold_db, [0]))))
     pairs = zip(edges[::2], edges[1::2], strict=True)
@@ -136,12 +150,15 @@ def align(plan: Plan, segments: list[Segment]) -> Alignment:
     """Order-preserving match of detected cuts to planned passes by cut duration.
 
     A pass may be skipped (not run, or too quiet to detect) and a segment may be dropped
-    (a noise that is not a cut); each costs 1, or 0.3 for skipping a light preparation pass.
-    Passes skipped after the last cut cost half: a run stopped early is likelier than one
-    whose first passes went unheard, and equal-speed passes make the two look alike.
+    (a noise that is not a cut, costing 1). Skipping a pass costs more the wider it is: a
+    narrow cut is the one likeliest to go unheard, and at one speed the cuts run narrowest
+    first, so passes of equal length are told apart by which ones are loud enough to hear.
+    Passes skipped after the last cut cost a quarter: a run stopped early is likelier than
+    one whose passes went unheard.
     """
     passes = plan.passes
-    skip = [1.0 if p.kind is PassKind.TEST else 0.3 for p in passes]
+    widest = max(p.width_mm for p in passes)
+    skip = [0.3 + 0.7 * p.width_mm / widest if p.kind is PassKind.TEST else 0.3 for p in passes]
     n, m = len(passes), len(segments)
     cost = np.full((n + 1, m + 1), math.inf)
     cost[0, :] = np.arange(m + 1)
@@ -166,7 +183,7 @@ def align(plan: Plan, segments: list[Segment]) -> Alignment:
     while i > 0 or j > 0:
         step = move[i, j]
         if step == 0:
-            matches[i - 1] = segments[j - 1]
+            matches[int(i) - 1] = segments[j - 1]
         i -= step != 2
         j -= step != 1
     used = set(matches.values())
@@ -174,18 +191,31 @@ def align(plan: Plan, segments: list[Segment]) -> Alignment:
 
 
 def find_cuts(samples: np.ndarray, rate: int, plan: Plan) -> Alignment:
-    """Sweep the level threshold; keep the one whose cuts best fit the plan's durations."""
-    level = envelope_db(samples, rate)
-    low, high = np.percentile(level, [2, 98])
+    """The cuts in a recording, matched to the plan's passes in order."""
+    return find_cuts_in(envelope_db(samples, rate), plan)
+
+
+def find_cuts_in(level: np.ndarray, plan: Plan) -> Alignment:
+    """Sweep the threshold over the local floor; keep the one whose cuts best fit the plan."""
+    over = level - local_floor(level)
+    low, high = LOWEST_THRESHOLD_DB, max(float(np.percentile(over, 98)), LOWEST_THRESHOLD_DB + 1)
     min_s = 0.5 * min(p.expected_cut_s for p in plan.passes)
     thresholds = np.linspace(low, high, THRESHOLD_STEPS + 2)[1:-1]
-    alignments = [align(plan, segments_above(level, t, min_s)) for t in thresholds]
-    costs = np.array([a.cost for a in alignments])
+    alignments = [align(plan, segments_above(over, t, min_s)) for t in thresholds]
+    # A threshold above every cut explains the recording as a run that never started, which
+    # costs little now that trailing skips are cheap: only thresholds that hear a cut count.
+    costs = np.array([a.cost if a.matches else math.inf for a in alignments])
+    if not np.isfinite(costs).any():
+        raise AudioError(
+            "no cut in the recording matches the plan's pass durations; check the microphone "
+            "level, or mark the cuts yourself (`dechatter analyze --segments`)"
+        )
     # Middle of the near-optimal thresholds: the widest margin from both noise and cuts.
     good = np.flatnonzero(costs <= costs.min() + 0.1)
     chosen = good[len(good) // 2]
     log.info(
-        "segmentation: threshold %.1f dB (range %.1f..%.1f), cost %.2f, %d of %d passes matched",
+        "segmentation: %.1f dB over the local floor (range %.1f..%.1f), cost %.2f, "
+        "%d of %d passes matched",
         thresholds[chosen],
         low,
         high,
@@ -193,11 +223,6 @@ def find_cuts(samples: np.ndarray, rate: int, plan: Plan) -> Alignment:
         len(alignments[chosen].matches),
         len(plan.passes),
     )
-    if not alignments[chosen].matches:
-        raise AudioError(
-            "no cut in the recording matches the plan's pass durations; check the microphone "
-            "level, or mark the cuts yourself (`dechatter analyze --segments`)"
-        )
     return alignments[chosen]
 
 

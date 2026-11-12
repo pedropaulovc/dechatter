@@ -17,7 +17,7 @@ from .config import WATTS_PER_HP, SpindleControl, load_setup
 from .detect import Verdict
 from .gcode import MM_PER_INCH, Units
 from .plan import SPINDLE_EFFICIENCY, PassKind, PlannerKind, envelope, feed_mm_min
-from .session import Round, VerdictSource
+from .session import PassStatus, Round, SpindleFit, VerdictSource
 
 REPORT_FILE = session.REPORT_FILE
 CUTS_PER_DEPTH = 3
@@ -263,6 +263,10 @@ def render(session_dir: Path, units: Units) -> str:
             verdict = (
                 "" if result is None or p.kind is not PassKind.TEST else _verdict(result.verdict)
             )
+            if result is not None and result.status is PassStatus.NOT_RUN and not result.verdict:
+                verdict = ""
+            if result is not None and session.spindle_fit(result) is SpindleFit.EDGE:
+                verdict += " (spindle speed at the edge: check)"
             by_hand = result is not None and session.verdict_source(result) is (
                 VerdictSource.OPERATOR
             )

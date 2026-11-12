@@ -154,7 +154,11 @@ test('stop holds, resets once the machine has decelerated, and ends the run', as
   assert.equal(await stepper.run(round([1, 2])), PHASE.STOPPED);
   assert.deepEqual(machine.log.slice(-2), ['!', '^X']);
   assert.ok(!machine.log.includes('G0 Y-2'), 'nothing more is sent');
-  assert.deepEqual(windows.map((w) => w.kind), ['dwell']);
+  // The cut it stopped is kept, marked aborted, up to the stop.
+  assert.deepEqual(windows, [
+    { kind: 'dwell', pass: 1, start: 6, end: 10 },
+    { kind: 'cut', pass: 1, start: 10, end: 10, holds: [], aborted: true },
+  ]);
 });
 
 test('a stop during the dwell ends it at once', async () => {

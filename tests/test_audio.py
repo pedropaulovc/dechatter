@@ -77,7 +77,7 @@ def test_recording_is_split_into_passes_and_each_classified(setup):
     assert starts == sorted(starts)
 
 
-def test_aborted_run_marks_the_cut_short_pass_and_leaves_the_rest_missing(setup):
+def test_aborted_run_marks_the_cut_short_pass_and_the_rest_not_run(setup):
     plan = round1(setup)
     stopped = 9
     recording = synth.record(plan, abort_in_pass=stopped)
@@ -85,7 +85,7 @@ def test_aborted_run_marks_the_cut_short_pass_and_leaves_the_rest_missing(setup)
     statuses = [p.status for p in results.passes]
     assert statuses[:stopped] == [PassStatus.ANALYSED] * stopped
     assert statuses[stopped] is PassStatus.ABORTED
-    assert set(statuses[stopped + 1 :]) == {PassStatus.MISSING}
+    assert set(statuses[stopped + 1 :]) == {PassStatus.NOT_RUN}
 
     face, remnant = session.face_after(session.Round(None, plan, results))
     assert remnant == plan.passes[stopped].width_mm

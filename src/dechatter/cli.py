@@ -170,13 +170,15 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
     print(" pass kind       rpm  width  status    verdict   peak Hz  prom  vs air")
     for p in results.passes:
-        if p.status is PassStatus.MISSING:
-            print(f"  {p.id:3d} {p.kind:<8} {p.rpm:5d} {p.width_mm:6.2f}  missing")
+        if p.status in (PassStatus.MISSING, PassStatus.NOT_RUN):
+            print(f"  {p.id:3d} {p.kind:<8} {p.rpm:5d} {p.width_mm:6.2f}  {p.status}")
             continue
         air = "     -" if p.excess_db is None else f"{p.excess_db:6.1f}"
+        edge = session.spindle_fit(p) is session.SpindleFit.EDGE
         print(
             f"  {p.id:3d} {p.kind:<8} {p.rpm:5d} {p.width_mm:6.2f}  {p.status:<9} {p.verdict:<8} "
             f"{p.chatter_hz:8.1f} {p.prominence_db:5.1f} {air}"
+            f"{'  spindle speed at the edge: check this pass' if edge else ''}"
         )
     missing = [
         p.id for p in results.passes if p.status is PassStatus.MISSING and p.kind is PassKind.TEST

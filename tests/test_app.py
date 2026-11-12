@@ -544,7 +544,7 @@ def test_aborted_job_still_yields_results_and_a_cleanup_next_round(engine):
     engine.call("plan", NAME, "same")
     state = engine.run_round(1, abort_in_pass=9)
     statuses = [p["status"] for p in state["rounds"][0]["passes"]]
-    assert statuses[9] == "aborted" and set(statuses[10:]) == {"missing"}
+    assert statuses[9] == "aborted" and set(statuses[10:]) == {"not run"}
 
     state = engine.call("plan", NAME, "same")
     assert "cleanup" in [p["kind"] for p in state["rounds"][1]["passes"]]

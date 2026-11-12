@@ -43,6 +43,8 @@ TRIM_FRACTION = 0.15
 AIR_GUARD_S = 0.3
 MIN_AIR_S = 1.0
 MIN_ABORTED_S = 1.0
+EDGE_FRACTION = 0.9  # of the spindle-speed search window: a fit this far out is suspect
+TIMELINE_FILE = "timeline.json"  # the widget's record of the run, beside its recording
 
 
 class SessionError(RuntimeError):
@@ -52,7 +54,8 @@ class SessionError(RuntimeError):
 class PassStatus(StrEnum):
     ANALYSED = "analysed"
     ABORTED = "aborted"  # the cut stopped early (feed hold); analysed on what was recorded
-    MISSING = "missing"  # not found in the recording
+    MISSING = "missing"  # run, but not found in the recording
+    NOT_RUN = "not run"  # the run ended before it: stopped, or never reached
 
 
 @dataclass(frozen=True)
@@ -79,6 +82,19 @@ class VerdictSource(StrEnum):
 
 def verdict_source(p: PassResult) -> VerdictSource:
     return VerdictSource.DETECTOR if p.verdict is p.detected else VerdictSource.OPERATOR
+
+
+class SpindleFit(StrEnum):
+    NEAR = "near"  # the measured spindle speed is near the pass's
+    EDGE = "edge"  # at the edge of the search around it: likely another pass's speed
+
+
+def spindle_fit(p: PassResult) -> SpindleFit | None:
+    """How well the spindle speed measured in a pass fits the speed it was planned at."""
+    if p.spindle_hz is None:
+        return None
+    off = abs(p.spindle_hz * 60 / p.rpm - 1)
+    return SpindleFit.EDGE if off >= EDGE_FRACTION * detect.RPM_TOLERANCE else SpindleFit.NEAR
 
 
 @dataclass(frozen=True)
@@ -292,7 +308,8 @@ def face_after(last: Round) -> tuple[float, float]:
     if last.results is None:
         raise SessionError(f"{last.path.name} has no results; run `dechatter analyze` first")
     widths = [p.width_mm for p in last.plan.passes]
-    attempted = [i for i, p in enumerate(last.results.passes) if p.status is not PassStatus.MISSING]
+    unheard = (PassStatus.MISSING, PassStatus.NOT_RUN)
+    attempted = [i for i, p in enumerate(last.results.passes) if p.status not in unheard]
     start = last.plan.face_y_start_mm
     if not attempted:
         return start, 0.0
@@ -302,8 +319,47 @@ def face_after(last: Round) -> tuple[float, float]:
     return start + sum(widths[: final + 1]), 0.0
 
 
+@dataclass(frozen=True)
+class Placement:
+    """Where a pass's cut is in a recording, and the spindle-only sound just before it."""
+
+    cut: audio.Segment
+    status: PassStatus
+    air: audio.Segment | None = None  # None: guess it from the time before the cut
+
+
+def placements_from_timeline(plan: Plan, timeline: list) -> dict[int, Placement] | None:
+    """Pass index -> where the widget recorded it running; None without such a record.
+
+    The widget times each pass's cut move, from sending it to Idle at its end, and the
+    dwell before it. The cutter meets the stock a lead-in after the move starts and leaves
+    it as long before it ends; a cut held part-way is analysed up to the hold. A pass with
+    no cut window never ran.
+    """
+    starts = [e["t"] for e in timeline if e.get("event") == "record"]
+    if not starts:
+        return None
+    t0 = starts[0]
+    cuts = {e["pass"]: e for e in timeline if e.get("event") == "cut"}
+    dwells = {e["pass"]: e for e in timeline if e.get("event") == "dwell"}
+    found = {}
+    for index, p in enumerate(plan.passes):
+        cut = cuts.get(p.id)
+        if cut is None:
+            continue
+        holds = cut.get("holds") or []
+        cut_short = bool(cut.get("aborted")) or bool(holds)
+        start = cut["start"] - t0 + p.lead_in_s
+        end = (holds[0][0] if holds else cut["end"]) - t0 - (0.0 if cut_short else p.lead_in_s)
+        status = PassStatus.ABORTED if cut.get("aborted") else PassStatus.ANALYSED
+        dwell = dwells.get(p.id)
+        air = None if dwell is None else audio.Segment(dwell["start"] - t0, dwell["end"] - t0)
+        found[index] = Placement(audio.Segment(start, max(end, start)), status, air)
+    return found
+
+
 def _match(plan: Plan, samples: np.ndarray, rate: int, manual: list[audio.Segment] | None):
-    """Pass index -> (segment, status)."""
+    """Pass index -> Placement, from the sound alone (or cuts marked by hand)."""
     if manual is not None:
         if len(manual) > len(plan.passes):
             raise SessionError(f"{len(manual)} segments given for {len(plan.passes)} passes")
@@ -323,7 +379,7 @@ def _match(plan: Plan, samples: np.ndarray, rate: int, manual: list[audio.Segmen
     if tail and final + 1 < len(plan.passes) and tail[0].duration_s >= MIN_ABORTED_S:
         matched[final + 1] = tail[0]
         statuses[final + 1] = PassStatus.ABORTED
-    return {i: (matched[i], statuses[i]) for i in matched}
+    return {i: Placement(matched[i], statuses[i]) for i in matched}
 
 
 def analyze(
@@ -333,21 +389,37 @@ def analyze(
     recording: str,
     thresholds: Thresholds,
     manual: list[audio.Segment] | None = None,
+    timeline: list | None = None,
 ) -> Results:
-    matched = _match(plan, samples, rate, manual)
+    """Classify each pass. Where the widget recorded the run (`timeline`), its windows say
+    where every cut is; otherwise the cuts are found by their sound."""
+    placed = (
+        None if manual is not None or timeline is None else placements_from_timeline(plan, timeline)
+    )
+    windowed = placed is not None
+    if placed is None:
+        placed = _match(plan, samples, rate, manual)
+    last = max(placed, default=-1)
     results = []
     previous_end = 0.0
     for index, p in enumerate(plan.passes):
-        base = PassResult(p.id, p.kind, p.rpm, p.width_mm, PassStatus.MISSING)
-        if index not in matched:
+        unplaced = PassStatus.NOT_RUN if windowed or index > last else PassStatus.MISSING
+        base = PassResult(p.id, p.kind, p.rpm, p.width_mm, unplaced)
+        if index not in placed:
             results.append(base)
             continue
-        segment, status = matched[index]
+        place = placed[index]
+        segment = place.cut
         trim = TRIM_FRACTION * segment.duration_s
         cut = samples[int((segment.start_s + trim) * rate) : int((segment.end_s - trim) * rate)]
-        air_start = max(segment.start_s - p.lead_in_s - plan.dwell_s / 2, previous_end + 0.5, 0.0)
-        air_end = segment.start_s - AIR_GUARD_S
-        air = samples[int(air_start * rate) : int(air_end * rate)]
+        if place.air is not None:
+            air_start, air_end = place.air.start_s, place.air.end_s
+        else:
+            air_start = max(
+                segment.start_s - p.lead_in_s - plan.dwell_s / 2, previous_end + 0.5, 0.0
+            )
+            air_end = segment.start_s - AIR_GUARD_S
+        air = samples[int(max(air_start, 0.0) * rate) : int(max(air_end, 0.0) * rate)]
         previous_end = segment.end_s
         try:
             reading = detect.classify(
@@ -360,7 +432,7 @@ def analyze(
             )
         except detect.TooShort as exc:
             log.warning("pass %d: %s", p.id, exc)
-            results.append(base)
+            results.append(dataclasses.replace(base, status=PassStatus.MISSING))
             continue
         results.append(
             PassResult(
@@ -368,7 +440,7 @@ def analyze(
                 p.kind,
                 p.rpm,
                 p.width_mm,
-                status,
+                place.status,
                 verdict=reading.verdict,
                 chatter_hz=round(reading.chatter_hz, 1),
                 spindle_hz=round(reading.spindle_hz, 3),
@@ -823,7 +895,11 @@ def analyze_recording(
 ) -> Results:
     """Classify a round's passes from its recording and save the results beside the plan."""
     samples, rate = audio.load(recording)
-    results = analyze(target.plan, samples, rate, recording.name, thresholds, manual)
+    timeline_path = target.path / TIMELINE_FILE
+    timeline = (
+        json.loads(timeline_path.read_text(encoding="utf-8")) if timeline_path.exists() else None
+    )
+    results = analyze(target.plan, samples, rate, recording.name, thresholds, manual, timeline)
     results.save(target.path / RESULTS_FILE)
     log.info(
         "analysed round %d from %s: %.0f s at %d Hz",

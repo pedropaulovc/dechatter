@@ -24,7 +24,7 @@ from .session import PassStatus, SessionError, Stock
 log = logging.getLogger(__name__)
 
 RECORDING_FILE = session.RECORDING_FILE
-TIMELINE_FILE = "timeline.json"
+TIMELINE_FILE = session.TIMELINE_FILE
 TOP_RESULTS = 5
 PROGRAM_ID_LENGTH = 6
 
@@ -149,6 +149,7 @@ class App:
                     "verdict": result.verdict if result else None,
                     "chatter_hz": result.chatter_hz if result else None,
                     "prominence_db": result.prominence_db if result else None,
+                    "spindle_fit": session.spindle_fit(result) if result else None,
                 }
             )
         return {
@@ -237,7 +238,8 @@ class App:
         passes = []
         for p in target.results.passes:
             if p.id == pass_id:
-                status = PassStatus.ANALYSED if p.status is PassStatus.MISSING else p.status
+                unheard = (PassStatus.MISSING, PassStatus.NOT_RUN)
+                status = PassStatus.ANALYSED if p.status in unheard else p.status
                 p = session.PassResult(**{**asdict(p), "verdict": verdict, "status": status})
             passes.append(p)
         if all(p.id != pass_id or p.kind is not PassKind.TEST for p in passes):
