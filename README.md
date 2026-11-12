@@ -88,6 +88,9 @@ a page the microphone on those. Then, in the widget:
 2. Plan a round. Round 1 is a coarse grid of speeds and widths.
 3. Set the work zero at the left end of the stock, on its front face, at the top.
 4. Load the program into cncjs and press play in cncjs. The widget never starts the machine.
+   To check the toolpath in the air first, tick **Dry run** (off by default), raise Z zero
+   and run it: that run is never recorded and does not count. The toggle turns itself off
+   when the job ends; put Z zero back on the stock before the real run.
 5. Recording starts when the job starts and stops when it ends. The widget then shows each
    pass as stable or chatter, the stability map and the best cuts so far.
 6. If your ears disagree with a verdict, change it in the table. Plan the next round and

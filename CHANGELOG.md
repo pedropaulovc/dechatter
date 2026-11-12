@@ -6,6 +6,13 @@ What changed for people who use the dechatter widget and command line. The forma
 
 ## [Unreleased]
 
+### Added
+
+- A **Dry run** toggle in the widget, off by default, to run a round's program in the air
+  first: that run is never recorded or analysed, even with the microphone open, and the
+  round still waits for its real run. It turns itself off when the job ends and on every
+  reload, and reminds you to put Z zero back on the stock before the real run.
+
 ## [0.2.0] - 2026-11-12
 
 ### Changed
