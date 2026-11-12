@@ -13,6 +13,7 @@
   <div id="main" hidden>
     <header>
       <select id="sessions" aria-label="Session"></select>
+      <button id="reset-session" disabled>Reset</button>
       <button id="delete-session" disabled>Delete</button>
       <button id="new-session">New</button>
       <button id="edit-setup" disabled>Setup</button>
@@ -47,13 +48,13 @@
       </p>
     </section>
 
-    <dialog id="delete-dialog" aria-labelledby="delete-question">
-      <p id="delete-question"></p>
-      <p id="delete-note" class="muted"></p>
+    <dialog id="confirm-dialog" aria-labelledby="confirm-question">
+      <p id="confirm-question"></p>
+      <p id="confirm-note" class="muted"></p>
       <p class="wizard-buttons">
-        <button id="delete-export" type="button">Export first</button>
-        <button id="delete-confirm" type="button" class="danger">Delete</button>
-        <button id="delete-cancel" type="button">Cancel</button>
+        <button id="confirm-export" type="button">Export first</button>
+        <button id="confirm-go" type="button" class="danger">Delete</button>
+        <button id="confirm-cancel" type="button">Cancel</button>
       </p>
     </dialog>
 

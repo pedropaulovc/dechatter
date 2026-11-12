@@ -190,6 +190,23 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_reset(args: argparse.Namespace) -> int:
+    if not (args.session / session.SETUP_FILE).exists():
+        raise SessionError(f"{args.session} is not a session: it has no {session.SETUP_FILE}")
+    held = session.contents(args.session)
+    if not args.yes:
+        answer = input(
+            f"Discard all {held.rounds} rounds and {held.recordings} recordings of "
+            f"{args.session}, keeping its setup? This cannot be undone. [y/N] "
+        )
+        if answer.strip().lower() not in ("y", "yes"):
+            print("nothing changed")
+            return 1
+    session.reset(args.session)
+    print(f"discarded {held.rounds} rounds; next: dechatter plan {args.session}")
+    return 0
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     if args.html:
         units = Units(args.units or Units.MM)
@@ -261,6 +278,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="with --html: lengths in the machine's mm (G21, the default) or in (G20)",
     )
     summary.set_defaults(run=cmd_report)
+
+    reset = commands.add_parser(
+        "reset", help="discard every round of a session and keep its setup, to start over"
+    )
+    reset.add_argument("session", type=Path)
+    reset.add_argument("--yes", action="store_true", help="do not ask for confirmation")
+    reset.set_defaults(run=cmd_reset)
 
     listing = commands.add_parser("materials", help="list the built-in material table")
     listing.set_defaults(run=cmd_materials)

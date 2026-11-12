@@ -13,12 +13,13 @@ import logging
 import re
 import shutil
 import zipfile
+from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
 
 from . import gcode, materials, report, session
-from .app import RECORDING_FILE, App
+from .app import App
 from .audio import AudioError
 from .config import (
     TEMPLATE,
@@ -78,23 +79,29 @@ class Sessions:
         return target
 
     def contents(self, name: str) -> dict:
-        """What deleting a session would lose, counted without loading it."""
+        """What deleting or resetting a session would lose, counted without loading it."""
+        return asdict(session.contents(self._existing(name)))
+
+    def _not_recording(self, name: str, action: str) -> None:
+        opened = self._apps.get(name)
+        if opened is not None and opened.recording_round is not None:
+            raise SessionError(
+                f"round {opened.recording_round} of {name!r} is being recorded; {action} the "
+                "session after the job"
+            )
+
+    def reset(self, name: str) -> dict:
+        """Discard every round of a session, keeping its setup; answer its new state."""
         target = self._existing(name)
-        rounds = [p for p in target.glob("round-*") if p.is_dir()]
-        return {
-            "rounds": len(rounds),
-            "recordings": sum((r / RECORDING_FILE).exists() for r in rounds),
-        }
+        self._not_recording(name, "reset")
+        self._apps.pop(name, None)
+        session.reset(target)
+        return self.state(name)
 
     def delete(self, name: str) -> list[str]:
         """Remove a session for good, whether or not it loads; answer the names left."""
         target = self._existing(name)
-        opened = self._apps.get(name)
-        if opened is not None and opened.recording_round is not None:
-            raise SessionError(
-                f"round {opened.recording_round} of {name!r} is being recorded; delete the "
-                "session after the job"
-            )
+        self._not_recording(name, "delete")
         self._apps.pop(name, None)
         shutil.rmtree(target)
         log.info("deleted session %s", name)

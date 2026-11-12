@@ -34,6 +34,7 @@ log = logging.getLogger(__name__)
 
 SCHEMA = 2  # 2: dechatter 0.2.0 (the detector's own verdict)
 SETUP_FILE = "setup.toml"
+RECORDING_FILE = "recording.wav"  # where the widget keeps a round's recording
 PLAN_FILE = "plan.json"
 PROGRAM_FILE = "program.nc"
 RESULTS_FILE = "results.json"
@@ -664,6 +665,49 @@ def sweep_discarded(session: Path) -> None:
 
 def restore(aside: Path, r: Round) -> None:
     aside.rename(r.path)
+
+
+def _round_dirs(session: Path) -> list[Path]:
+    return sorted(p for p in session.glob("round-*") if p.is_dir())
+
+
+@dataclass(frozen=True)
+class Contents:
+    """What a session holds, counted from its folders alone: it may not load."""
+
+    rounds: int
+    recordings: int
+
+
+def contents(session: Path) -> Contents:
+    rounds = _round_dirs(session)
+    return Contents(len(rounds), sum((r / RECORDING_FILE).exists() for r in rounds))
+
+
+def reset(session: Path) -> None:
+    """Discard every round, keeping the setup: the session starts over from round 1.
+
+    The rounds are not read, so a damaged one goes too. They are moved aside together and
+    only then deleted; if moving one fails, those already moved are put back.
+    """
+    sweep_discarded(session)
+    aside = session / f"{DISCARDED}reset-{uuid.uuid4().hex[:8]}"
+    aside.mkdir()
+    moved: list[Path] = []
+    try:
+        for folder in _round_dirs(session):
+            folder.rename(aside / folder.name)
+            moved.append(folder)
+    except OSError:
+        for folder in reversed(moved):
+            (aside / folder.name).rename(folder)
+        aside.rmdir()
+        raise
+    log.info("reset %s: discarded %d rounds", session.name, len(moved))
+    try:
+        shutil.rmtree(aside)
+    except OSError as exc:
+        log.warning("could not delete %s yet: %s", aside.name, exc)
 
 
 def _write_round(session: Path, setup_text: str, setup: Setup, plan: Plan) -> None:

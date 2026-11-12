@@ -254,49 +254,76 @@ function jobOf(name) {
   return (cnc.workflow === 'running' || cnc.workflow === 'paused') && cnc.program.startsWith(`dechatter-${name}-round-`);
 }
 
-function deleteRefusal(name) {
+// Why a session cannot be deleted or reset now; '' when it can.
+function busyRefusal(name, verb) {
   if (mic.recording) {
-    return 'A round is being recorded. Delete the session after the job.';
+    return `A round is being recorded. ${verb} the session after the job.`;
   }
   if (jobOf(name)) {
-    return `cncjs is running a program of ${name}. Delete the session after the job.`;
+    return `cncjs is running a program of ${name}. ${verb} the session after the job.`;
   }
   return '';
 }
 
-// Ask before deleting, naming what goes. It reads nothing but the folder, so a session that
-// does not load (from dechatter 0.1.x, or damaged) can go too.
-async function askDelete() {
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+// Deleting removes the session; resetting discards its rounds and keeps its setup. Both ask
+// first, naming what goes, and offer Export. They read nothing but the folder, so a session
+// that does not load (from dechatter 0.1.x, or damaged) can go too.
+const ACTIONS = {
+  delete: {
+    verb: 'Delete',
+    question: (name, held) => `Delete session ${name}? It holds ${plural(held.rounds, 'round')} and ${plural(held.recordings, 'recording')}.`,
+    note: 'Deleting cannot be undone. Export keeps a copy as a zip.',
+    async run(name) {
+      names = await engine('delete', name);
+      await openSession('');
+    },
+  },
+  reset: {
+    verb: 'Reset',
+    question: (name, held) => `Reset session ${name}? Its ${plural(held.rounds, 'round')} and ${plural(held.recordings, 'recording')} are discarded; its setup stays, and planning starts again from round 1.`,
+    note: 'Resetting cannot be undone. Export keeps a copy as a zip.',
+    async run(name) {
+      editing = null;
+      if (name === current) {
+        state = null;
+      }
+      await act('reset');
+    },
+  },
+};
+
+async function ask(action) {
   const name = current;
-  const refusal = deleteRefusal(name);
+  const { verb, question, note } = ACTIONS[action];
+  const refusal = busyRefusal(name, verb);
   if (refusal) {
     showError(refusal);
     return;
   }
   try {
-    const { rounds, recordings } = await engine('contents', name);
-    const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
-    $('delete-question').textContent = `Delete session ${name}? It holds ${plural(rounds, 'round')} and ${plural(recordings, 'recording')}.`;
-    $('delete-note').textContent = 'Deleting cannot be undone. Export keeps a copy as a zip.';
-    $('delete-dialog').dataset.session = name;
-    $('delete-dialog').showModal();
+    $('confirm-question').textContent = question(name, await engine('contents', name));
+    $('confirm-note').textContent = note;
+    $('confirm-go').textContent = verb;
+    Object.assign($('confirm-dialog').dataset, { session: name, action });
+    $('confirm-dialog').showModal();
   } catch (err) {
     showError(err.message);
   }
 }
 
-async function deleteSession() {
-  const name = $('delete-dialog').dataset.session;
-  $('delete-dialog').close();
-  const refusal = deleteRefusal(name);
+async function confirmed() {
+  const { session: name, action } = $('confirm-dialog').dataset;
+  $('confirm-dialog').close();
+  const refusal = busyRefusal(name, ACTIONS[action].verb);
   if (refusal) {
     showError(refusal);
     return;
   }
   try {
-    names = await engine('delete', name);
     showError('');
-    await openSession('');
+    await ACTIONS[action].run(name);
   } catch (err) {
     showError(err.message);
   }
@@ -568,7 +595,9 @@ function renderSessions() {
     $(id).disabled = !state || busy || mic.recording;
   }
   // Also for a session that failed to load: deleting it is the way to be rid of it.
-  $('delete-session').disabled = !names.includes(current) || busy || Boolean(deleteRefusal(current));
+  for (const [id, verb] of [['delete-session', 'Delete'], ['reset-session', 'Reset']]) {
+    $(id).disabled = !names.includes(current) || busy || Boolean(busyRefusal(current, verb));
+  }
 }
 
 // The session's tool and cut in one line, lengths in the machine's units.
@@ -877,15 +906,17 @@ $('cancel-setup').onclick = () => {
   render();
 };
 $('export').onclick = exportSession;
-$('delete-session').onclick = askDelete;
+$('delete-session').onclick = () => ask('delete');
+$('reset-session').onclick = () => ask('reset');
 // The page's error line is behind the dialog: say there how the export went.
-$('delete-export').onclick = async () => {
+$('confirm-export').onclick = async () => {
   showError('');
   await exportSession();
-  $('delete-note').textContent = $('error').hidden ? 'Exported. Delete it now, or cancel.' : `Not exported: ${$('error').textContent}`;
+  const { verb } = ACTIONS[$('confirm-dialog').dataset.action];
+  $('confirm-note').textContent = $('error').hidden ? `Exported. ${verb} it now, or cancel.` : `Not exported: ${$('error').textContent}`;
 };
-$('delete-confirm').onclick = deleteSession;
-$('delete-cancel').onclick = () => $('delete-dialog').close();
+$('confirm-go').onclick = confirmed;
+$('confirm-cancel').onclick = () => $('confirm-dialog').close();
 $('download-report').onclick = downloadReport;
 $('import').onclick = () => $('import-file').click();
 $('import-file').onchange = () => {

@@ -23,7 +23,7 @@ from .session import PassStatus, SessionError, Stock
 
 log = logging.getLogger(__name__)
 
-RECORDING_FILE = "recording.wav"
+RECORDING_FILE = session.RECORDING_FILE
 TIMELINE_FILE = "timeline.json"
 TOP_RESULTS = 5
 PROGRAM_ID_LENGTH = 6

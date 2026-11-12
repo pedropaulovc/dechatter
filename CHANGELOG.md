@@ -15,6 +15,12 @@ What changed for people who use the dechatter widget and command line. The forma
 
 ### Added
 
+- **Reset** next to the widget's session list, and `dechatter reset <session>` (with
+  `--yes` to skip the question), discard every round of a session and keep its setup. The
+  session starts again from round 1 and its setup can be changed freely, for instance after
+  a run in the air to check the toolpath, or one with Z zero set wrong. It asks first,
+  naming the rounds and recordings lost, offers Export first, and is refused while the
+  session records or a cncjs job of its program runs.
 - **Delete** next to the widget's session list removes a session from the browser for good,
   after a confirmation that names its rounds and recordings and offers Export first. It
   works for sessions that no longer load, such as ones from dechatter 0.1.x, and is refused

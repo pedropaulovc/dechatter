@@ -688,6 +688,71 @@ def test_a_session_is_not_deleted_while_it_records(engine):
     assert engine.call("delete", NAME) == []
 
 
+def test_a_reset_discards_every_round_and_frees_the_setup(engine):
+    engine.call("plan", NAME, "same")
+    engine.run_round(1)
+    engine.call("plan", NAME, "same")
+    form = engine.call("setup_form", NAME)["values"]
+    form["tool"]["flutes"] = 2
+    with pytest.raises(RuntimeError, match="start a new session"):
+        engine.call("save_setup", NAME, json.dumps(form))
+    setup_before = (engine.root / NAME / session.SETUP_FILE).read_bytes()
+
+    assert engine.call("contents", NAME) == {"rounds": 2, "recordings": 1}
+    state = engine.call("reset", NAME)
+    assert state["rounds"] == [] and state["next"] == "plan" and state["best"] == []
+    assert sorted(p.name for p in (engine.root / NAME).iterdir()) == [session.SETUP_FILE]
+    assert (engine.root / NAME / session.SETUP_FILE).read_bytes() == setup_before
+    # Nothing has been cut any more: the setup may change, and planning starts at round 1.
+    assert engine.call("save_setup", NAME, json.dumps(form))["summary"]["flutes"] == 2
+    assert engine.call("plan", NAME, "same")["rounds"][0]["round"] == 1
+
+
+def test_a_reset_is_refused_while_recording_and_undone_if_it_fails(engine, monkeypatch):
+    engine.call("plan", NAME, "same")
+    engine.run_round(1)
+    engine.call("plan", NAME, "same")
+    engine.call("record_start", NAME, 2)
+    with pytest.raises(RuntimeError, match="round 2 of 'al-10mm' is being recorded; reset"):
+        engine.call("reset", NAME)
+    with pytest.raises(RuntimeError, match="delivered no audio"):
+        engine.call("record_stop", NAME, memoryview(np.zeros(0, np.float32)), 48000.0, "[]")
+
+    before = files(engine.root / NAME)
+    real = Path.rename
+
+    def fail_on_second(self, target):
+        if self.name == "round-02":
+            raise OSError("storage refused")
+        return real(self, target)
+
+    monkeypatch.setattr(Path, "rename", fail_on_second)
+    with pytest.raises(RuntimeError, match="storage refused"):
+        engine.call("reset", NAME)
+    monkeypatch.undo()
+    assert files(engine.root / NAME) == before
+    assert not list((engine.root / NAME).glob(".discarded-*"))
+    assert [r["round"] for r in engine.call("state", NAME)["rounds"]] == [1, 2]
+
+
+def test_the_command_line_resets_a_session_after_asking(engine, monkeypatch, capsys):
+    engine.call("plan", NAME, "same")
+    engine.run_round(1)
+    folder = engine.root / NAME
+    monkeypatch.setattr("builtins.input", lambda prompt: print(prompt) or "n")
+    assert cli.main(["reset", str(folder)]) == 1
+    out = capsys.readouterr().out
+    assert "Discard all 1 rounds and 1 recordings" in out and "nothing changed" in out
+    assert (folder / "round-01").exists()
+    monkeypatch.setattr("builtins.input", lambda prompt: "y")
+    assert cli.main(["reset", str(folder)]) == 0
+    assert not (folder / "round-01").exists()
+    engine.call("plan", NAME, "same")
+    assert cli.main(["reset", str(folder), "--yes"]) == 0
+    assert "discarded 1 rounds" in capsys.readouterr().out
+    assert sorted(p.name for p in folder.iterdir()) == [session.SETUP_FILE]
+
+
 def test_session_names_cannot_escape_the_store(engine):
     for name in ("../evil", "a/b", "", ".hidden"):
         with pytest.raises(RuntimeError, match="session names"):
