@@ -6,6 +6,12 @@ What changed for people who use the dechatter widget and command line. The forma
 
 ## [Unreleased]
 
+### Added
+
+- The widget can be installed straight from GitHub (`npm install
+  github:pedropaulovc/dechatter#main`): npm builds it on install. This needs uv on the PATH
+  and network access to download Pyodide.
+
 ## [0.2.0] - 2026-11-12
 
 ### Changed

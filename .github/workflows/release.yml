@@ -81,7 +81,7 @@ jobs:
             *) exit 1 ;;
           esac
 
-      # prepack builds web/ with `dechatter widget`: it downloads Pyodide and checks the
+      # npm pack runs prepare, which builds web/ with `dechatter widget`: it downloads Pyodide and checks the
       # numpy and scipy wheels against the hashes in Pyodide's lock file.
       - name: Build the package once and publish that build
         if: steps.npm.outputs.published == 'no'
