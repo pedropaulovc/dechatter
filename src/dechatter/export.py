@@ -37,6 +37,7 @@ WIDGET_FILES = (
     "mic-worklet.js",
     "wizard.js",
     "units.js",
+    "stepper.js",
 )
 
 Fetch = Callable[[str, Path], None]

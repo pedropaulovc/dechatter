@@ -8,6 +8,15 @@ What changed for people who use the dechatter widget and command line. The forma
 
 ### Changed
 
+- The widget runs a round itself: press Start in the widget instead of loading the program
+  into cncjs and pressing play. It sends one move at a time through cncjs and waits for the
+  controller to report Idle at its end, so it knows exactly when each cut starts and ends
+  and records those windows with the sound. Hold, Resume and Stop are in the widget. With a
+  manual spindle no `M0` is sent: the widget asks for each speed and waits for Continue, so
+  the "set the spindle" prompt shows only once the machine has stopped. Start is refused
+  while cncjs runs a job of its own, in alarm, or before the machine's units are known.
+  `program.nc` is still written, unchanged, for the command line.
+
 - On a machine in G20 the whole widget shows inches, not only the wizard and the programs:
   the session summary, round headings and pass table, the front face position, the best
   cuts, the chip-load sweep result and the stability map's axes. Inches have 4 decimals

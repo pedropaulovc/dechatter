@@ -3,6 +3,7 @@
 // and analysis are dechatter's Python running in a worker (engine.js).
 
 import { Mic } from './mic.js';
+import { PHASE, Stepper } from './stepper.js';
 import { chipLoad, feed, length, rate } from './units.js';
 import { STEPS, draw, placehold, read, reveal } from './wizard.js';
 
@@ -26,14 +27,16 @@ const cnc = {
   socket: null,
   link: 'connecting', // connecting | no-port | ready | offline
   port: '',
-  workflow: null, // idle | running | paused; null until cncjs reports it
-  program: '', // name of the G-code file cncjs has loaded
-  pause: null, // { text, settled } while the program waits at an M0, else null
+  workflow: null, // idle | running | paused: cncjs's own sender; null until cncjs reports it
+  activeState: '', // the controller's state as cncjs last reported it: Idle, Run, Hold, Alarm…
+  wpos: null, // its work position then, as cncjs reports it
+  reportInches: false, // the controller reports positions in inches (Grbl's $13=1)
   // mm | in: the machine's G21/G20 mode as cncjs last reported it; null until it has. The
   // wizard shows lengths in it and programs are written in it, so a job never changes it.
   units: null,
-  loadedUnits: null, // mm | in: the units of the program this widget last loaded into cncjs
 };
+// The round the widget is running, one block at a time: { stepper, round, name }, else null.
+let run = null;
 const mic = new Mic();
 let boot = 'Starting'; // what the engine is loading; null once it is ready
 let fatal = ''; // why the engine could not start; nothing works without it
@@ -41,15 +44,13 @@ let names = []; // sessions stored in this browser
 let current = localStorage.getItem(SESSION_KEY) ?? '';
 let state = null; // the current session, as the engine last reported it
 let editing = null; // { values, defaults, materials, computed, step } while the setup wizard is open, else null
-let timeline = []; // what cncjs reported since the job last started; saved with the recording
+let timeline = []; // the run's windows and events, saved with its recording
 // Engine requests in flight; the controls wait while there are any.
 let requests = 0;
 const busy = () => requests > 0;
 
-// Every request ends here: a job that started while it was in flight is recorded now.
 function requestDone() {
   requests -= 1;
-  syncRecording();
 }
 // The delete or reset confirmation: closed, being prepared, or open. While it is not
 // closed, the session it names cannot change.
@@ -285,9 +286,9 @@ async function downloadReport() {
   }
 }
 
-// A cncjs job of this session's own program is running or paused.
+// The widget is running a round of this session.
 function jobOf(name) {
-  return (cnc.workflow === 'running' || cnc.workflow === 'paused') && cnc.program.startsWith(`dechatter-${name}-round-`);
+  return run !== null && run.name === name;
 }
 
 // Why a session cannot be deleted or reset now; '' when it can.
@@ -296,7 +297,7 @@ function busyRefusal(name, verb) {
     return `A round is being recorded. ${verb} the session after the job.`;
   }
   if (jobOf(name)) {
-    return `cncjs is running a program of ${name}. ${verb} the session after the job.`;
+    return `A round of ${name} is running. ${verb} the session after it.`;
   }
   return '';
 }
@@ -451,7 +452,8 @@ function setPort(port) {
   // Another port may be another machine: its units are unknown until cncjs reports them.
   if (port !== cnc.port) {
     showIn(null);
-    cnc.loadedUnits = null;
+    cnc.activeState = '';
+    run?.stepper.disconnected();
   }
   cnc.port = port;
   cnc.link = port ? 'ready' : 'no-port';
@@ -488,6 +490,7 @@ async function connectCncjs() {
   });
   socket.on('disconnect', () => {
     cnc.link = 'offline';
+    run?.stepper.disconnected(); // the machine finishes the one move it has, then stands
     render();
   });
   socket.on('error', (err) => {
@@ -497,41 +500,31 @@ async function connectCncjs() {
   });
   socket.on('serialport:open', ({ port }) => setPort(port));
   socket.on('serialport:close', () => setPort(''));
-  socket.on('gcode:load', (name) => {
-    cnc.program = name;
-    render();
-  });
-  socket.on('gcode:unload', () => {
-    cnc.program = '';
-    cnc.loadedUnits = null;
-    render();
-  });
-  socket.on('sender:status', (status) => {
-    cnc.program = status.name ?? cnc.program;
-    note('sender', { sent: status.sent, received: status.received, total: status.total });
-    // A manual-spindle program stops at "M0 (set the spindle to N rpm, then resume)". cncjs
-    // reports the pause as soon as it sends the line; the machine has only stopped once
-    // everything sent was acknowledged.
-    const reason = status.hold ? status.holdReason : null;
-    const pause = reason?.data === 'M0'
-      ? { text: /\(([^)]*)\)/.exec(reason.msg ?? '')?.[1] ?? 'program pause', settled: status.received >= status.sent }
-      : null;
-    if (JSON.stringify(pause) !== JSON.stringify(cnc.pause)) {
-      cnc.pause = pause;
-      render();
+  socket.on('serialport:read', (line) => {
+    // A refused block, or an alarm, ends the run: nothing more is sent.
+    if (run && /^(error|ALARM):/.test(String(line))) {
+      note('controller', { line: String(line) });
+      run.stepper.error(String(line));
     }
+  });
+  socket.on('controller:settings', (_type, settings) => {
+    cnc.reportInches = String(settings?.settings?.$13 ?? '0') === '1';
   });
   socket.on('workflow:state', (workflow) => {
-    if (workflow === 'running' && cnc.workflow !== 'paused') {
-      timeline = [];
-    }
     cnc.workflow = workflow;
-    note('workflow', { state: workflow });
-    syncRecording();
     render();
   });
   socket.on('controller:state', (_type, controller) => {
     showIn(MACHINE_UNITS[controller?.parserstate?.modal?.units] ?? cnc.units);
+    const status = controller?.status ?? {};
+    cnc.wpos = status.wpos ?? cnc.wpos;
+    if (status.activeState !== cnc.activeState) {
+      cnc.activeState = status.activeState ?? '';
+      if (run) {
+        note('controller', { state: cnc.activeState });
+      }
+    }
+    run?.stepper.controller({ activeState: status.activeState, wpos: status.wpos });
     render();
   });
 }
@@ -549,65 +542,82 @@ window.addEventListener('message', (event) => {
   setPort(port);
 });
 
-// ---- recording follows the job ---------------------------------------------------------
-
-// cncjs holds this round's program as this widget loaded it, in the units the machine
-// reports now. After a reload of the widget the units it was loaded in are unknown.
-function loadedHere(round) {
-  return cnc.program === round.program && cnc.loadedUnits !== null && cnc.loadedUnits === cnc.units;
-}
+// ---- the widget runs the round --------------------------------------------------------
 
 function plannedRound() {
   const last = state?.rounds.at(-1);
   return last && !last.analysed ? last : null;
 }
 
-// Record exactly while cncjs runs the planned round's program.
-function syncRecording() {
-  if (!state || busy()) {
-    return;
+// Why a round cannot start now; '' when it can.
+function startRefusal() {
+  if (cnc.link !== 'ready') {
+    return 'Open the machine\'s port in cncjs first.';
   }
-  const round = plannedRound();
-  if (!mic.recording && round && cnc.workflow === 'running' && cnc.program === round.program && !loadedHere(round)) {
-    showError('This run is not recorded: the program in cncjs may be in other units than the machine is in now. Stop the job, load the program again from here, then run it.');
-    return;
+  if (cnc.units === null) {
+    return 'cncjs has not reported G20 or G21 yet: say which the machine is in.';
   }
-  if (!mic.recording && round && cnc.workflow === 'running' && loadedHere(round)) {
-    if (!mic.open) {
-      showError('The job is running but the microphone is not open, so this run cannot be analysed. Enable the microphone and run the round again.');
-      return;
-    }
-    mic.record();
-    act('record_start', round.round);
-    return;
+  if (cnc.workflow === 'running' || cnc.workflow === 'paused') {
+    return 'cncjs is running a job of its own. Let it end, or stop it, first.';
   }
-  if (mic.recording && cnc.workflow === 'idle' && cnc.link === 'ready') {
-    const samples = mic.finish();
-    act('record_stop', samples, mic.rate, JSON.stringify(timeline));
+  if (cnc.activeState === 'Alarm') {
+    return 'The machine is in alarm. Clear it in cncjs (unlock or home) first.';
   }
+  if (!mic.open) {
+    return 'Enable the microphone first.';
+  }
+  return '';
 }
 
-async function loadProgram(round) {
-  requests += 1;
-  render();
+const command = (...args) => cnc.socket.emit('command', cnc.port, ...args);
+
+// Record while the widget runs the round one block at a time; then analyse what ran.
+async function startRound(round) {
+  const refusal = startRefusal();
+  if (refusal) {
+    showError(refusal);
+    return;
+  }
+  let blocks;
   try {
-    // Capture has to be running before the job can start; the listener below does not wait.
-    await mic.resume();
-    const programUnits = cnc.units;
-    const gcode = await engine('program', current, round.round, programUnits);
-    await new Promise((resolve, reject) => {
-      cnc.socket.emit('command', cnc.port, 'gcode:load', round.program, gcode, {}, (err) =>
-        err ? reject(new Error(`cncjs could not load the program: ${err.message ?? err}`)) : resolve(),
-      );
-    });
-    cnc.program = round.program;
-    cnc.loadedUnits = programUnits;
-    showError('');
+    await mic.resume(); // capture has to be running before the first cut
+    blocks = await engine('steps', current, round.round, cnc.units);
   } catch (err) {
     showError(err.message);
-  } finally {
-    requestDone();
+    return;
+  }
+  const stepper = new Stepper({
+    io: {
+      send: (lines) => command('gcode', lines),
+      feedhold: () => command('feedhold'),
+      cyclestart: () => command('cyclestart'),
+      reset: () => command('reset'),
+      unlock: () => command('unlock'),
+    },
+    reportInches: cnc.reportInches,
+    onChange: () => render(),
+    onWindow: ({ kind, ...window }) => note(kind, window),
+  });
+  // cncjs reports the controller only when it changes: start from what it said last.
+  stepper.controller({ activeState: cnc.activeState, wpos: cnc.wpos });
+  run = { stepper, round: round.round, name: current };
+  timeline = [];
+  mic.record();
+  note('record', { round: round.round, units: cnc.units });
+  await act('record_start', round.round);
+  if (state?.recording_round !== round.round) {
+    mic.finish();
+    run = null;
     render();
+    return;
+  }
+  const outcome = await stepper.run(blocks);
+  note('run', { outcome, reason: stepper.reason });
+  const samples = mic.finish();
+  run = null;
+  await act('record_stop', samples, mic.rate, JSON.stringify(timeline));
+  if (outcome === PHASE.FAILED) {
+    showError(`The round ended early: ${stepper.reason}. The cuts made before it count.`);
   }
 }
 
@@ -700,6 +710,42 @@ function stockSelect() {
   return stock;
 }
 
+const STEP_TEXT = {
+  setup: 'Setting up',
+  rapid: 'Moving to the next pass',
+  spindle: 'Setting the spindle speed',
+  plunge: 'Plunging beside the stock',
+  dwell: 'Spindle at speed in the air',
+  cut: 'Cutting',
+  retract: 'Backing off',
+  end: 'Finishing',
+};
+
+// While the widget runs a round: where it is, and Hold, Resume, Continue and Stop.
+function runPanel({ stepper, round }) {
+  const block = stepper.block;
+  const where = block?.pass_id === null || block?.pass_id === undefined ? '' : `, pass ${block.pass_id}`;
+  const doing = stepper.phase === PHASE.HELD ? 'Held' : (STEP_TEXT[block?.step] ?? 'Starting');
+  const panel = [
+    el('p', { className: 'recording' }, `Recording round ${round}: `, el('span', { id: 'recording-clock' }, '0 s')),
+    el('p', {}, `${doing}${where} (block ${Math.max(stepper.index + 1, 1)} of ${stepper.total || '…'}).`),
+  ];
+  if (stepper.phase === PHASE.SET_SPINDLE) {
+    panel.push(el('p', { className: 'instruction' }, `Set the spindle to ${block.rpm} rpm, then `, button('Continue', () => stepper.continueSpindle(), { className: 'primary' })));
+  }
+  const controls = [];
+  if (stepper.phase === PHASE.MOVING) {
+    controls.push(button('Hold', () => stepper.hold()));
+  }
+  if (stepper.phase === PHASE.HELD) {
+    controls.push(button('Resume', () => stepper.resume(), { className: 'primary' }));
+  }
+  controls.push(button('Stop', () => stepper.stop(), { className: 'danger', disabled: stepper.phase === PHASE.STOPPING }));
+  panel.push(el('p', {}, ...controls.flatMap((c) => [c, ' '])));
+  panel.push(el('p', { className: 'muted' }, 'Stop if a cut gets violent: the cuts made so far still count. Feed hold in cncjs works too.'));
+  return panel;
+}
+
 function renderStep() {
   const step = $('step');
   step.replaceChildren();
@@ -709,12 +755,8 @@ function renderStep() {
   }
   const round = plannedRound();
 
-  if (mic.recording) {
-    step.append(
-      el('p', { className: 'recording' }, `Recording round ${state.recording_round ?? ''}: `, el('span', { id: 'recording-clock' }, '0 s')),
-      el('p', {}, 'Feed-hold and stop the job in cncjs if a cut gets violent. The passes that ran still count.'),
-      ...(cnc.pause ? [el('p', { className: 'instruction' }, cnc.pause.settled ? `Now ${cnc.pause.text} in cncjs.` : 'Wait for the machine to stop.')] : []),
-    );
+  if (run) {
+    step.append(...runPanel(run));
     return;
   }
 
@@ -777,12 +819,8 @@ function renderStep() {
 
   const tests = round.passes.filter((p) => p.kind === 'test').length;
   const speedChanges = (r) => r.passes.filter((p, i) => i === 0 || p.rpm !== r.passes[i - 1].rpm).length;
-  const loaded = loadedHere(round);
-  // The name matches, but the units it was loaded in differ or are not known: load it again.
-  const unsure = cnc.program === round.program && !loaded;
-  // The program is written in the machine's units, so they have to be known first.
-  const ready = cnc.link === 'ready' && cnc.workflow === 'idle' && cnc.units !== null && mic.open;
-  const load = button(loaded ? 'Reload program' : 'Load into cncjs', () => loadProgram(round), { className: loaded ? '' : 'primary', disabled: !ready });
+  const refusal = startRefusal();
+  const start = button('Start', () => startRound(round), { className: 'primary', disabled: Boolean(refusal) || busy() });
   // cncjs reports the mode from the controller's parser state. Until it does, the operator
   // can say which it is: the program sets that mode itself, so a wrong choice cannot
   // misplace a cut, only leave the machine in the other mode afterwards.
@@ -791,18 +829,17 @@ function renderStep() {
     showIn(declare.value || null);
     render();
   };
-  const unknownUnits = mic.open && cnc.link === 'ready' && cnc.units === null;
+  const unknownUnits = cnc.link === 'ready' && cnc.units === null;
   step.append(
     el('p', {}, `Round ${round.round}: ${tests} test cuts ${length(round.depth_mm, units(), { mmToo: true })} deep, about ${minutes(round.run_time_s)} plus rapids. The front face ends at Y ${length(round.face_y_end_mm, units(), { mmToo: true })}.`),
     el('ol', {},
       el('li', {}, 'Zero X at the left end of the stock, Y on its front face, Z on top.'),
-      el('li', {}, load, ...(unknownUnits ? [' cncjs has not reported G20 or G21 yet; the machine is in ', declare] : []), mic.open ? '' : ' (enable the microphone first)'),
-      el('li', {}, loaded ? 'Press play in cncjs. Recording starts and stops with the job. Keep this tab open.' : 'Press play in cncjs.'),
-      ...(state.spindle === 'manual' ? [el('li', {}, `The program pauses before each of its ${speedChanges(round)} spindle speeds. Set the speed shown here, then resume in cncjs.`)] : []),
+      el('li', {}, start, ' runs the round from here, one move at a time, and records it. Keep this tab open.', ...(unknownUnits ? [' cncjs has not reported G20 or G21 yet; the machine is in ', declare] : [])),
+      ...(state.spindle === 'manual' ? [el('li', {}, `Before each of its ${speedChanges(round)} spindle speeds the round stops; set the speed shown here and press Continue.`)] : []),
     ),
   );
-  if (unsure) {
-    step.append(el('p', { className: 'instruction' }, 'cncjs holds this round\'s program, but it was loaded in other units than the machine is in now, or before this widget was reloaded. Load it again before pressing play; a run of it as it is will not be recorded.'));
+  if (refusal && !unknownUnits) {
+    step.append(el('p', { className: 'muted' }, refusal));
   }
   if (round.has_recording) {
     step.append(el('p', {}, 'The last run could not be analysed. Run the round again, or ', button('Analyse the last recording again', () => act('analyze', round.round))));
@@ -1007,8 +1044,9 @@ for (const type of ['pointerdown', 'pointerup', 'keydown']) {
 }
 
 // Leaving mid-recording loses the run: the samples are only in this page.
+// Leaving mid-round loses the recording; the machine finishes its one move and stands.
 window.addEventListener('beforeunload', (event) => {
-  if (mic.recording) {
+  if (run || mic.recording) {
     event.preventDefault();
   }
 });

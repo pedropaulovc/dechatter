@@ -1083,6 +1083,17 @@ def test_the_command_line_writes_the_report(engine, tmp_path, capsys):
     assert "--units applies to the HTML report only" in capsys.readouterr().err
 
 
+def test_the_widget_gets_the_round_as_blocks_in_the_machine_units(engine):
+    engine.call("plan", NAME, "same")
+    blocks = engine.call("steps", NAME, 1, "in")
+    assert blocks[0]["step"] == "setup" and blocks[0]["lines"][0].startswith("G20")
+    cut = next(b for b in blocks if b["step"] == "cut")
+    assert cut["lines"][0].startswith("G1 X") and cut["target"]["z"] == pytest.approx(
+        -5.0, abs=0.003
+    )
+    assert blocks[-1]["step"] == "end"
+
+
 def test_export_round_trips_into_another_browser(engine, tmp_path):
     engine.call("plan", NAME, "same")
     before = engine.run_round(1)

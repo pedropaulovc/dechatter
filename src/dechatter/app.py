@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 
 from . import audio, bayes, gcode, session
-from .config import SetupSource, read_setup, setup_source
+from .config import Setup, SetupSource, read_setup, setup_source
 from .detect import Thresholds, Verdict
 from .plan import PassKind, envelope, feed_mm_min
 from .session import PassStatus, SessionError, Stock
@@ -185,11 +185,19 @@ class App:
         session.plan_sweep(self.session_dir, self.source, self.env, stock)
         self.discarded_round = None
 
+    def _planned(self, number: int) -> tuple[session.Round, Setup]:
+        target = self._round(number)
+        return target, session.at_depth(session.planned_with(target), target.plan.axial_depth_mm)
+
     def program(self, number: int, units: gcode.Units) -> str:
         """The round's program in the machine's units. The file beside the plan is in mm."""
-        target = self._round(number)
-        planned = session.at_depth(session.planned_with(target), target.plan.axial_depth_mm)
+        target, planned = self._planned(number)
         return gcode.render(target.plan, planned, units)
+
+    def steps(self, number: int, units: gcode.Units) -> list[dict]:
+        """The round's program as the blocks the widget runs one at a time."""
+        target, planned = self._planned(number)
+        return [asdict(block) for block in gcode.blocks(target.plan, planned, units)]
 
     def record_start(self, number: int) -> None:
         if self.recording_round is not None:
