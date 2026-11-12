@@ -254,6 +254,60 @@ async function downloadReport() {
   }
 }
 
+// A cncjs job of this session's own program is running or paused.
+function jobOf(name) {
+  return (cnc.workflow === 'running' || cnc.workflow === 'paused') && cnc.program.startsWith(`dechatter-${name}-round-`);
+}
+
+function deleteRefusal(name) {
+  if (mic.recording) {
+    return 'A round is being recorded. Delete the session after the job.';
+  }
+  if (jobOf(name)) {
+    return `cncjs is running a program of ${name}. Delete the session after the job.`;
+  }
+  return '';
+}
+
+// Ask before deleting, naming what goes. It reads nothing but the folder, so a session that
+// does not load (from dechatter 0.1.x, or damaged) can go too.
+async function askDelete() {
+  const name = current;
+  const refusal = deleteRefusal(name);
+  if (refusal) {
+    showError(refusal);
+    return;
+  }
+  try {
+    const { rounds, recordings } = await engine('contents', name);
+    const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+    $('delete-question').textContent = `Delete session ${name}? It holds ${plural(rounds, 'round')} and ${plural(recordings, 'recording')}.`;
+    $('delete-note').textContent = 'Deleting cannot be undone. Export keeps a copy as a zip.';
+    $('delete-dialog').dataset.session = name;
+    $('delete-dialog').showModal();
+  } catch (err) {
+    showError(err.message);
+  }
+}
+
+async function deleteSession() {
+  const name = $('delete-dialog').dataset.session;
+  $('delete-dialog').close();
+  const refusal = deleteRefusal(name);
+  if (refusal) {
+    showError(refusal);
+    return;
+  }
+  try {
+    names = await engine('delete', name);
+    showError('');
+    await openSession('');
+  } catch (err) {
+    showError(err.message);
+  }
+  render();
+}
+
 async function importSession(file) {
   try {
     const name = await engine('import_zip', new Uint8Array(await file.arrayBuffer()));
@@ -527,6 +581,8 @@ function renderSessions() {
   for (const id of ['edit-setup', 'export']) {
     $(id).disabled = !state || busy || mic.recording;
   }
+  // Also for a session that failed to load: deleting it is the way to be rid of it.
+  $('delete-session').disabled = !names.includes(current) || busy || Boolean(deleteRefusal(current));
 }
 
 function minutes(seconds) {
@@ -843,6 +899,15 @@ $('cancel-setup').onclick = () => {
   render();
 };
 $('export').onclick = exportSession;
+$('delete-session').onclick = askDelete;
+// The page's error line is behind the dialog: say there how the export went.
+$('delete-export').onclick = async () => {
+  showError('');
+  await exportSession();
+  $('delete-note').textContent = $('error').hidden ? 'Exported. Delete it now, or cancel.' : `Not exported: ${$('error').textContent}`;
+};
+$('delete-confirm').onclick = deleteSession;
+$('delete-cancel').onclick = () => $('delete-dialog').close();
 $('download-report').onclick = downloadReport;
 $('import').onclick = () => $('import-file').click();
 $('import-file').onchange = () => {

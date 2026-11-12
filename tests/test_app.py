@@ -640,6 +640,54 @@ def test_saved_setup_pins_shown_values_and_survives_unstorable_text(engine):
     assert path.read_text(encoding="utf-8") == written
 
 
+def test_a_session_can_be_deleted(engine):
+    engine.call("plan", NAME, "same")
+    engine.run_round(1)
+    engine.call("plan", NAME, "same")
+    engine.call("create", "other")
+    assert engine.call("contents", NAME) == {"rounds": 2, "recordings": 1}
+    assert engine.call("delete", NAME) == ["other"]
+    assert not (engine.root / NAME).exists()
+    with pytest.raises(RuntimeError, match="no session named"):
+        engine.call("state", NAME)
+    # The name is free again, for a fresh session.
+    engine.call("create", NAME)
+    assert engine.call("state", NAME)["rounds"] == []
+    for bad in ("../sessions", "a/b", ""):
+        with pytest.raises(RuntimeError, match="session names"):
+            engine.call("delete", bad)
+    with pytest.raises(RuntimeError, match="no session named 'missing'"):
+        engine.call("delete", "missing")
+
+
+def test_a_session_that_cannot_load_can_still_be_deleted(engine):
+    """A 0.1.x session: its setup and rounds are never read."""
+    old = engine.root / "old-011"
+    for number in (1, 2):
+        folder = old / f"round-{number:02d}"
+        folder.mkdir(parents=True)
+        (folder / session.PLAN_FILE).write_text('{"schema": 1}')
+    (old / "round-01" / "recording.wav").write_bytes(b"RIFF")
+    setup_011 = (Path(__file__).parent / "fixtures" / "setup-0.1.1.toml").read_text()
+    (old / session.SETUP_FILE).write_text(setup_011)
+    with pytest.raises(RuntimeError, match="0.1.x"):
+        engine.call("state", "old-011")
+    assert engine.call("contents", "old-011") == {"rounds": 2, "recordings": 1}
+    assert engine.call("delete", "old-011") == [NAME]
+    assert not old.exists()
+
+
+def test_a_session_is_not_deleted_while_it_records(engine):
+    engine.call("plan", NAME, "same")
+    engine.call("record_start", NAME, 1)
+    with pytest.raises(RuntimeError, match="round 1 of 'al-10mm' is being recorded"):
+        engine.call("delete", NAME)
+    assert (engine.root / NAME / "round-01").exists()
+    with pytest.raises(RuntimeError, match="delivered no audio"):
+        engine.call("record_stop", NAME, memoryview(np.zeros(0, np.float32)), 48000.0, "[]")
+    assert engine.call("delete", NAME) == []
+
+
 def test_session_names_cannot_escape_the_store(engine):
     for name in ("../evil", "a/b", "", ".hidden"):
         with pytest.raises(RuntimeError, match="session names"):

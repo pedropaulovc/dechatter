@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 
 from . import gcode, materials, report, session
-from .app import App
+from .app import RECORDING_FILE, App
 from .audio import AudioError
 from .config import (
     TEMPLATE,
@@ -54,10 +54,9 @@ class Sessions:
 
     def _app(self, name: str) -> App:
         if name not in self._apps:
-            if not (self._dir(name) / session.SETUP_FILE).exists():
-                raise SessionError(f"no session named {name!r}")
-            session.sweep_discarded(self._dir(name))
-            self._apps[name] = App(self._dir(name), self.thresholds)
+            target = self._existing(name)
+            session.sweep_discarded(target)
+            self._apps[name] = App(target, self.thresholds)
         return self._apps[name]
 
     def names(self) -> list[str]:
@@ -70,6 +69,36 @@ class Sessions:
         target.mkdir()
         (target / session.SETUP_FILE).write_text(TEMPLATE, encoding="utf-8")
         return name
+
+    def _existing(self, name: str) -> Path:
+        """A session's directory, without reading anything in it: it may not load."""
+        target = self._dir(name)
+        if not (target / session.SETUP_FILE).exists():
+            raise SessionError(f"no session named {name!r}")
+        return target
+
+    def contents(self, name: str) -> dict:
+        """What deleting a session would lose, counted without loading it."""
+        target = self._existing(name)
+        rounds = [p for p in target.glob("round-*") if p.is_dir()]
+        return {
+            "rounds": len(rounds),
+            "recordings": sum((r / RECORDING_FILE).exists() for r in rounds),
+        }
+
+    def delete(self, name: str) -> list[str]:
+        """Remove a session for good, whether or not it loads; answer the names left."""
+        target = self._existing(name)
+        opened = self._apps.get(name)
+        if opened is not None and opened.recording_round is not None:
+            raise SessionError(
+                f"round {opened.recording_round} of {name!r} is being recorded; delete the "
+                "session after the job"
+            )
+        self._apps.pop(name, None)
+        shutil.rmtree(target)
+        log.info("deleted session %s", name)
+        return self.names()
 
     def setup_form(self, name: str) -> dict:
         """What the widget's setup wizard needs: the current values and the material choices."""

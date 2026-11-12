@@ -5,7 +5,7 @@ import { loadPyodide } from './pyodide/pyodide.js';
 
 const ROOT = '/sessions';
 // Calls that change files; the filesystem is flushed to IndexedDB after each of them.
-const WRITES = new Set(['create', 'save_setup', 'plan', 'plan_sweep', 'record_stop', 'analyze', 'set_verdict', 'import_zip']);
+const WRITES = new Set(['create', 'delete', 'save_setup', 'plan', 'plan_sweep', 'record_stop', 'analyze', 'set_verdict', 'import_zip']);
 
 let pyodide;
 let call;

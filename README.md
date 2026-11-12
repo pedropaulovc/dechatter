@@ -116,7 +116,9 @@ Sessions are stored in that browser (IndexedDB), per cncjs address. Export saves
 holding `setup.toml` and each round's plan, program, `recording.wav`, results and the job
 timeline cncjs reported, plus `report.html`. Import loads it in another browser, and unzipped it is a session
 folder the command line reads. Keep the tab open while a round runs: the recording lives in
-the page until the job ends.
+the page until the job ends. Delete, next to the session list, removes a session for good
+after asking (and offering Export first). It also removes sessions that no longer load,
+such as ones from dechatter 0.1.x, and waits while that session records or its job runs.
 
 ### Manual spindle
 
