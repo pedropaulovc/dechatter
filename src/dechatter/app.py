@@ -6,6 +6,7 @@ analysis, files) is the same code the command line uses.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from dataclasses import asdict
@@ -14,8 +15,8 @@ from pathlib import Path
 
 import numpy as np
 
-from . import audio, bayes, session
-from .config import SpindleControl, load_setup
+from . import audio, bayes, gcode, session
+from .config import SetupSource, SpindleControl, read_setup, setup_source
 from .detect import Thresholds, Verdict
 from .plan import PassKind, envelope, feed_mm_min
 from .session import PassStatus, SessionError, Stock
@@ -24,27 +25,41 @@ log = logging.getLogger(__name__)
 
 RECORDING_FILE = "recording.wav"
 TIMELINE_FILE = "timeline.json"
-MAP_SPEEDS = 48
-MAP_WIDTHS = 24
 TOP_RESULTS = 5
+PROGRAM_ID_LENGTH = 6
 
 
 class Next(StrEnum):
+    SETUP = "setup"  # the setup is still the template: fill it in before planning
     PLAN = "plan"  # plan the first or the next round
     RUN = "run"  # a round is planned: load it, cut it, record it
-    CONVERGED = "converged"
+    SWEEP = "sweep"  # converged; a chip-load sweep of the best cut is on offer
+    CONVERGED = "converged"  # converged, and the best cut's chip load swept
 
 
 class App:
     def __init__(self, session_dir: Path, thresholds: Thresholds):
         self.session_dir = session_dir
         self.thresholds = thresholds
-        self.setup = load_setup(session_dir / session.SETUP_FILE)
+        # Kept as read: a round planned now stores exactly the setup it was planned from.
+        self.source = read_setup(
+            (session_dir / session.SETUP_FILE).read_text(encoding="utf-8"), session.SETUP_FILE
+        )
+        self.setup = self.source.setup
         self.env = envelope(self.setup)
         self.recording_round: int | None = None
+        self.discarded_round: int | None = None  # unrun round a setup change threw away
 
-    def program_name(self, number: int) -> str:
-        return f"dechatter-{self.session_dir.resolve().name}-round-{number:02d}.nc"
+    def program_name(self, r: session.Round) -> str:
+        """Names one planned program: a round planned again after a setup change gets a new
+        name, so a program still loaded in cncjs never passes for it."""
+        digest = hashlib.sha256()
+        for name in (session.SETUP_FILE, session.PLAN_FILE):
+            digest.update((r.path / name).read_bytes())
+        return (
+            f"dechatter-{self.session_dir.resolve().name}-round-{r.plan.round:02d}-"
+            f"{digest.hexdigest()[:PROGRAM_ID_LENGTH]}.nc"
+        )
 
     def _round(self, number: int) -> session.Round:
         for candidate in session.load_rounds(self.session_dir):
@@ -56,24 +71,26 @@ class App:
         rounds = session.load_rounds(self.session_dir)
         # What is shown belongs to the depth of the latest round: the one planned or just cut.
         depth = rounds[-1].plan.axial_depth_mm if rounds else self.setup.cut.axial_depth_mm
-        observations = session.observations(rounds, depth)
+        observations = session.observations(rounds, depth, self.env)
         stability = bayes.build_map(
-            session.at_depth(self.setup, depth), self.env, session.evidence(rounds, depth)
+            session.at_depth(self.setup, depth), self.env, session.evidence(rounds, depth, self.env)
         )
-        speeds = np.unique(
-            np.linspace(0, len(stability.speeds) - 1, MAP_SPEEDS).round().astype(int)
-        )
-        widths = np.unique(
-            np.linspace(0, len(stability.widths) - 1, MAP_WIDTHS).round().astype(int)
-        )
+        shown = bayes.coarse(stability)
 
+        found = session.best_cuts(self.setup, self.env, rounds)
+        sweep = session.swept(found, session.sweeps(rounds, self.env))
         upcoming, next_depth = Next.PLAN, self.setup.cut.axial_depth_mm
         if rounds and rounds[-1].results is None:
             upcoming, next_depth = Next.RUN, depth
         if rounds and rounds[-1].results is not None:
-            stage = session.next_stage(self.setup, self.env, rounds)
+            stage = session.next_stage(self.setup, self.env, rounds, found)
             upcoming = Next.PLAN if stage.tests else Next.CONVERGED
             next_depth = stage.depth_mm
+        if upcoming is Next.CONVERGED and session.to_sweep(self.setup, self.env, found, sweep):
+            upcoming = Next.SWEEP
+        template = setup_source(self.source.text) is SetupSource.TEMPLATE
+        if upcoming is Next.PLAN and template:
+            upcoming = Next.SETUP
 
         tool, cut = self.setup.tool, self.setup.cut
         manual = self.setup.machine.spindle is SpindleControl.MANUAL
@@ -90,6 +107,7 @@ class App:
             "next_depth_mm": next_depth,
             "depth_mm": depth,
             "recording_round": self.recording_round,
+            "discarded_round": self.discarded_round,
             "rounds": [self._round_json(r) for r in rounds],
             "observations": [
                 {"rpm": o.rpm, "width_mm": o.width_mm, "verdict": o.verdict} for o in observations
@@ -102,13 +120,14 @@ class App:
                     "feed_mm_min": round(feed_mm_min(self.setup, self.env, best.rpm)),
                     "mrr_cm3_min": round(best.mrr_mm3_min / 1000, 2),
                 }
-                for best in session.best_cuts(self.setup, self.env, rounds)[:TOP_RESULTS]
+                for best in found[:TOP_RESULTS]
             ],
             "map": {
-                "speeds": stability.speeds[speeds].tolist(),
-                "widths": stability.widths[widths].round(2).tolist(),
-                "p": stability.p_stable()[np.ix_(speeds, widths)].round(3).tolist(),
+                "speeds": shown.speeds.tolist(),
+                "widths": shown.widths.round(2).tolist(),
+                "p": shown.p.round(3).tolist(),
             },
+            "sweep": None if sweep is None else self._sweep_json(sweep),
         }
 
     def _round_json(self, r: session.Round) -> dict:
@@ -124,6 +143,7 @@ class App:
                     "width_mm": p.width_mm,
                     "feed_mm_min": p.feed_mm_min,
                     "p_stable": p.p_stable,
+                    "chip_load_mm": p.chip_load_mm or r.plan.chip_load_mm,
                     "status": result.status if result else None,
                     "verdict": result.verdict if result else None,
                     "chatter_hz": result.chatter_hz if result else None,
@@ -134,7 +154,7 @@ class App:
             "round": r.plan.round,
             "depth_mm": r.plan.axial_depth_mm,
             "planner": r.plan.planner,
-            "program": self.program_name(r.plan.round),
+            "program": self.program_name(r),
             "run_time_s": round(r.plan.run_time_s),
             "face_y_end_mm": round(r.plan.face_y_start_mm + r.plan.consumed_mm, 2),
             "analysed": r.results is not None,
@@ -142,11 +162,33 @@ class App:
             "passes": passes,
         }
 
-    def plan(self, stock: Stock) -> None:
-        session.plan_next(self.session_dir, self.setup, self.env, stock)
+    def _sweep_json(self, sweep: session.Sweep) -> dict:
+        return {
+            "round": sweep.round,
+            "rpm": sweep.rpm,
+            "width_mm": sweep.width_mm,
+            "depth_mm": sweep.depth_mm,
+            "session_chip_load_mm": sweep.session_chip_load_mm,
+            "chip_load_mm": sweep.stable_chip_load_mm,
+            "feed_mm_min": None if sweep.feed_mm_min is None else round(sweep.feed_mm_min),
+            "mrr_cm3_min": None
+            if sweep.mrr_mm3_min is None
+            else round(sweep.mrr_mm3_min / 1000, 2),
+        }
 
-    def program(self, number: int) -> str:
-        return (self._round(number).path / session.PROGRAM_FILE).read_text(encoding="ascii")
+    def plan(self, stock: Stock) -> None:
+        session.plan_next(self.session_dir, self.source, self.env, stock)
+        self.discarded_round = None
+
+    def plan_sweep(self, stock: Stock) -> None:
+        session.plan_sweep(self.session_dir, self.source, self.env, stock)
+        self.discarded_round = None
+
+    def program(self, number: int, units: gcode.Units) -> str:
+        """The round's program in the machine's units. The file beside the plan is in mm."""
+        target = self._round(number)
+        planned = session.at_depth(session.planned_with(target), target.plan.axial_depth_mm)
+        return gcode.render(target.plan, planned, units)
 
     def record_start(self, number: int) -> None:
         if self.recording_round is not None:

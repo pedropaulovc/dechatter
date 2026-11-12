@@ -9,11 +9,12 @@ from pathlib import Path
 
 import numpy as np
 
-from . import audio, bayes, materials, session
+from . import audio, bayes, materials, report, session
 from .audio import AudioError
-from .config import TEMPLATE, ConfigError, Setup, load_setup
+from .config import TEMPLATE, ConfigError, Setup, load_setup, read_setup
 from .detect import Thresholds, Verdict
 from .export import ExportError, export
+from .gcode import Units
 from .plan import Envelope, PassKind, Plan, PlanError, envelope
 from .session import PassStatus, SessionError, Stock
 
@@ -46,10 +47,10 @@ def _print_known(setup: Setup, env: Envelope, rounds: list[session.Round]) -> No
     """The stability map of each depth that was cut, then the best cuts of them all."""
     for depth in sorted({r.plan.axial_depth_mm for r in rounds}, reverse=True):
         stability = bayes.build_map(
-            session.at_depth(setup, depth), env, session.evidence(rounds, depth)
+            session.at_depth(setup, depth), env, session.evidence(rounds, depth, env)
         )
         print(f"depth {depth:g} mm:")
-        _print_map(stability, session.observations(rounds, depth))
+        _print_map(stability, session.observations(rounds, depth, env))
     ranked = session.best_cuts(setup, env, rounds)
     if not ranked:
         print("no stable cut measured yet")
@@ -61,6 +62,21 @@ def _print_known(setup: Setup, env: Envelope, rounds: list[session.Round]) -> No
             f"  S{cut.rpm:.0f}  width {cut.width_mm:.2f} mm  depth {cut.depth_mm:g} mm"
             f"  F{feed:.0f} mm/min  {cut.mrr_mm3_min / 1000:.2f} cm3/min"
         )
+    for sweep in session.sweeps(rounds, env):
+        _print_sweep(sweep)
+
+
+def _print_sweep(sweep: session.Sweep) -> None:
+    where = f"S{sweep.rpm:.0f} width {sweep.width_mm:.2f} mm depth {sweep.depth_mm:g} mm"
+    found = sweep.stable_chip_load_mm
+    if found is None:
+        print(f"chip-load sweep (round {sweep.round}) at {where}: its lightest pass chattered")
+        return
+    print(
+        f"chip-load sweep (round {sweep.round}) at {where}: stable up to {found:g} mm/tooth"
+        f" ({found / sweep.session_chip_load_mm:.2f}x the session's),"
+        f" F{sweep.feed_mm_min:.0f} mm/min"
+    )
 
 
 def _print_map(stability: bayes.StabilityMap, observations: list[bayes.Observation]) -> None:
@@ -95,17 +111,28 @@ def _print_round(session_dir: Path, plan: Plan) -> None:
     )
     for p in tests:
         chance = "" if p.p_stable is None else f"  P(stable) {p.p_stable:.2f}"
-        print(f"  pass {p.id:2d}: S{p.rpm} width {p.width_mm:.2f} mm F{p.feed_mm_min:.0f}{chance}")
+        chip = "" if p.chip_load_mm is None else f"  {p.chip_load_mm:g} mm/tooth"
+        print(
+            f"  pass {p.id:2d}: S{p.rpm} width {p.width_mm:.2f} mm F{p.feed_mm_min:.0f}"
+            f"{chance}{chip}"
+        )
     print(f"wrote {session.round_dir(session_dir, plan.round) / session.PROGRAM_FILE}")
     print(f"run it while recording, then: dechatter analyze {session_dir} <recording>")
 
 
 def cmd_plan(args: argparse.Namespace) -> int:
-    setup = load_setup(args.session / session.SETUP_FILE)
+    source = read_setup(
+        (args.session / session.SETUP_FILE).read_text(encoding="utf-8"), session.SETUP_FILE
+    )
+    setup = source.setup
     env = envelope(setup)
     rounds = session.load_rounds(args.session)
     stock = Stock.FRESH if args.new_stock else Stock.SAME
-    planned = session.plan_next(args.session, setup, env, stock)
+    if args.sweep:
+        plan = session.plan_sweep(args.session, source, env, stock)
+        _print_round(args.session, plan)
+        return 0
+    planned = session.plan_next(args.session, source, env, stock)
     if any(r.results is not None for r in rounds):
         _print_known(setup, env, rounds)
     if planned.plan is None:
@@ -113,6 +140,13 @@ def cmd_plan(args: argparse.Namespace) -> int:
             f"converged: no further cut is expected to add {setup.planner.stop_improvement:.0%} "
             f"removal rate (best candidate {planned.expected_improvement:.1%})"
         )
+        found = session.best_cuts(setup, env, rounds)
+        sweep = session.swept(found, session.sweeps(rounds, env))
+        if session.to_sweep(setup, env, found, sweep):
+            print(
+                f"to find how far the chip load can go at the best cut: "
+                f"dechatter plan {args.session} --sweep"
+            )
         return 0
     _print_round(args.session, planned.plan)
     return 0
@@ -157,6 +191,11 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
 
 def cmd_report(args: argparse.Namespace) -> int:
+    if args.html:
+        units = Units(args.units or Units.MM)
+        args.html.write_text(report.render(args.session, units), encoding="utf-8")
+        print(f"wrote {args.html}")
+        return 0
     setup = load_setup(args.session / session.SETUP_FILE)
     env = envelope(setup)
     rounds = session.load_rounds(args.session)
@@ -192,6 +231,11 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument(
         "--new-stock", action="store_true", help="fresh stock is mounted: front face is back at Y0"
     )
+    plan.add_argument(
+        "--sweep",
+        action="store_true",
+        help="once converged: try the best cut at rising chip loads",
+    )
     plan.set_defaults(run=cmd_plan)
 
     analyze = commands.add_parser(
@@ -206,9 +250,17 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--excess-db", type=float, default=defaults.excess_db)
     analyze.set_defaults(run=cmd_analyze)
 
-    report = commands.add_parser("report", help="show the stability map and the best stable cuts")
-    report.add_argument("session", type=Path)
-    report.set_defaults(run=cmd_report)
+    summary = commands.add_parser(
+        "report", help="show the stability map and the best stable cuts, or write them as HTML"
+    )
+    summary.add_argument("session", type=Path)
+    summary.add_argument("--html", type=Path, help="write a printable HTML report to this file")
+    summary.add_argument(
+        "--units",
+        choices=[u.value for u in Units],
+        help="with --html: lengths in the machine's mm (G21, the default) or in (G20)",
+    )
+    summary.set_defaults(run=cmd_report)
 
     listing = commands.add_parser("materials", help="list the built-in material table")
     listing.set_defaults(run=cmd_materials)
@@ -220,7 +272,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if getattr(args, "units", None) and not args.html:
+        parser.error("--units applies to the HTML report only: add --html <file>")
     logging.basicConfig(
         level=logging.INFO if args.verbose else logging.WARNING, format="%(levelname)s %(message)s"
     )

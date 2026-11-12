@@ -5,6 +5,8 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import shutil
+import uuid
 from dataclasses import asdict, dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -13,7 +15,7 @@ import numpy as np
 
 from . import audio, bayes, detect, gcode
 from .bayes import Observation
-from .config import Setup
+from .config import Setup, SetupFile, SetupSource, load_setup, setup_source
 from .detect import Thresholds, Verdict
 from .plan import (
     Envelope,
@@ -21,14 +23,16 @@ from .plan import (
     Plan,
     PlanError,
     PlannerKind,
+    SchemaError,
     assemble,
     grid_tests,
     mrr_mm3_min,
+    sweep_tests,
 )
 
 log = logging.getLogger(__name__)
 
-SCHEMA = 1
+SCHEMA = 2  # 2: dechatter 0.2.0 (the detector's own verdict)
 SETUP_FILE = "setup.toml"
 PLAN_FILE = "plan.json"
 PROGRAM_FILE = "program.nc"
@@ -63,6 +67,16 @@ class PassResult:
     excess_db: float | None = None
     start_s: float | None = None
     end_s: float | None = None
+    detected: Verdict | None = None  # the detector's own verdict; `verdict` may be overruled
+
+
+class VerdictSource(StrEnum):
+    DETECTOR = "detector"
+    OPERATOR = "operator"  # overruled or set by hand, in the widget or in results.json
+
+
+def verdict_source(p: PassResult) -> VerdictSource:
+    return VerdictSource.DETECTOR if p.verdict is p.detected else VerdictSource.OPERATOR
 
 
 @dataclass(frozen=True)
@@ -80,7 +94,7 @@ class Results:
     def load(path: Path) -> Results:
         data = json.loads(path.read_text(encoding="utf-8"))
         if data.get("schema") != SCHEMA:
-            raise SessionError(f"{path}: unsupported results schema {data.get('schema')}")
+            raise SchemaError(path, data.get("schema"), SCHEMA)
         passes = tuple(
             PassResult(
                 **{
@@ -88,6 +102,7 @@ class Results:
                     "kind": PassKind(p["kind"]),
                     "status": PassStatus(p["status"]),
                     "verdict": Verdict(p["verdict"]) if p["verdict"] else None,
+                    "detected": Verdict(p["detected"]) if p["detected"] else None,
                 }
             )
             for p in data.pop("passes")
@@ -106,45 +121,93 @@ def round_dir(session: Path, number: int) -> Path:
     return session / f"round-{number:02d}"
 
 
+def _read(path: Path, load):
+    """A round's file, or a SessionError that says what to do about it."""
+    try:
+        return load(path)
+    except SchemaError as exc:
+        raise SessionError(f"{path.parent.name}/{exc}. Start a new session") from exc
+    except (KeyError, TypeError, ValueError) as exc:
+        problem = f"missing {exc}" if isinstance(exc, KeyError) else str(exc)
+        raise SessionError(
+            f"{path.parent.name}/{path.name} cannot be read ({problem}). Fix it by hand, or "
+            "remove the round"
+        ) from exc
+
+
 def load_rounds(session: Path) -> list[Round]:
+    """The session's rounds. A round this version cannot read is refused, and with it the
+    session, with what to do: start a new session for an older one, else repair it."""
     rounds = []
     for plan_path in sorted(session.glob(f"round-*/{PLAN_FILE}")):
+        plan = _read(plan_path, Plan.load)
+        if not plan_path.with_name(SETUP_FILE).exists():
+            raise SessionError(
+                f"{plan_path.parent.name}/{SETUP_FILE} is missing: the copy of the setup the "
+                "round was planned from. Put it back, or remove the round"
+            )
         results_path = plan_path.with_name(RESULTS_FILE)
-        results = Results.load(results_path) if results_path.exists() else None
-        rounds.append(Round(plan_path.parent, Plan.load(plan_path), results))
+        results = _read(results_path, Results.load) if results_path.exists() else None
+        rounds.append(Round(plan_path.parent, plan, results))
     return rounds
 
 
 DEPTH_TOLERANCE_MM = 1e-6
 
 
-def _cuts(rounds: list[Round], wanted) -> list[Observation]:
-    """Classified test cuts of the rounds whose depth `wanted` accepts."""
+def _tests(rounds: list[Round], wanted) -> list[Observation]:
+    """Classified test cuts of the rounds whose depth `wanted` accepts, as they were made.
+
+    A chip-load sweep is left out: its cuts are not at the session's chip load.
+    """
     return [
         Observation(p.rpm, p.width_mm, p.verdict, p.chatter_hz)
         for r in rounds
-        if r.results is not None and wanted(r.plan.axial_depth_mm)
+        if r.results is not None
+        and r.plan.planner is not PlannerKind.SWEEP
+        and wanted(r.plan.axial_depth_mm)
         for p in r.results.passes
         if p.kind is PassKind.TEST and p.verdict is not None
     ]
 
 
-def observations(rounds: list[Round], depth_mm: float) -> list[Observation]:
-    """The test cuts made at one depth."""
-    return _cuts(rounds, lambda depth: abs(depth - depth_mm) <= DEPTH_TOLERANCE_MM)
+def _at(depth_mm: float):
+    return lambda depth: abs(depth - depth_mm) <= DEPTH_TOLERANCE_MM
 
 
-def evidence(rounds: list[Round], depth_mm: float) -> list[Observation]:
+def _cuts(rounds: list[Round], env: Envelope, wanted) -> list[Observation]:
+    """What the cuts tell the map searched now; its bounds may have narrowed since.
+
+    A cut at a speed outside the search, or chatter wider than the widest width searched,
+    says nothing about the cells searched. A stable cut that wide proves every narrower
+    width stable, so it counts as stable at the widest width. The cuts stay in their rounds.
+    """
+    found = []
+    for o in _tests(rounds, wanted):
+        if env.contains(o.rpm, o.width_mm):
+            found.append(o)
+            continue
+        if env.holds_speed(o.rpm) and o.verdict is Verdict.STABLE:
+            found.append(Observation(o.rpm, env.width_top_mm, o.verdict, o.chatter_hz))
+    return found
+
+
+def observations(rounds: list[Round], depth_mm: float, env: Envelope) -> list[Observation]:
+    """The test cuts made at one depth, as the map searched now sees them."""
+    return _cuts(rounds, env, _at(depth_mm))
+
+
+def evidence(rounds: list[Round], depth_mm: float, env: Envelope) -> list[Observation]:
     """What is known at one depth: the cuts made there, and the stable cuts made deeper.
 
     A width that was stable in a deeper cut is stable in a shallower one. Chatter in a
     deeper cut says nothing here, so those cuts are left out.
     """
-    deeper = _cuts(rounds, lambda depth: depth > depth_mm + DEPTH_TOLERANCE_MM)
+    deeper = _cuts(rounds, env, lambda depth: depth > depth_mm + DEPTH_TOLERANCE_MM)
     carried = [
         Observation(o.rpm, o.width_mm, o.verdict) for o in deeper if o.verdict is Verdict.STABLE
     ]
-    return [*observations(rounds, depth_mm), *carried]
+    return [*observations(rounds, depth_mm, env), *carried]
 
 
 def depths(setup: Setup) -> list[float]:
@@ -168,9 +231,10 @@ class StableCut:
 
 
 def best_cuts(setup: Setup, env: Envelope, rounds: list[Round]) -> list[StableCut]:
-    """Every stable test cut of the session, at whatever depth, highest removal rate first."""
+    """Every stable test cut of the session inside the search now, power cap included, at
+    whatever depth, highest removal rate first."""
     cut_depths = sorted({r.plan.axial_depth_mm for r in rounds}, reverse=True)
-    found = [
+    made = [
         StableCut(
             float(mrr_mm3_min(at_depth(setup, depth), env, o.rpm, o.width_mm)),
             depth,
@@ -178,9 +242,10 @@ def best_cuts(setup: Setup, env: Envelope, rounds: list[Round]) -> list[StableCu
             o.width_mm,
         )
         for depth in cut_depths
-        for o in observations(rounds, depth)
-        if o.verdict is Verdict.STABLE
+        for o in _tests(rounds, _at(depth))
+        if o.verdict is Verdict.STABLE and env.contains(o.rpm, o.width_mm)
     ]
+    found = [cut for cut in made if cut.mrr_mm3_min <= env.mrr_limit_mm3_min * (1 + 1e-9)]
     return sorted(found, key=lambda cut: -cut.mrr_mm3_min)
 
 
@@ -194,16 +259,16 @@ class Stage:
     expected_improvement: float
 
 
-def next_stage(setup: Setup, env: Envelope, rounds: list[Round]) -> Stage:
-    """The first depth, in session order, that still has a cut worth making."""
+def next_stage(setup: Setup, env: Envelope, rounds: list[Round], found: list[StableCut]) -> Stage:
+    """The first depth, in session order, that still has a cut worth making; `found` is
+    the session's best cuts, which set the removal rate to beat."""
     base = setup.cut.axial_depth_mm
     if not rounds:
         return Stage(base, PlannerKind.GRID, grid_tests(setup, env), 0.0)
-    found = best_cuts(setup, env, rounds)
     target = found[0].mrr_mm3_min if found else 0.0
     stage = Stage(base, PlannerKind.BAYES, [], 0.0)
     for depth in depths(setup):
-        proposal = bayes.propose(at_depth(setup, depth), env, evidence(rounds, depth), target)
+        proposal = bayes.propose(at_depth(setup, depth), env, evidence(rounds, depth, env), target)
         stage = Stage(depth, PlannerKind.BAYES, proposal.tests, proposal.expected_improvement)
         if stage.tests:
             return stage
@@ -309,6 +374,7 @@ def analyze(
                 excess_db=None if reading.excess_db is None else round(reading.excess_db, 1),
                 start_s=round(segment.start_s, 2),
                 end_s=round(segment.end_s, 2),
+                detected=reading.verdict,
             )
         )
     return Results(plan.round, recording, thresholds, tuple(results))
@@ -325,33 +391,287 @@ class Planned:
     expected_improvement: float
 
 
-def plan_next(session: Path, setup: Setup, env: Envelope, stock: Stock) -> Planned:
-    """Plan the next round and write its directory, or report convergence."""
+def _rounds_to_plan_after(session: Path, source: SetupFile) -> list[Round]:
+    """The session's rounds, once the setup is one a round may be planned from."""
+    if setup_source(source.text) is SetupSource.TEMPLATE:
+        raise PlanError(
+            f"{SETUP_FILE} is still the example template, not your machine: fill in the "
+            "machine, tool, cut and stock (the widget's setup wizard, or edit the file) "
+            "before planning"
+        )
     rounds = load_rounds(session)
+    check_measured(rounds, source.setup)
+    return rounds
+
+
+def _place(
+    session: Path,
+    source: SetupFile,
+    env: Envelope,
+    rounds: list[Round],
+    stock: Stock,
+    depth_mm: float,
+    planner: PlannerKind,
+    tests: list,
+) -> Plan:
+    """Lay the tests out on the face as it stands, and write the round."""
     face, remnant = face_after(rounds[-1]) if rounds else (0.0, 0.0)
     if stock is Stock.FRESH:
         face, remnant = 0.0, 0.0
-    stage = next_stage(setup, env, rounds)
-    if not stage.tests:
-        return Planned(None, stage.expected_improvement)
     number = rounds[-1].plan.round + 1 if rounds else 1
     shallowest = _shallowest_on_block(rounds)
-    if face > 0 and stage.depth_mm > shallowest + DEPTH_TOLERANCE_MM:
+    if face > 0 and depth_mm > shallowest + DEPTH_TOLERANCE_MM:
         raise PlanError(
-            f"round {number} would cut {stage.depth_mm:g} mm deep, but this block's face is "
+            f"round {number} would cut {depth_mm:g} mm deep, but this block's face is "
             f"only flat down to {shallowest:g} mm. Mount fresh stock and plan with new stock."
         )
-    at = at_depth(setup, stage.depth_mm)
-    plan = assemble(at, env, number, stage.planner, face, remnant, stage.tests)
-    _write_round(session, at, plan)
+    at = at_depth(source.setup, depth_mm)
+    plan = assemble(at, env, number, planner, face, remnant, tests)
+    _write_round(session, source.text, at, plan)
+    return plan
+
+
+def plan_next(session: Path, source: SetupFile, env: Envelope, stock: Stock) -> Planned:
+    """Plan the next round and write its directory, or report convergence.
+
+    The round keeps the setup's text: the setup its plan and program came from.
+    """
+    rounds = _rounds_to_plan_after(session, source)
+    if rounds:
+        face_after(rounds[-1])  # the last round must have been analysed
+    stage = next_stage(source.setup, env, rounds, best_cuts(source.setup, env, rounds))
+    if not stage.tests:
+        return Planned(None, stage.expected_improvement)
+    plan = _place(session, source, env, rounds, stock, stage.depth_mm, stage.planner, stage.tests)
     return Planned(plan, stage.expected_improvement)
 
 
-def _write_round(session: Path, setup: Setup, plan: Plan) -> None:
+def plan_sweep(session: Path, source: SetupFile, env: Envelope, stock: Stock) -> Plan:
+    """Once the map has converged: the best stable cut at rising chip loads, lightest first.
+
+    Its cuts are kept apart from the speed x width map, which stays at the session's chip
+    load. The chip load is not a setup change here: the sweep is the one place it varies.
+    """
+    rounds = _rounds_to_plan_after(session, source)
+    if rounds:
+        face_after(rounds[-1])
+    found = best_cuts(source.setup, env, rounds)
+    if next_stage(source.setup, env, rounds, found).tests:
+        raise PlanError("the stability map has not converged yet: plan the next round first")
+    if not found:
+        raise PlanError("no stable cut has been measured to sweep")
+    best = found[0]
+    tests = _sweep_of(source.setup, env, best)
+    if not tests:
+        raise PlanError("the power cap leaves no chip load to sweep at the best cut")
+    return _place(session, source, env, rounds, stock, best.depth_mm, PlannerKind.SWEEP, tests)
+
+
+def _sweep_of(setup: Setup, env: Envelope, best: StableCut) -> list:
+    return sweep_tests(at_depth(setup, best.depth_mm), env, best.rpm, best.width_mm)
+
+
+def to_sweep(
+    setup: Setup, env: Envelope, found: list[StableCut], sweep: Sweep | None
+) -> StableCut | None:
+    """The best cut, when a chip-load sweep of it is still to run (`sweep`, from `swept`,
+    is None) and the power cap leaves it a chip load to try."""
+    if not found or sweep is not None:
+        return None
+    return found[0] if _sweep_of(setup, env, found[0]) else None
+
+
+@dataclass(frozen=True)
+class Sweep:
+    """What a chip-load sweep found at one cut."""
+
+    round: int
+    rpm: float
+    width_mm: float
+    depth_mm: float
+    session_chip_load_mm: float
+    # The highest chip load that stayed stable, its pass's feed and removal rate; all None
+    # when not even the lightest pass did.
+    stable_chip_load_mm: float | None
+    feed_mm_min: float | None
+    mrr_mm3_min: float | None
+
+
+def sweeps(rounds: list[Round], env: Envelope) -> list[Sweep]:
+    """The analysed chip-load sweeps, oldest first.
+
+    Passes run lightest first, so the result is the last chip load stable before the first
+    pass that chattered, aborted unheard or was not found, and within the power cap now.
+    A sweep stable only above that cap has no result.
+    """
+    found = []
+    for r in rounds:
+        if r.plan.planner is not PlannerKind.SWEEP or r.results is None:
+            continue
+        verdicts = {p.id: p.verdict for p in r.results.passes}
+        tests = [p for p in r.plan.passes if p.kind is PassKind.TEST]
+        depth = r.plan.axial_depth_mm
+        stable, capped = None, False
+        for p in tests:
+            if verdicts.get(p.id) is not Verdict.STABLE:
+                break
+            if depth * p.width_mm * p.feed_mm_min > env.mrr_limit_mm3_min:
+                capped = True
+                break
+            stable = p
+        if stable is None and capped:
+            continue
+        first = tests[0]
+        found.append(
+            Sweep(
+                r.plan.round,
+                first.rpm,
+                first.width_mm,
+                depth,
+                r.plan.chip_load_mm,
+                None if stable is None else stable.chip_load_mm,
+                None if stable is None else stable.feed_mm_min,
+                None if stable is None else depth * stable.width_mm * stable.feed_mm_min,
+            )
+        )
+    return found
+
+
+def swept(found: list[StableCut], done: list[Sweep]) -> Sweep | None:
+    """The sweep of the best cut as it stands (`found`, from best_cuts), if `done` (from
+    sweeps) holds one."""
+    if not found:
+        return None
+    best = found[0]
+    for sweep in reversed(done):
+        same = (
+            round(sweep.rpm) == round(best.rpm)
+            and abs(sweep.width_mm - best.width_mm) <= 1e-6
+            and abs(sweep.depth_mm - best.depth_mm) <= DEPTH_TOLERANCE_MM
+        )
+        if same:
+            return sweep
+    return None
+
+
+# The setup fields that may change once a round was cut. They move the program around the
+# cuts, bound how much stock is left, or bound where the planner searches (speeds, widths,
+# depths and the power cap: the chip load and feed of a cut do not depend on them), but do
+# not change what a cut was or sounded like. Every other field, [planner] aside, is part of
+# what was measured; the machine's weight among them, since it derates the chip load.
+FREE_AFTER_CUT = frozenset(
+    {
+        "machine.name",
+        "machine.min_rpm",
+        "machine.max_rpm",
+        "machine.spindle_power_hp",
+        "cut.width_max_mm",
+        "cut.speed_min_rpm",
+        "cut.speed_max_rpm",
+        "cut.other_depths_mm",
+        "program.safe_z_mm",
+        "program.clearance_mm",
+        "program.plunge_feed_mm_min",
+        "program.truing_width_mm",
+        "stock.width_mm",
+    }
+)
+# Fields that are in neither a plan nor its program: an unrun round survives their change.
+OUTSIDE_PROGRAM = frozenset({"machine.name"})
+
+
+def planned_with(r: Round) -> Setup:
+    """The setup a round was planned from, as its directory keeps it."""
+    return load_setup(r.path / SETUP_FILE)
+
+
+def _changes(old: Setup, new: Setup) -> list[str]:
+    """`section.field` of every setup value that differs."""
+    return [
+        f"{section.name}.{entry.name}"
+        for section in dataclasses.fields(Setup)
+        for entry in dataclasses.fields(getattr(old, section.name))
+        if getattr(getattr(old, section.name), entry.name)
+        != getattr(getattr(new, section.name), entry.name)
+    ]
+
+
+def _measured_changes(old: Setup, new: Setup) -> list[str]:
+    return [
+        change
+        for change in _changes(old, new)
+        if not change.startswith("planner.") and change not in FREE_AFTER_CUT
+    ]
+
+
+def _unrun(r: Round) -> bool:
+    """Planned and nothing more: no recording, timeline or results beside the plan."""
+    planned = {PLAN_FILE, PROGRAM_FILE, SETUP_FILE}
+    return r.results is None and {p.name for p in r.path.iterdir()} <= planned
+
+
+def check_measured(rounds: list[Round], setup: Setup) -> None:
+    """Refuse a setup that differs from a cut round's in what was measured."""
+    for r in reversed(rounds):
+        if _unrun(r):
+            continue
+        changed = _measured_changes(planned_with(r), setup)
+        if not changed:
+            continue
+        raise SessionError(
+            f"round {r.plan.round} was cut with another {', '.join(changed)}, and the "
+            "stability map belongs to the setup it was measured with. Put the setup back, or "
+            "start a new session for this one"
+        )
+
+
+def stale_round(session: Path, setup: Setup) -> Round | None:
+    """The unrun round that `setup` would leave stale, to be planned again from it.
+
+    A setup that changes what a cut round measured is refused.
+    """
+    rounds = load_rounds(session)
+    check_measured(rounds, setup)
+    if not rounds or not _unrun(rounds[-1]):
+        return None
+    if set(_changes(planned_with(rounds[-1]), setup)) <= OUTSIDE_PROGRAM:
+        return None
+    return rounds[-1]
+
+
+DISCARDED = ".discarded-"
+
+
+def set_aside(r: Round) -> Path:
+    """Move a round out of the session; `restore` brings it back, deleting it is final.
+
+    Each gets its own name, so one whose deletion failed never blocks the next.
+    """
+    sweep_discarded(r.path.parent)
+    aside = r.path.with_name(f"{DISCARDED}{r.path.name}-{uuid.uuid4().hex[:8]}")
+    r.path.rename(aside)
+    return aside
+
+
+def sweep_discarded(session: Path) -> None:
+    """Delete what is left of rounds discarded earlier; one that will not go is left."""
+    for leftover in session.glob(f"{DISCARDED}*"):
+        try:
+            shutil.rmtree(leftover)
+        except OSError as exc:
+            log.warning("could not delete %s: %s", leftover.name, exc)
+
+
+def restore(aside: Path, r: Round) -> None:
+    aside.rename(r.path)
+
+
+def _write_round(session: Path, setup_text: str, setup: Setup, plan: Plan) -> None:
     target = round_dir(session, plan.round)
     target.mkdir()
+    (target / SETUP_FILE).write_text(setup_text, encoding="utf-8")
     plan.save(target / PLAN_FILE)
-    (target / PROGRAM_FILE).write_text(gcode.render(plan, setup), encoding="ascii")
+    (target / PROGRAM_FILE).write_text(gcode.render(plan, setup, gcode.Units.MM), encoding="ascii")
     log.info("planned round %d: %d passes", plan.round, len(plan.passes))
 
 

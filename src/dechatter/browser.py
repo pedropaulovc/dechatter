@@ -11,17 +11,25 @@ import io
 import json
 import logging
 import re
+import shutil
 import zipfile
 from pathlib import Path
 
 import numpy as np
 
-from . import gcode, materials, session
+from . import gcode, materials, report, session
 from .app import App
 from .audio import AudioError
-from .config import TEMPLATE, ConfigError, dump_setup, setup_values
+from .config import (
+    TEMPLATE,
+    ConfigError,
+    dump_setup,
+    parse_setup,
+    setup_defaults,
+    setup_values,
+)
 from .detect import Thresholds, Verdict
-from .plan import PlanError
+from .plan import PlanError, envelope
 from .session import SessionError, Stock
 
 log = logging.getLogger(__name__)
@@ -48,6 +56,7 @@ class Sessions:
         if name not in self._apps:
             if not (self._dir(name) / session.SETUP_FILE).exists():
                 raise SessionError(f"no session named {name!r}")
+            session.sweep_discarded(self._dir(name))
             self._apps[name] = App(self._dir(name), self.thresholds)
         return self._apps[name]
 
@@ -67,22 +76,59 @@ class Sessions:
         self._app(name)  # the session must exist and its setup must load
         return {
             "values": setup_values(self._dir(name) / session.SETUP_FILE),
+            "defaults": setup_defaults(),
             "materials": sorted(materials.MATERIALS),
         }
 
+    def setup_preview(self, values_json: str) -> dict:
+        """What the planner makes of entries left empty in a setup the wizard is editing."""
+        env = envelope(parse_setup(dump_setup(json.loads(values_json)), "the setup"))
+        return {
+            "cut": {
+                "width_max_mm": round(env.width_max_mm, 3),
+                "chip_load_mm": env.chip_load_mm,
+                "speed_min_rpm": env.speed_min_rpm,
+                "speed_max_rpm": env.speed_max_rpm,
+            }
+        }
+
     def save_setup(self, name: str, values_json: str) -> dict:
-        """Replace the setup if it is valid; an invalid one leaves the session untouched."""
+        """Replace the setup if it is valid and fits the rounds; else leave the session untouched.
+
+        A round planned but not yet run is discarded when the setup changes its program, so
+        the next one is planned from the new setup.
+        """
+        recording = self._app(name).recording_round
+        if recording is not None:
+            raise SessionError(f"round {recording} is being recorded; change the setup after it")
         text = dump_setup(json.loads(values_json)).encode("utf-8")
         path = self._dir(name) / session.SETUP_FILE
         previous = path.read_bytes()
         self._apps.pop(name, None)
+        stale, aside = None, None
         try:
             path.write_bytes(text)
-            return self._app(name).state()
+            app = self._app(name)
+            stale = session.stale_round(self._dir(name), app.setup)
+            if stale is not None:
+                aside = session.set_aside(stale)
+                app.discarded_round = stale.plan.round
+            shown = app.state()
         except Exception:
+            if aside is not None:
+                session.restore(aside, stale)
             path.write_bytes(previous)
             self._apps.pop(name, None)
             raise
+        if aside is None:
+            return shown
+        log.info("%s: discarded unrun round %d planned from the old setup", name, stale.plan.round)
+        # The new setup is saved: a round that will not delete now goes with the next sweep.
+        try:
+            shutil.rmtree(aside)
+        except OSError as exc:
+            log.warning("%s: could not delete %s yet: %s", name, aside.name, exc)
+        return shown
 
     def state(self, name: str) -> dict:
         return self._app(name).state()
@@ -91,9 +137,13 @@ class Sessions:
         self._app(name).plan(Stock(stock))
         return self.state(name)
 
+    def plan_sweep(self, name: str, stock: str) -> dict:
+        self._app(name).plan_sweep(Stock(stock))
+        return self.state(name)
+
     def program(self, name: str, number: int, machine_units: str) -> str:
         """The round's program for a machine in `machine_units` ("mm" or "in")."""
-        return gcode.for_machine(self._app(name).program(number), gcode.Units(machine_units))
+        return self._app(name).program(number, gcode.Units(machine_units))
 
     def record_start(self, name: str, number: int) -> dict:
         self._app(name).record_start(number)
@@ -112,14 +162,33 @@ class Sessions:
         self._app(name).set_verdict(number, pass_id, Verdict(verdict))
         return self.state(name)
 
-    def export_zip(self, name: str) -> bytes:
-        """The session directory as a zip, usable with the command line as it is."""
+    def report_html(self, name: str, machine_units: str) -> str:
+        """The session's printable report, lengths in `machine_units` ("mm" or "in")."""
         self._app(name)
+        return report.render(self._dir(name), gcode.Units(machine_units))
+
+    def export_zip(self, name: str, machine_units: str) -> bytes:
+        """The session directory as a zip, usable with the command line as it is, with the
+        report as of now. Export is the way out of the browser's storage, so a report that
+        cannot be made is left out rather than stopping it."""
+        self._app(name)
+        try:
+            page = report.render(self._dir(name), gcode.Units(machine_units))
+        except Exception:
+            log.exception("%s: exporting without %s", name, report.REPORT_FILE)
+            page = None
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
             for path in sorted(self._dir(name).rglob("*")):
+                inside = path.relative_to(self._dir(name))
+                if inside.parts[0].startswith(session.DISCARDED) or inside == Path(
+                    report.REPORT_FILE
+                ):
+                    continue
                 if path.is_file():
-                    archive.write(path, f"{name}/{path.relative_to(self._dir(name)).as_posix()}")
+                    archive.write(path, f"{name}/{inside.as_posix()}")
+            if page is not None:
+                archive.writestr(f"{name}/{report.REPORT_FILE}", page)
         return buffer.getvalue()
 
     def import_zip(self, data: bytes) -> str:

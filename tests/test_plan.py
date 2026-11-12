@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 import pytest
 
 from dechatter import gcode
-from dechatter.config import ConfigError, load_setup
+from dechatter.config import ConfigError, load_setup, parse_setup
 from dechatter.plan import (
+    SWEEP_PASSES,
     PassKind,
     PlanError,
     PlannerKind,
@@ -14,7 +16,10 @@ from dechatter.plan import (
     envelope,
     grid_tests,
     mrr_mm3_min,
+    sweep_tests,
 )
+
+MM = gcode.Units.MM
 
 
 def round1(setup, face=0.0, remnant=0.0):
@@ -39,7 +44,7 @@ def test_surface_speed_limit_caps_spindle_speed(write_setup):
 
 
 def test_power_cap_excludes_heavy_cuts(write_setup):
-    weak = load_setup(write_setup(p=("spindle_power_w = 1500", "spindle_power_w = 60")))
+    weak = load_setup(write_setup(p=("spindle_power_hp = 2.0", "spindle_power_hp = 0.08")))
     env = envelope(weak)
     tests = grid_tests(weak, env)
     full = load_setup(write_setup())
@@ -78,7 +83,7 @@ def cutting_moves(program: str) -> list[tuple[float, float, float]]:
 
 def test_gcode_steps_the_cutter_into_the_face_by_each_pass_width(setup):
     plan = round1(setup, face=4.0)
-    moves = cutting_moves(gcode.render(plan, setup))
+    moves = cutting_moves(gcode.render(plan, setup, MM))
     assert len(moves) == len(plan.passes)
     face = plan.face_y_start_mm
     for (y, x_end, feed), p in zip(moves, plan.passes, strict=True):
@@ -90,11 +95,11 @@ def test_gcode_steps_the_cutter_into_the_face_by_each_pass_width(setup):
 
 def test_climb_reverses_travel(write_setup):
     climb = load_setup(write_setup(d=('direction = "conventional"', 'direction = "climb"')))
-    assert all(x_end < 0 for _, x_end, _ in cutting_moves(gcode.render(round1(climb), climb)))
+    assert all(x_end < 0 for _, x_end, _ in cutting_moves(gcode.render(round1(climb), climb, MM)))
 
 
 def test_dwell_precedes_every_cut(setup):
-    program = gcode.render(round1(setup), setup).splitlines()
+    program = gcode.render(round1(setup), setup, MM).splitlines()
     cuts = [i for i, line in enumerate(program) if line.startswith("G1 X")]
     assert all(program[i - 1] == "G4 P4" for i in cuts)
 
@@ -102,21 +107,33 @@ def test_dwell_precedes_every_cut(setup):
 MANUAL = {"s": ('spindle = "program"', 'spindle = "manual"')}
 
 
-def test_an_inch_machine_is_put_back_in_inches_even_by_a_program_without_m30():
-    restore = gcode.RESTORE_INCH
-    assert gcode.for_machine("G21\nG0 X1\nM30\n", gcode.Units.MM) == "G21\nG0 X1\nM30\n"
-    assert (
-        gcode.for_machine("G21\nG0 X1\nM30\n", gcode.Units.INCH) == f"G21\nG0 X1\n{restore}\nM30\n"
+def test_an_inch_machine_gets_the_same_program_in_inches(setup):
+    plan = round1(setup, face=4.0)
+    mm = gcode.render(plan, setup, MM).splitlines()
+    inch = gcode.render(plan, setup, gcode.Units.INCH).splitlines()
+
+    assert [line for line in mm if re.match(r"G2[01]\b", line)] == ["G21 G90 G94 G17"]
+    # The program never leaves inches: its machine stays in them however the job ends.
+    assert [line for line in inch if re.match(r"G2[01]\b", line)] == ["G20 G90 G94 G17"]
+    assert all(len(f) <= 4 for line in inch for f in re.findall(r"\.(\d+)", line.split("(")[0]))
+    # Four decimals of an inch: within 0.0013 mm, plus the mm program's own rounding.
+    in_mm = [v * 25.4 for move in cutting_moves("\n".join(inch)) for v in move]
+    assert in_mm == pytest.approx(
+        [v for move in cutting_moves("\n".join(mm)) for v in move], abs=0.002
     )
-    # Hand-edited: no M30, and a last line that would swallow anything glued onto it.
-    assert gcode.for_machine("G21\n; end", gcode.Units.INCH) == f"G21\n; end\n{restore}\n"
-    assert gcode.for_machine("G21\nG0 X1\n\n\n", gcode.Units.INCH) == f"G21\nG0 X1\n{restore}\n"
+    # Dwell seconds, spindle speeds and the mm in the comments are the same.
+    for start in ("G4", "M3", "(pass", "(dechatter", "(front face"):
+        assert [x for x in inch if x.startswith(start)] == [x for x in mm if x.startswith(start)]
+    plunge = next(line for line in inch if line.startswith("G1 Z"))
+    depth, feed = re.fullmatch(r"G1 Z(\S+) F(\S+)", plunge).groups()
+    assert float(depth) * 25.4 == pytest.approx(-plan.axial_depth_mm, abs=0.002)
+    assert float(feed) * 25.4 == pytest.approx(setup.program.plunge_feed_mm_min, abs=0.002)
 
 
 def test_manual_spindle_pauses_once_per_speed_and_never_commands_the_spindle(write_setup):
     manual = load_setup(write_setup(**MANUAL))
     plan = round1(manual)
-    program = gcode.render(plan, manual).splitlines()
+    program = gcode.render(plan, manual, MM).splitlines()
 
     assert not [line for line in program if re.match(r"M[345]\b|S\d", line)]
     asked = [
@@ -143,3 +160,40 @@ def test_manual_spindle_tests_the_same_cuts_as_program_control(setup, write_setu
 def test_unknown_setup_key_is_rejected(write_setup):
     with pytest.raises(ConfigError, match="flute_count"):
         load_setup(write_setup(k=("flutes = 3", "flute_count = 3")))
+
+
+def test_spindle_power_is_given_in_hp_and_the_old_watts_key_is_refused(write_setup):
+    half = load_setup(write_setup(p=("spindle_power_hp = 2.0", "spindle_power_hp = 1.0")))
+    assert half.machine.spindle_power_w == pytest.approx(745.7)
+    assert envelope(half).mrr_limit_mm3_min == pytest.approx(
+        envelope(load_setup(write_setup())).mrr_limit_mm3_min / 2
+    )
+    with pytest.raises(ConfigError, match="spindle_power_w is now spindle_power_hp"):
+        load_setup(write_setup(p=("spindle_power_hp = 2.0", "spindle_power_w = 1500")))
+
+
+def test_a_chip_load_sweep_steps_lightest_first_inside_the_power_cap(setup, write_setup):
+    env = envelope(setup)
+    tests = sweep_tests(setup, env, 4000, 2.0)
+    loads = [t[3] for t in tests]
+    assert len(tests) == SWEEP_PASSES and loads == sorted(loads)
+    assert loads[0] == pytest.approx(0.6 * env.chip_load_mm, abs=1e-4)
+    assert loads[-1] == pytest.approx(1.7 * env.chip_load_mm, abs=1e-4)
+    plan = assemble(setup, env, 2, PlannerKind.SWEEP, 0.0, 0.0, tests)
+    swept = [p for p in plan.passes if p.kind is PassKind.TEST]
+    assert [p.chip_load_mm for p in swept] == loads
+    assert [p.feed_mm_min for p in swept] == [
+        pytest.approx(load * setup.tool.flutes * 4000, abs=0.1) for load in loads
+    ]
+
+    weak = load_setup(write_setup(p=("spindle_power_hp = 2.0", "spindle_power_hp = 0.3")))
+    capped = sweep_tests(weak, envelope(weak), 4000, 2.0)
+    assert 0 < len(capped) < SWEEP_PASSES
+    with pytest.raises(ConfigError, match="chip_load_sweep_low < chip_load_sweep_high"):
+        load_setup(write_setup(s=("chip_load_sweep_high = 1.7", "chip_load_sweep_high = 0.5")))
+
+
+def test_a_setup_from_dechatter_0_1_is_refused_with_what_to_do():
+    old = (Path(__file__).parent / "fixtures" / "setup-0.1.1.toml").read_text()
+    with pytest.raises(ConfigError, match=r"from dechatter 0\.1\.x.*start a new session"):
+        parse_setup(old, "setup.toml")

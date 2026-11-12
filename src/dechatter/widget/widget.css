@@ -14,7 +14,7 @@ header select { flex: 1 1 110px; min-width: 0; }
 header button { padding: 4px 6px; }
 #summary { flex-basis: 100%; }
 #device { max-width: 150px; }
-#setup-form label {
+#setup-form .field {
   display: grid;
   grid-template-columns: 1fr 96px 44px;
   gap: 2px 6px;
@@ -25,6 +25,16 @@ header button { padding: 4px 6px; }
 #setup-form small { color: #777; }
 #setup-form em { grid-column: 1 / -1; color: #777; font-size: 12px; font-style: normal; }
 #setup-form input:invalid { border: 1px solid #c9302c; }
+#setup-form details.advanced { margin-top: 4px; }
+#setup-form button.info {
+  width: 16px; height: 16px; padding: 0; margin-left: 2px; vertical-align: 1px;
+  font: italic bold 11px/14px Georgia, serif; color: #337ab7; border-radius: 50%;
+}
+#setup-form .bubble {
+  grid-column: 1 / -1; margin: 2px 0 0; padding: 6px 8px; font-size: 12px; line-height: 1.4;
+  background: #f7f7f7; border: 1px solid #ccc; border-radius: 3px;
+}
+#setup-form details.advanced summary { margin-bottom: 6px; color: #555; cursor: pointer; }
 .wizard-buttons { display: flex; gap: 4px; align-items: center; }
 .wizard-buttons select { margin-left: auto; }
 h2 { margin: 14px 0 6px; font-size: 13px; }

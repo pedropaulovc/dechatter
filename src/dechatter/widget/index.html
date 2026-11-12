@@ -43,7 +43,6 @@
         <button id="setup-next" class="primary" type="submit" form="setup-form">Next</button>
         <button id="cancel-setup" type="button">Cancel</button>
         <span id="units" class="muted"></span>
-        <button id="follow-machine" type="button" hidden>Use mm instead</button>
       </p>
     </section>
 
@@ -68,11 +67,12 @@
     </section>
 
     <section id="best-section" hidden>
-      <h2>Best stable cuts</h2>
+      <h2>Best stable cuts <button id="download-report" type="button">Download report</button></h2>
       <table>
         <thead><tr><th>rpm</th><th>width</th><th>depth</th><th>feed</th><th>cm³/min</th></tr></thead>
         <tbody id="best"></tbody>
       </table>
+      <p id="sweep-result" class="muted legend" hidden></p>
     </section>
   </div>
 

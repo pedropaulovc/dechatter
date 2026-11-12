@@ -54,10 +54,16 @@ jobs:
       - name: Check that the tagged commit is on main
         run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
 
-      - name: Check that the tag, package.json and pyproject.toml agree on the version
+      - name: Check that the tag, package.json and __version__ agree on the version
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: uv run python .github/release_version.py "$RELEASE_TAG"
+
+      # Before anything is published: a release needs its dated section in CHANGELOG.md.
+      - name: Take the release notes from CHANGELOG.md
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: uv run python .github/changelog.py "$RELEASE_TAG" > "$RUNNER_TEMP/notes.md"
 
       # The registry is asked directly, without credentials: 200 means this version is
       # published, 404 that it is not, and anything else stops the release rather than guess.
@@ -91,4 +97,4 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           gh release view "$RELEASE_TAG" > /dev/null 2>&1 && exit 0
-          gh release create "$RELEASE_TAG" --title "$RELEASE_TAG" --generate-notes --verify-tag
+          gh release create "$RELEASE_TAG" --title "$RELEASE_TAG" --notes-file "$RUNNER_TEMP/notes.md" --verify-tag

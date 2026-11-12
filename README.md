@@ -60,10 +60,31 @@ a page the microphone on those. Then, in the widget:
 1. Create a session. A short wizard asks for the machine, the tool, the cut and the stock. It
    shows lengths in inches when the machine is in G20 and in millimetres when it is in G21,
    or with no machine connected. Its last step holds the planner's settings, which rarely
-   need changing. Saving from the wizard rewrites the session's setup file without comments.
-   Programs are always in millimetres (G21); one run on an inch machine switches it back to
-   G20 before it ends. A job you stop part-way leaves the machine in G21: the wizard keeps
-   showing inches and tells you to send G20, or you can choose to carry on in mm.
+   need changing. Settings with a sensible default or a computed value (the machine's name,
+   the holder, the cut's limits and chip load, the program's dwell, clearance, plunge feed,
+   truing width and coolant, and the planner) sit in a collapsed Advanced section of their
+   step, showing what an empty entry becomes. A section holding a changed setting opens by
+   itself. Every field has an (i) button with a longer explanation: what it changes, its
+   default, and whether it may change after a cut. Saving from the wizard rewrites the
+   session's setup file without comments.
+   Programs are written in the machine's units too (G20 or G21, as cncjs reports it), so a
+   job never changes them, even one stopped part-way. Their comments, like the plan and the
+   results, stay in millimetres.
+   Nothing is planned until the wizard has been saved: a new session holds only an example
+   setup. Each round keeps a copy of the setup it was planned from. Once a round has been
+   cut, the setup can no longer change in anything that shapes the cut or its sound (the
+   machine's weight and spindle control, the tool, the work material, depth, direction and
+   chip load, the stock length, the dwell and the coolant), since the stability map belongs
+   to the setup it was measured with: start a new session instead. What only bounds the
+   search may still change (the machine's speed range and power, the cut's speed and width
+   limits and shallower depths), as may the machine's name, the safe height, clearance,
+   plunge feed, truing width, stock width and the planner's settings. Cuts outside narrowed
+   bounds stay in their round but are not recommended, nor are cuts over a lowered power
+   cap. On the map, a stable cut wider than a narrowed width limit counts as stable at the
+   widest width searched; chatter that wide, and cuts at speeds outside the limits, are left
+   out. A round
+   planned but not yet run is discarded when the setup changes its program, so the next
+   plan uses the new setup. `dechatter plan` refuses the same changes made by hand.
 2. Plan a round. Round 1 is a coarse grid of speeds and widths.
 3. Set the work zero at the left end of the stock, on its front face, at the top.
 4. Load the program into cncjs and press play in cncjs. The widget never starts the machine.
@@ -71,6 +92,15 @@ a page the microphone on those. Then, in the widget:
    pass as stable or chatter, the stability map and the best cuts so far.
 6. If your ears disagree with a verdict, change it in the table. Plan the next round and
    repeat until the widget reports convergence.
+7. Optionally, plan the chip-load sweep it then offers: the best cut once more at five
+   chip loads, from 0.6 to 1.7 times the session's (both Advanced planner settings), lightest
+   first and inside the power cap. The result is the highest chip load that stayed stable,
+   with its feed. Its cuts do not change the map, which stays at the session's chip load.
+8. Download the report: one HTML page to print (Letter or A4, black and white) and keep with
+   the tool. It holds the recommended cuts per depth with feed, removal rate and spindle
+   power, the stability map, every round's passes (marking verdicts set by hand) and the
+   setup. Lengths follow the machine's G20/G21, with mm beside. It is offered on convergence
+   and any time beside the best cuts.
 
 Everything runs in the browser tab. The same Python that the command line uses runs there
 under [Pyodide](https://pyodide.org), which `dechatter widget` downloads once and copies into
@@ -81,7 +111,7 @@ browser kept any of that processing on.
 
 Sessions are stored in that browser (IndexedDB), per cncjs address. Export saves one as a zip
 holding `setup.toml` and each round's plan, program, `recording.wav`, results and the job
-timeline cncjs reported. Import loads it in another browser, and unzipped it is a session
+timeline cncjs reported, plus `report.html`. Import loads it in another browser, and unzipped it is a session
 folder the command line reads. Keep the tab open while a round runs: the recording lives in
 the page until the job ends.
 
@@ -113,7 +143,9 @@ continuous recording, run the program, stop recording after `M30`. Then:
 ```sh
 dechatter analyze al-10mm recording.wav   # classifies each pass
 dechatter plan al-10mm                    # next round, or "converged"
+dechatter plan al-10mm --sweep            # once converged: chip-load sweep of the best cut
 dechatter report al-10mm                  # stability map and best cuts so far
+dechatter report al-10mm --html al-10mm.html --units in   # printable report
 ```
 
 Repeat until `plan` reports convergence. WAV, FLAC, OGG and MP3 load directly. Phone formats
@@ -223,9 +255,17 @@ uv run validation/purdue.py ~/purdue-cache   # downloads about 370 MB once
 `e2e/` runs real cncjs against a simulated Grbl inside WSL, for driving the widget without a
 machine. See `e2e/README.md`.
 
-To release, set the same version in `pyproject.toml` and `package.json`, merge to `main`, and
-push a tag `vX.Y.Z` on that commit. The `release` workflow tests on Linux and Windows, builds
-the widget once and publishes that build to npm. npm trusts the workflow itself, so no token
+Every change users can notice adds a line under `## [Unreleased]` in
+[`CHANGELOG.md`](CHANGELOG.md), in the same pull request: what they will notice and, for a
+breaking change, what to do about it.
+
+To release, set the same version in `src/dechatter/__init__.py` (`__version__`, which
+`pyproject.toml` reads) and `package.json`, rename `## [Unreleased]` in `CHANGELOG.md` to
+`## [X.Y.Z] - YYYY-MM-DD` above a fresh empty Unreleased section (and update the links at
+its end), merge to `main`, and push a tag `vX.Y.Z` on that commit. The `release` workflow
+refuses a tag without that dated section, tests on Linux and Windows, builds the widget
+once, publishes that build to npm, and creates the GitHub release with the section as its
+notes. npm trusts the workflow itself, so no token
 is stored; version 0.1.0 was published by hand, because that trust can only be registered
 for a package that exists.
 

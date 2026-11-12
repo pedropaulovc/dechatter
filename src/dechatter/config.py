@@ -31,19 +31,31 @@ class ToolMaterial(StrEnum):
     HSS = "hss"
 
 
+class SetupSource(StrEnum):
+    TEMPLATE = "template"  # the example `init` and the widget write, as written: not this machine
+    FILLED_IN = "filled-in"
+
+
 class SpindleControl(StrEnum):
     PROGRAM = "program"  # the G-code starts the spindle and sets its speed
     MANUAL = "manual"  # the operator does, at a program pause before each speed
 
 
+WATTS_PER_HP = 745.7
+
+
 @dataclass(frozen=True)
 class Machine:
     max_rpm: int
-    spindle_power_w: float
+    spindle_power_hp: float  # rated motor power, as mill spindles are usually rated
     weight_kg: float
     min_rpm: int = 500
     name: str = ""
     spindle: SpindleControl = SpindleControl.PROGRAM
+
+    @property
+    def spindle_power_w(self) -> float:
+        return self.spindle_power_hp * WATTS_PER_HP
 
 
 @dataclass(frozen=True)
@@ -97,6 +109,9 @@ class Planner:
     misclassification: float = 0.05
     sweet_spot_trust: float = 0.5
     power_fraction: float = 0.6
+    # The chip-load sweep after convergence, as multiples of the session's chip load.
+    chip_load_sweep_low: float = 0.6
+    chip_load_sweep_high: float = 1.7
 
 
 @dataclass(frozen=True)
@@ -130,10 +145,34 @@ def _build[T](cls: type[T], section: str, data: dict) -> T:
 
 
 def load_setup(path: Path) -> Setup:
+    return parse_setup(path.read_text(encoding="utf-8"), path.name)
+
+
+@dataclass(frozen=True)
+class SetupFile:
+    """A setup and the file text it was parsed from, which a planned round keeps."""
+
+    text: str
+    setup: Setup
+
+
+def read_setup(text: str, origin: str) -> SetupFile:
+    return SetupFile(text, parse_setup(text, origin))
+
+
+def parse_setup(text: str, origin: str) -> Setup:
+    """A setup from setup file text; `origin` names it in errors."""
     try:
-        data = tomllib.loads(path.read_text(encoding="utf-8"))
+        data = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
-        raise ConfigError(f"{path.name} is not valid TOML: {exc}") from exc
+        raise ConfigError(f"{origin} is not valid TOML: {exc}") from exc
+    if "spindle_power_w" in data.get("machine", {}):
+        raise ConfigError(
+            "this setup is from dechatter 0.1.x, which this version refuses: start a new "
+            "session. (In a setup written by hand, [machine] spindle_power_w is now "
+            "spindle_power_hp: the spindle motor's rated power in horsepower, "
+            f"1 hp = {WATTS_PER_HP} W.)"
+        )
     sections = {f.name: f for f in dataclasses.fields(Setup)}
     unknown = set(data) - set(sections)
     if unknown:
@@ -147,6 +186,15 @@ def load_setup(path: Path) -> Setup:
     setup = Setup(**built)
     _validate(setup)
     return setup
+
+
+def setup_source(text: str) -> SetupSource:
+    """Whether setup file text is still the template. Whitespace alone does not fill it in:
+    an editor that only re-wrapped lines or line endings left the example values in place.
+    """
+    if text.split() == TEMPLATE.split():
+        return SetupSource.TEMPLATE
+    return SetupSource.FILLED_IN
 
 
 def _toml_value(value: object) -> str:
@@ -193,6 +241,19 @@ def setup_values(path: Path) -> dict:
     return values
 
 
+def setup_defaults() -> dict:
+    """Each section's default values, for the entries that have one."""
+    hints = typing.get_type_hints(Setup)
+    return {
+        section.name: {
+            entry.name: entry.default
+            for entry in dataclasses.fields(hints[section.name])
+            if entry.default is not dataclasses.MISSING
+        }
+        for section in dataclasses.fields(Setup)
+    }
+
+
 def dump_setup(values: dict) -> str:
     """Setup file text for sections of values. Entries left empty (None) take their default."""
     blocks = []
@@ -228,6 +289,8 @@ def _validate(setup: Setup) -> None:
         raise ConfigError("[planner] round1_width_fractions must list numbers in (0, 1]")
     if not 0 < setup.planner.probability_floor <= setup.planner.min_probability < 1:
         raise ConfigError("[planner] need 0 < probability_floor <= min_probability < 1")
+    if not 0 < setup.planner.chip_load_sweep_low < setup.planner.chip_load_sweep_high:
+        raise ConfigError("[planner] need 0 < chip_load_sweep_low < chip_load_sweep_high")
 
 
 TEMPLATE = """\
@@ -238,7 +301,7 @@ TEMPLATE = """\
 name = "PM-30MV"
 max_rpm = 5000
 min_rpm = 500
-spindle_power_w = 1500   # rated spindle motor power
+spindle_power_hp = 2.0   # rated spindle motor power, in hp
 spindle = "program"      # program: the G-code sets the speed (M3 S) | manual: the program
                          # pauses (M0) before each speed and you set it on the machine
 weight_kg = 250          # derates the starting chip load on light machines
@@ -279,4 +342,6 @@ batch_size = 8
 min_probability = 0.8      # each cut is this likely stable, if the cut before it passes
 probability_floor = 0.5    # ... and this likely stable on measured data alone
 stop_improvement = 0.05    # converged when no cut promises this much more removal rate
+chip_load_sweep_low = 0.6  # after convergence the best cut can be tried at chip loads
+chip_load_sweep_high = 1.7 # ... from low to high times the session's chip load
 """

@@ -3,7 +3,7 @@
 // and analysis are dechatter's Python running in a worker (engine.js).
 
 import { Mic } from './mic.js';
-import { STEPS, draw, read } from './wizard.js';
+import { STEPS, draw, placehold, read, reveal } from './wizard.js';
 
 const params = new URLSearchParams(location.search);
 const token = params.get('token') ?? '';
@@ -20,10 +20,7 @@ const UNITS_TEXT = {
   mm: 'Lengths in mm: the machine is in G21.',
   in: 'Lengths in inches: the machine is in G20.',
   unknown: 'Lengths in mm. With the machine connected they follow its G20/G21 mode.',
-  kept: 'Lengths in inches, as before the stopped job. The machine is now in G21: send G20 to put it back in inches.',
 };
-const KEEP_UNITS_KEY = 'dechatter.keep-units';
-const OWN_PROGRAM = /^dechatter-.*\.nc$/; // the names the engine gives its programs
 const cnc = {
   socket: null,
   link: 'connecting', // connecting | no-port | ready | offline
@@ -31,13 +28,10 @@ const cnc = {
   workflow: null, // idle | running | paused; null until cncjs reports it
   program: '', // name of the G-code file cncjs has loaded
   pause: null, // { text, settled } while the program waits at an M0, else null
-  units: null, // mm | in: how the wizard shows lengths; null until the machine's mode is known
-  reported: null, // mm | in: the machine's G21/G20 mode as cncjs last reported it
-  settled: null, // mm | in: the last report taken while no job ran; null until there is one
-  // in from the start of one of this widget's jobs on an inch machine until the machine is
-  // back in G20. Stored per machine, so a reload after a stopped job does not forget it.
-  keep: null,
-  lines: { received: 0, total: 0 }, // how far cncjs got through the loaded program
+  // mm | in: the machine's G21/G20 mode as cncjs last reported it; null until it has. The
+  // wizard shows lengths in it and programs are written in it, so a job never changes it.
+  units: null,
+  loadedUnits: null, // mm | in: the units of the program this widget last loaded into cncjs
 };
 const mic = new Mic();
 let boot = 'Starting'; // what the engine is loading; null once it is ready
@@ -45,7 +39,7 @@ let fatal = ''; // why the engine could not start; nothing works without it
 let names = []; // sessions stored in this browser
 let current = localStorage.getItem(SESSION_KEY) ?? '';
 let state = null; // the current session, as the engine last reported it
-let editing = null; // { values, materials, step } while the setup wizard is open, else null
+let editing = null; // { values, defaults, materials, computed, step } while the setup wizard is open, else null
 let timeline = []; // what cncjs reported since the job last started; saved with the recording
 let busy = false; // an engine request is in flight
 let stockChoice = 'same'; // survives redraws: planning on the wrong face position cuts air or too deep
@@ -139,8 +133,34 @@ async function newSession() {
 // Start the wizard on the session's stored setup. The form is redrawn even when it last
 // showed this same step, so nothing typed into an earlier wizard is left on screen.
 async function openWizard() {
-  editing = { ...(await engine('setup_form', current)), step: 0 };
+  editing = { ...(await engine('setup_form', current)), computed: null, step: 0 };
   $('setup-form').dataset.key = '';
+}
+
+// What the planner makes of the entries left empty, from what the wizard holds so far.
+// Only shown as placeholders, filled in when the answer comes: the step is already drawn
+// and may hold typing. Values the wizard cannot make sense of yet show none, and an answer
+// overtaken by a later request is dropped.
+async function preview(wizard) {
+  wizard.asked = (wizard.asked ?? 0) + 1;
+  const asked = wizard.asked;
+  let computed = null;
+  try {
+    computed = await engine('setup_preview', JSON.stringify(wizard.values));
+  } catch {
+    computed = null;
+  }
+  if (editing !== wizard || wizard.asked !== asked) {
+    return;
+  }
+  wizard.computed = computed;
+  placehold($('setup-form'), STEPS[wizard.step], units(), wizard);
+}
+
+function goToStep(step) {
+  editing.step = Math.min(Math.max(step, 0), STEPS.length - 1);
+  render();
+  preview(editing);
 }
 
 async function editSetup() {
@@ -162,12 +182,21 @@ function keepStep() {
 }
 
 async function nextStep() {
+  reveal($('setup-form'));
   if (!$('setup-form').reportValidity()) {
     return;
   }
   keepStep();
   if (editing.step < STEPS.length - 1) {
-    editing.step += 1;
+    goToStep(editing.step + 1);
+    return;
+  }
+  if (busy) {
+    return; // already saving
+  }
+  // A job may be running one of this session's programs; a new setup could discard it.
+  if (cnc.workflow === 'running' || cnc.workflow === 'paused') {
+    showError('A job is running in cncjs. Save the setup once it has ended.');
     render();
     return;
   }
@@ -183,24 +212,37 @@ async function nextStep() {
 
 function previousStep() {
   keepStep();
-  editing.step -= 1;
-  render();
+  goToStep(editing.step - 1);
 }
 
+function download(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  // cncjs sandboxes widget frames without allow-downloads, so the cncjs page itself
+  // (same origin) starts the download.
+  const host = window.parent.document;
+  const link = host.createElement('a');
+  link.href = url;
+  link.download = filename;
+  host.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+
+// Both carry the report, whose lengths follow the machine's units (mm until known).
 async function exportSession() {
   try {
-    const bytes = await engine('export_zip', current);
-    const url = URL.createObjectURL(new Blob([bytes], { type: 'application/zip' }));
-    // cncjs sandboxes widget frames without allow-downloads, so the cncjs page itself
-    // (same origin) starts the download.
-    const host = window.parent.document;
-    const link = host.createElement('a');
-    link.href = url;
-    link.download = `${current}.zip`;
-    host.body.append(link);
-    link.click();
-    link.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    const bytes = await engine('export_zip', current, units());
+    download(new Blob([bytes], { type: 'application/zip' }), `${current}.zip`);
+  } catch (err) {
+    showError(err.message);
+  }
+}
+
+async function downloadReport() {
+  try {
+    const page = await engine('report_html', current, units());
+    download(new Blob([page], { type: 'text/html' }), `${current}-report.html`);
   } catch (err) {
     showError(err.message);
   }
@@ -267,28 +309,14 @@ function note(event, detail) {
 }
 
 function setPort(port) {
+  // Another port may be another machine: its units are unknown until cncjs reports them.
+  if (port !== cnc.port) {
+    showIn(null);
+    cnc.loadedUnits = null;
+  }
   cnc.port = port;
   cnc.link = port ? 'ready' : 'no-port';
-  cnc.keep = port ? localStorage.getItem(keepKey()) : null;
-  if (!port) {
-    cnc.reported = null;
-    cnc.settled = null;
-    showIn(null);
-  }
   render();
-}
-
-function keepKey() {
-  return `${KEEP_UNITS_KEY}|${cncjsOrigin}|${cnc.port}`;
-}
-
-function hold(units) {
-  cnc.keep = units;
-  if (units) {
-    localStorage.setItem(keepKey(), units);
-    return;
-  }
-  localStorage.removeItem(keepKey());
 }
 
 function showIn(next) {
@@ -299,36 +327,6 @@ function showIn(next) {
     keepStep();
   }
   cnc.units = next;
-}
-
-// The stopped job left G21 behind and the machine has not gone back to G20 since.
-function keptFromStoppedJob() {
-  return cnc.keep !== null && cnc.workflow === 'idle' && cnc.reported !== null && cnc.reported !== cnc.keep;
-}
-
-// The machine's G20/G21 mode decides how the wizard shows lengths. Programs run in G21 and
-// put an inch machine back in G20 as their last step, so a job that ran to its end changes
-// nothing. A job stopped part-way leaves G21 behind, which is not the operator's choice: an
-// inch machine then stays in inches here until it goes back to G20 or the operator says
-// to follow the machine.
-function followMachine() {
-  if (!cnc.reported || cnc.workflow === null) {
-    return;
-  }
-  if (cnc.workflow !== 'idle') {
-    // cncjs does not refresh the mode during a job; what it repeats right after one is
-    // still this value, and must not pass for the machine going back to G20.
-    cnc.settled = cnc.reported;
-    return;
-  }
-  // Only one of this widget's programs ends by restoring G20.
-  const finished = OWN_PROGRAM.test(cnc.program) && cnc.lines.total > 0 && cnc.lines.received >= cnc.lines.total;
-  const wentBack = cnc.reported === cnc.keep && cnc.settled !== cnc.reported;
-  if (cnc.keep && (finished || wentBack)) {
-    hold(null);
-  }
-  cnc.settled = cnc.reported;
-  showIn(cnc.keep ?? cnc.reported);
 }
 
 async function connectCncjs() {
@@ -366,12 +364,11 @@ async function connectCncjs() {
   });
   socket.on('gcode:unload', () => {
     cnc.program = '';
+    cnc.loadedUnits = null;
     render();
   });
   socket.on('sender:status', (status) => {
     cnc.program = status.name ?? cnc.program;
-    cnc.lines = { received: status.received, total: status.total };
-    followMachine();
     note('sender', { sent: status.sent, received: status.received, total: status.total });
     // A manual-spindle program stops at "M0 (set the spindle to N rpm, then resume)". cncjs
     // reports the pause as soon as it sends the line; the machine has only stopped once
@@ -389,20 +386,13 @@ async function connectCncjs() {
     if (workflow === 'running' && cnc.workflow !== 'paused') {
       timeline = [];
     }
-    // Only this widget's programs switch the machine to G21. Another job starting changes
-    // nothing: the machine is still in the G21 a stopped job left.
-    if (workflow === 'running' && cnc.workflow === 'idle' && cnc.units === 'in' && OWN_PROGRAM.test(cnc.program)) {
-      hold('in');
-    }
     cnc.workflow = workflow;
-    followMachine();
     note('workflow', { state: workflow });
     syncRecording();
     render();
   });
   socket.on('controller:state', (_type, controller) => {
-    cnc.reported = MACHINE_UNITS[controller?.parserstate?.modal?.units] ?? cnc.reported;
-    followMachine();
+    showIn(MACHINE_UNITS[controller?.parserstate?.modal?.units] ?? cnc.units);
     render();
   });
 }
@@ -422,6 +412,12 @@ window.addEventListener('message', (event) => {
 
 // ---- recording follows the job ---------------------------------------------------------
 
+// cncjs holds this round's program as this widget loaded it, in the units the machine
+// reports now. After a reload of the widget the units it was loaded in are unknown.
+function loadedHere(round) {
+  return cnc.program === round.program && cnc.loadedUnits !== null && cnc.loadedUnits === cnc.units;
+}
+
 function plannedRound() {
   const last = state?.rounds.at(-1);
   return last && !last.analysed ? last : null;
@@ -433,7 +429,11 @@ function syncRecording() {
     return;
   }
   const round = plannedRound();
-  if (!mic.recording && round && cnc.workflow === 'running' && cnc.program === round.program) {
+  if (!mic.recording && round && cnc.workflow === 'running' && cnc.program === round.program && !loadedHere(round)) {
+    showError('This run is not recorded: the program in cncjs may be in other units than the machine is in now. Stop the job, load the program again from here, then run it.');
+    return;
+  }
+  if (!mic.recording && round && cnc.workflow === 'running' && loadedHere(round)) {
     if (!mic.open) {
       showError('The job is running but the microphone is not open, so this run cannot be analysed. Enable the microphone and run the round again.');
       return;
@@ -454,13 +454,15 @@ async function loadProgram(round) {
   try {
     // Capture has to be running before the job can start; the listener below does not wait.
     await mic.resume();
-    const gcode = await engine('program', current, round.round, units());
+    const programUnits = cnc.units;
+    const gcode = await engine('program', current, round.round, programUnits);
     await new Promise((resolve, reject) => {
       cnc.socket.emit('command', cnc.port, 'gcode:load', round.program, gcode, {}, (err) =>
         err ? reject(new Error(`cncjs could not load the program: ${err.message ?? err}`)) : resolve(),
       );
     });
     cnc.program = round.program;
+    cnc.loadedUnits = programUnits;
     showError('');
   } catch (err) {
     showError(err.message);
@@ -528,16 +530,24 @@ function renderSetup() {
   $('setup-back').hidden = editing.step === 0;
   $('setup-next').textContent = editing.step === STEPS.length - 1 ? 'Save' : 'Next';
   $('setup-next').disabled = busy;
-  const kept = keptFromStoppedJob();
-  $('units').textContent = UNITS_TEXT[kept ? 'kept' : (cnc.units ?? 'unknown')];
-  $('follow-machine').hidden = !kept;
+  $('units').textContent = UNITS_TEXT[cnc.units ?? 'unknown'];
   // Redraw the fields only when the step or the machine's units change, so typing is not
   // interrupted otherwise. A change of units drops an entry that is only half typed.
   const key = `${current}|${editing.step}|${units()}`;
   if ($('setup-form').dataset.key !== key) {
-    draw($('setup-form'), step, editing.values, units(), editing.materials);
+    draw($('setup-form'), step, editing.values, units(), editing);
     $('setup-form').dataset.key = key;
   }
+}
+
+// Planning on the wrong face position cuts air or too deep: the choice survives redraws.
+function stockSelect() {
+  const stock = el('select', {}, el('option', { value: 'same' }, 'same block'), el('option', { value: 'fresh' }, 'fresh block, face at Y0'));
+  stock.value = stockChoice;
+  stock.onchange = () => {
+    stockChoice = stock.value;
+  };
+  return stock;
 }
 
 function renderStep() {
@@ -563,18 +573,44 @@ function renderStep() {
     return;
   }
 
+  if (state.discarded_round !== null) {
+    step.append(el('p', {}, `Round ${state.discarded_round} had not been run and was planned from the old setup, so it was discarded.`));
+  }
+
   if (state.next === 'converged') {
-    step.append(el('p', {}, 'Converged: no further cut is expected to add removal rate. The best stable cuts are below.'));
+    step.append(
+      el('p', {}, 'Converged: no further cut is expected to add removal rate. The best stable cuts are below.'),
+      el('p', {}, button('Download the report', downloadReport, { className: 'primary' }), ' to print and keep with the tool.'),
+    );
+    return;
+  }
+
+  if (state.next === 'sweep') {
+    const best = state.best[0];
+    const stock = stockSelect();
+    step.append(
+      el('p', {}, 'Converged: no further cut is expected to add removal rate. The best stable cuts are below.'),
+      el('p', {}, `One more round can find how hard the best cut (${best.rpm} rpm, ${best.width_mm.toFixed(2)} mm wide, ${best.depth_mm} mm deep) can be pushed: the same cut at rising chip loads, lightest first. Its cuts do not change the map.`),
+      el('p', {}, button('Plan the chip-load sweep', async () => {
+        await act('plan_sweep', stockChoice);
+        stockChoice = 'same';
+      }, { className: 'primary' }), ' on the ', stock),
+      el('p', {}, button('Download the report', downloadReport), ' as it stands.'),
+    );
+    return;
+  }
+
+  if (state.next === 'setup') {
+    step.append(
+      el('p', {}, 'This session still holds the example setup, not your machine. Fill it in before planning.'),
+      el('p', {}, button('Open the setup wizard', editSetup, { className: 'primary' })),
+    );
     return;
   }
 
   if (state.next === 'plan') {
     const first = state.rounds.length === 0;
-    const stock = el('select', {}, el('option', { value: 'same' }, 'same block'), el('option', { value: 'fresh' }, 'fresh block, face at Y0'));
-    stock.value = stockChoice;
-    stock.onchange = () => {
-      stockChoice = stock.value;
-    };
+    const stock = stockSelect();
     const shallower = !first && state.next_depth_mm !== state.depth_mm;
     const label = `Plan round ${state.rounds.length + 1}${shallower ? ` at ${state.next_depth_mm} mm depth` : ''}`;
     const plan = button(label, async () => {
@@ -591,18 +627,33 @@ function renderStep() {
 
   const tests = round.passes.filter((p) => p.kind === 'test').length;
   const speedChanges = (r) => r.passes.filter((p, i) => i === 0 || p.rpm !== r.passes[i - 1].rpm).length;
-  const loaded = cnc.program === round.program;
-  const ready = cnc.link === 'ready' && cnc.workflow === 'idle' && mic.open;
+  const loaded = loadedHere(round);
+  // The name matches, but the units it was loaded in differ or are not known: load it again.
+  const unsure = cnc.program === round.program && !loaded;
+  // The program is written in the machine's units, so they have to be known first.
+  const ready = cnc.link === 'ready' && cnc.workflow === 'idle' && cnc.units !== null && mic.open;
   const load = button(loaded ? 'Reload program' : 'Load into cncjs', () => loadProgram(round), { className: loaded ? '' : 'primary', disabled: !ready });
+  // cncjs reports the mode from the controller's parser state. Until it does, the operator
+  // can say which it is: the program sets that mode itself, so a wrong choice cannot
+  // misplace a cut, only leave the machine in the other mode afterwards.
+  const declare = el('select', {}, el('option', { value: '' }, 'machine units?'), el('option', { value: 'mm' }, 'mm (G21)'), el('option', { value: 'in' }, 'inches (G20)'));
+  declare.onchange = () => {
+    showIn(declare.value || null);
+    render();
+  };
+  const unknownUnits = mic.open && cnc.link === 'ready' && cnc.units === null;
   step.append(
     el('p', {}, `Round ${round.round}: ${tests} test cuts ${round.depth_mm} mm deep, about ${minutes(round.run_time_s)} plus rapids. The front face ends at Y${round.face_y_end_mm}.`),
     el('ol', {},
       el('li', {}, 'Zero X at the left end of the stock, Y on its front face, Z on top.'),
-      el('li', {}, load, mic.open ? '' : ' (enable the microphone first)'),
+      el('li', {}, load, ...(unknownUnits ? [' cncjs has not reported G20 or G21 yet; the machine is in ', declare] : []), mic.open ? '' : ' (enable the microphone first)'),
       el('li', {}, loaded ? 'Press play in cncjs. Recording starts and stops with the job. Keep this tab open.' : 'Press play in cncjs.'),
       ...(state.spindle === 'manual' ? [el('li', {}, `The program pauses before each of its ${speedChanges(round)} spindle speeds. Set the speed shown here, then resume in cncjs.`)] : []),
     ),
   );
+  if (unsure) {
+    step.append(el('p', { className: 'instruction' }, 'cncjs holds this round\'s program, but it was loaded in other units than the machine is in now, or before this widget was reloaded. Load it again before pressing play; a run of it as it is will not be recorded.'));
+  }
   if (round.has_recording) {
     step.append(el('p', {}, 'The last run could not be analysed. Run the round again, or ', button('Analyse the last recording again', () => act('analyze', round.round))));
   }
@@ -632,7 +683,8 @@ function renderRound() {
   if (!round) {
     return;
   }
-  $('round-title').textContent = `Round ${round.round}${round.analysed ? ' results' : ''}, ${round.depth_mm} mm deep`;
+  const kind = round.planner === 'sweep' ? ' (chip-load sweep)' : '';
+  $('round-title').textContent = `Round ${round.round}${kind}${round.analysed ? ' results' : ''}, ${round.depth_mm} mm deep`;
   $('passes').replaceChildren(
     ...round.passes.map((p) =>
       el('tr', { className: p.kind === 'test' ? '' : 'prep' },
@@ -717,6 +769,15 @@ function renderBest() {
       ),
     ),
   );
+  const sweep = state?.sweep;
+  $('sweep-result').hidden = !sweep || best.length === 0;
+  if (!sweep) {
+    return;
+  }
+  const where = `At ${sweep.rpm} rpm, ${sweep.width_mm.toFixed(2)} mm wide and ${sweep.depth_mm} mm deep`;
+  $('sweep-result').textContent = sweep.chip_load_mm === null
+    ? `Chip-load sweep: ${where.toLowerCase()}, even its lightest pass chattered. Keep the session's ${sweep.session_chip_load_mm} mm per tooth.`
+    : `Chip-load sweep: ${where.toLowerCase()}, the cut stayed stable up to ${sweep.chip_load_mm} mm per tooth (the session used ${sweep.session_chip_load_mm}): feed ${sweep.feed_mm_min} mm/min, ${sweep.mrr_cm3_min.toFixed(2)} cm³/min.`;
 }
 
 function render() {
@@ -746,17 +807,13 @@ $('setup-form').onsubmit = (event) => {
   event.preventDefault();
   nextStep();
 };
-$('follow-machine').onclick = () => {
-  hold(null);
-  followMachine();
-  render();
-};
 $('cancel-setup').onclick = () => {
   editing = null;
   showError('');
   render();
 };
 $('export').onclick = exportSession;
+$('download-report').onclick = downloadReport;
 $('import').onclick = () => $('import-file').click();
 $('import-file').onchange = () => {
   const [file] = $('import-file').files;

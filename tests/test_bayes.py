@@ -8,7 +8,7 @@ import synth
 from dechatter import bayes, cli, session
 from dechatter.bayes import Observation
 from dechatter.detect import Verdict
-from dechatter.plan import envelope, grid_tests, mrr_mm3_min
+from dechatter.plan import PlannerKind, envelope, grid_tests, mrr_mm3_min
 
 MACHINE = synth.Machine()
 
@@ -113,9 +113,16 @@ def true_optimum(setup, env) -> float:
     )
 
 
-def test_session_converges_near_the_true_optimum_from_recordings_alone(tmp_path, setup):
+def fill_in(work) -> None:
+    """Describe the machine, as the user does after `init`, keeping the template's values."""
+    path = work / session.SETUP_FILE
+    path.write_text(path.read_text().replace('name = "PM-30MV"', 'name = "mill"'))
+
+
+def test_session_converges_near_the_true_optimum_from_recordings_alone(tmp_path, setup, capsys):
     work = tmp_path / "session"
     assert cli.main(["init", str(work)]) == 0
+    fill_in(work)
     for _ in range(10):
         planned = len(session.load_rounds(work))
         assert cli.main(["plan", str(work), "--new-stock"]) == 0
@@ -129,7 +136,7 @@ def test_session_converges_near_the_true_optimum_from_recordings_alone(tmp_path,
         pytest.fail("did not converge in 10 rounds")
 
     env = envelope(setup)
-    cuts = session.observations(session.load_rounds(work), setup.cut.axial_depth_mm)
+    cuts = session.observations(session.load_rounds(work), setup.cut.axial_depth_mm, env)
     for obs in cuts:
         truth = MACHINE.chatters(obs.rpm, obs.width_mm, setup.tool.flutes)
         assert (obs.verdict is Verdict.UNSTABLE) == truth
@@ -137,10 +144,65 @@ def test_session_converges_near_the_true_optimum_from_recordings_alone(tmp_path,
     assert best_mrr >= 0.85 * true_optimum(setup, env)
     assert len(cuts) <= 40
 
+    # Converged: a chip-load sweep of the best cut is offered, planned, and reported.
+    assert f"dechatter plan {work} --sweep" in capsys.readouterr().out
+    assert cli.main(["plan", str(work), "--sweep", "--new-stock"]) == 0
+    sweep = session.load_rounds(work)[-1]
+    assert sweep.plan.planner is PlannerKind.SWEEP
+    wav = sweep.path / "recording.wav"
+    soundfile.write(wav, synth.record(sweep.plan, seed=99), synth.RATE)
+    assert cli.main(["analyze", str(work), str(wav)]) == 0
+    capsys.readouterr()
+    assert cli.main(["report", str(work)]) == 0
+    assert "chip-load sweep (round" in capsys.readouterr().out
+    after = session.observations(session.load_rounds(work), setup.cut.axial_depth_mm, env)
+    assert after == cuts, "the sweep's cuts stay off the map"
+
+
+def test_plan_refuses_until_the_setup_is_filled_in(tmp_path, capsys):
+    work = tmp_path / "session"
+    cli.main(["init", str(work)])
+    path = work / session.SETUP_FILE
+    # Re-wrapping lines or line endings in an editor fills nothing in.
+    path.write_text(path.read_text().replace("\n", "\r\n  ") + "\n\n", newline="")
+    assert cli.main(["plan", str(work)]) == 1
+    assert "still the example template" in capsys.readouterr().err
+    assert session.load_rounds(work) == []
+
+    fill_in(work)
+    assert cli.main(["plan", str(work)]) == 0
+    assert [r.plan.round for r in session.load_rounds(work)] == [1]
+
 
 def test_plan_refuses_until_the_last_round_is_analysed(tmp_path, capsys):
     work = tmp_path / "session"
     cli.main(["init", str(work)])
+    fill_in(work)
     assert cli.main(["plan", str(work)]) == 0
     assert cli.main(["plan", str(work)]) == 1
     assert "dechatter analyze" in capsys.readouterr().err
+
+
+def test_plan_refuses_a_setup_that_changed_what_a_cut_round_measured(tmp_path, capsys):
+    work = tmp_path / "session"
+    cli.main(["init", str(work)])
+    fill_in(work)
+    assert cli.main(["plan", str(work)]) == 0
+    first = session.load_rounds(work)[0]
+    assert (first.path / session.SETUP_FILE).read_bytes() == (
+        work / session.SETUP_FILE
+    ).read_bytes()
+    wav = first.path / "recording.wav"
+    soundfile.write(wav, synth.record(first.plan, seed=1), synth.RATE)
+    assert cli.main(["analyze", str(work), str(wav)]) == 0
+
+    path = work / session.SETUP_FILE
+    text = path.read_text()
+    path.write_text(text.replace("flutes = 3", "flutes = 2"))
+    assert cli.main(["plan", str(work)]) == 1
+    assert "tool.flutes" in capsys.readouterr().err
+    assert len(session.load_rounds(work)) == 1
+
+    path.write_text(text.replace("safe_z_mm = 10.0", "safe_z_mm = 20.0"))
+    assert cli.main(["plan", str(work)]) == 0
+    assert len(session.load_rounds(work)) == 2

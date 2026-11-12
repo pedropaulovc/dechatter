@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import asdict, dataclass
+from datetime import date
 from enum import StrEnum
 from pathlib import Path
 
@@ -13,12 +14,22 @@ import numpy as np
 from . import materials
 from .config import Setup, SpindleControl
 
-SCHEMA = 1
+SCHEMA = 2  # 2: dechatter 0.2.0 (planned_on, per-pass chip loads)
 SPINDLE_EFFICIENCY = 0.8
+SPEED_TOLERANCE_RPM = 0.5
+WIDTH_TOLERANCE_MM = 1e-6
 
 
 class PlanError(RuntimeError):
     pass
+
+
+class SchemaError(PlanError):
+    """A session file in another format than this version writes."""
+
+    def __init__(self, path: Path, found: object, wanted: int):
+        age = "an older" if isinstance(found, int) and found < wanted else "another"
+        super().__init__(f"{path.name} was written by {age} dechatter (schema {found})")
 
 
 class PassKind(StrEnum):
@@ -30,6 +41,7 @@ class PassKind(StrEnum):
 class PlannerKind(StrEnum):
     GRID = "grid"
     BAYES = "bayes"
+    SWEEP = "sweep"  # one cut at rising chip loads; not part of the speed x width map
 
 
 @dataclass(frozen=True)
@@ -42,6 +54,7 @@ class Pass:
     expected_cut_s: float
     lead_in_s: float
     p_stable: float | None = None
+    chip_load_mm: float | None = None  # a chip-load sweep's own; else the plan's
 
 
 @dataclass(frozen=True)
@@ -56,6 +69,7 @@ class Plan:
     dwell_s: float
     plunge_s: float  # feed move from the clearance plane down to depth, beside the stock
     passes: tuple[Pass, ...]
+    planned_on: str  # ISO date
     schema: int = SCHEMA
 
     @property
@@ -75,7 +89,7 @@ class Plan:
     def load(path: Path) -> Plan:
         data = json.loads(path.read_text(encoding="utf-8"))
         if data.get("schema") != SCHEMA:
-            raise PlanError(f"{path}: unsupported plan schema {data.get('schema')}")
+            raise SchemaError(path, data.get("schema"), SCHEMA)
         passes = tuple(Pass(**{**p, "kind": PassKind(p["kind"])}) for p in data.pop("passes"))
         return Plan(**{**data, "planner": PlannerKind(data["planner"]), "passes": passes})
 
@@ -89,6 +103,23 @@ class Envelope:
     speed_max_rpm: int
     width_max_mm: float
     mrr_limit_mm3_min: float
+    # The speed bounds before they are snapped to the planner's speed step, and the widest
+    # width on the grid, which rounds to the width step and can lie above width_max_mm. A
+    # cut made inside them was inside the search, whatever the steps were then.
+    speed_low_rpm: float
+    speed_high_rpm: float
+    width_top_mm: float
+
+    def holds_speed(self, rpm: float) -> bool:
+        return (
+            self.speed_low_rpm - SPEED_TOLERANCE_RPM
+            <= rpm
+            <= self.speed_high_rpm + SPEED_TOLERANCE_RPM
+        )
+
+    def contains(self, rpm: float, width_mm: float) -> bool:
+        """Whether a cut lies in the region searched now; bounds may change after cutting."""
+        return self.holds_speed(rpm) and width_mm <= self.width_top_mm + WIDTH_TOLERANCE_MM
 
     def speeds(self, step_rpm: int) -> np.ndarray:
         return np.arange(self.speed_min_rpm, self.speed_max_rpm + 1, step_rpm, dtype=float)
@@ -106,10 +137,10 @@ def envelope(setup: Setup) -> Envelope:
     surface_limit = (
         materials.surface_speed_m_min(material, setup.tool.material) * 1000 / (math.pi * diameter)
     )
-    speed_max = min(setup.machine.max_rpm, surface_limit, setup.cut.speed_max_rpm or math.inf)
-    speed_max = int(speed_max // step * step)
-    speed_min = max(setup.machine.min_rpm, setup.cut.speed_min_rpm or speed_max / 4)
-    speed_min = int(math.ceil(speed_min / step) * step)
+    speed_high = min(setup.machine.max_rpm, surface_limit, setup.cut.speed_max_rpm or math.inf)
+    speed_max = int(speed_high // step * step)
+    speed_low = max(setup.machine.min_rpm, setup.cut.speed_min_rpm or speed_max / 4)
+    speed_min = int(math.ceil(speed_low / step) * step)
     if speed_min >= speed_max:
         raise PlanError(f"empty speed range: {speed_min}..{speed_max} rpm")
 
@@ -119,12 +150,17 @@ def envelope(setup: Setup) -> Envelope:
         * materials.weight_derate(setup.machine.weight_kg)
     )
     usable_w = setup.machine.spindle_power_w * setup.planner.power_fraction * SPINDLE_EFFICIENCY
+    width_max = setup.cut.width_max_mm or diameter / 2
+    width_step = setup.planner.width_step_mm
     return Envelope(
         chip_load_mm=round(chip_load, 4),
         speed_min_rpm=speed_min,
         speed_max_rpm=speed_max,
-        width_max_mm=setup.cut.width_max_mm or diameter / 2,
+        width_max_mm=width_max,
         mrr_limit_mm3_min=usable_w / material.specific_energy_j_mm3 * 60,
+        speed_low_rpm=speed_low,
+        speed_high_rpm=speed_high,
+        width_top_mm=width_step * max(1, int(round(width_max / width_step))),
     )
 
 
@@ -144,8 +180,9 @@ def make_pass(
     rpm: float,
     width_mm: float,
     p_stable: float | None = None,
+    chip_load_mm: float | None = None,
 ) -> Pass:
-    feed = feed_mm_min(setup, env, rpm)
+    feed = (chip_load_mm or env.chip_load_mm) * setup.tool.flutes * rpm
     # The cutter touches the stock when its centre is this far from the stock end.
     reach = math.sqrt(max(width_mm * (setup.tool.diameter_mm - width_mm), 0.0))
     lead_in = setup.program.clearance_mm + setup.tool.diameter_mm / 2 - reach
@@ -158,6 +195,7 @@ def make_pass(
         expected_cut_s=round((setup.stock.length_mm + 2 * reach) / feed * 60, 2),
         lead_in_s=round(lead_in / feed * 60, 2),
         p_stable=None if p_stable is None else round(p_stable, 3),
+        chip_load_mm=chip_load_mm,
     )
 
 
@@ -177,9 +215,13 @@ def assemble(
     planner: PlannerKind,
     face_y_mm: float,
     remnant_mm: float,
-    tests: list[tuple[float, float, float | None]],
+    tests: list[tuple],
 ) -> Plan:
-    """Order tests by increasing width (gradual ramp), prepend face preparation, fit the stock."""
+    """Order tests by increasing width (gradual ramp), prepend face preparation, fit the stock.
+
+    A test is (rpm, width, P(stable)), or in a chip-load sweep (rpm, width, None, chip load),
+    already lightest first: equal widths keep their order.
+    """
     prep = preparation_passes(setup, env, remnant_mm)
     budget = setup.stock.width_mm - face_y_mm - sum(w for _, w in prep)
     ordered = sorted(tests, key=lambda t: (t[1], t[0]))
@@ -205,8 +247,10 @@ def assemble(
     for rpm, width in prep[:-1]:
         passes.append(make_pass(setup, env, len(passes), PassKind.CLEANUP, rpm, width))
     passes.append(make_pass(setup, env, len(passes), PassKind.TRUING, *prep[-1]))
-    for rpm, width, p_stable in kept:
-        passes.append(make_pass(setup, env, len(passes), PassKind.TEST, rpm, width, p_stable))
+    for rpm, width, p_stable, *chip_load in kept:
+        passes.append(
+            make_pass(setup, env, len(passes), PassKind.TEST, rpm, width, p_stable, *chip_load)
+        )
     return Plan(
         round=round_no,
         planner=planner,
@@ -223,7 +267,27 @@ def assemble(
             2,
         ),
         passes=tuple(passes),
+        planned_on=date.today().isoformat(),
     )
+
+
+SWEEP_PASSES = 5
+
+
+def sweep_tests(setup: Setup, env: Envelope, rpm: float, width_mm: float) -> list[tuple]:
+    """(rpm, width, None, chip load) for a chip-load sweep of one cut, lightest first.
+
+    Chip loads step evenly between the planner's bounds, as multiples of the session's chip
+    load. The power cap trims the heaviest.
+    """
+    cfg = setup.planner
+    tests = []
+    for factor in np.linspace(cfg.chip_load_sweep_low, cfg.chip_load_sweep_high, SWEEP_PASSES):
+        chip_load = round(float(factor) * env.chip_load_mm, 4)
+        mrr = setup.cut.axial_depth_mm * width_mm * chip_load * setup.tool.flutes * rpm
+        if mrr <= env.mrr_limit_mm3_min:
+            tests.append((rpm, width_mm, None, chip_load))
+    return tests
 
 
 def grid_tests(setup: Setup, env: Envelope) -> list[tuple[float, float, None]]:
