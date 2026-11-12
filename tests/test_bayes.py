@@ -8,7 +8,7 @@ import synth
 from dechatter import bayes, cli, session
 from dechatter.bayes import Observation
 from dechatter.detect import Verdict
-from dechatter.plan import envelope, grid_tests, mrr_mm3_min
+from dechatter.plan import PlannerKind, envelope, grid_tests, mrr_mm3_min
 
 MACHINE = synth.Machine()
 
@@ -119,7 +119,7 @@ def fill_in(work) -> None:
     path.write_text(path.read_text().replace('name = "PM-30MV"', 'name = "mill"'))
 
 
-def test_session_converges_near_the_true_optimum_from_recordings_alone(tmp_path, setup):
+def test_session_converges_near_the_true_optimum_from_recordings_alone(tmp_path, setup, capsys):
     work = tmp_path / "session"
     assert cli.main(["init", str(work)]) == 0
     fill_in(work)
@@ -143,6 +143,20 @@ def test_session_converges_near_the_true_optimum_from_recordings_alone(tmp_path,
     best_mrr, _ = bayes.best_stable(setup, env, cuts)[0]
     assert best_mrr >= 0.85 * true_optimum(setup, env)
     assert len(cuts) <= 40
+
+    # Converged: a chip-load sweep of the best cut is offered, planned, and reported.
+    assert f"dechatter plan {work} --sweep" in capsys.readouterr().out
+    assert cli.main(["plan", str(work), "--sweep", "--new-stock"]) == 0
+    sweep = session.load_rounds(work)[-1]
+    assert sweep.plan.planner is PlannerKind.SWEEP
+    wav = sweep.path / "recording.wav"
+    soundfile.write(wav, synth.record(sweep.plan, seed=99), synth.RATE)
+    assert cli.main(["analyze", str(work), str(wav)]) == 0
+    capsys.readouterr()
+    assert cli.main(["report", str(work)]) == 0
+    assert "chip-load sweep (round" in capsys.readouterr().out
+    after = session.observations(session.load_rounds(work), setup.cut.axial_depth_mm, env)
+    assert after == cuts, "the sweep's cuts stay off the map"
 
 
 def test_plan_refuses_until_the_setup_is_filled_in(tmp_path, capsys):

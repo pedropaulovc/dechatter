@@ -33,7 +33,8 @@ class Next(StrEnum):
     SETUP = "setup"  # the setup is still the template: fill it in before planning
     PLAN = "plan"  # plan the first or the next round
     RUN = "run"  # a round is planned: load it, cut it, record it
-    CONVERGED = "converged"
+    SWEEP = "sweep"  # converged; a chip-load sweep of the best cut is on offer
+    CONVERGED = "converged"  # converged, and the best cut's chip load swept
 
 
 class App:
@@ -85,6 +86,13 @@ class App:
             stage = session.next_stage(self.setup, self.env, rounds)
             upcoming = Next.PLAN if stage.tests else Next.CONVERGED
             next_depth = stage.depth_mm
+        sweep = session.swept(self.setup, self.env, rounds)
+        if (
+            upcoming is Next.CONVERGED
+            and sweep is None
+            and session.best_cuts(self.setup, self.env, rounds)
+        ):
+            upcoming = Next.SWEEP
         template = setup_source(self.source.text) is SetupSource.TEMPLATE
         if upcoming is Next.PLAN and template:
             upcoming = Next.SETUP
@@ -124,6 +132,7 @@ class App:
                 "widths": shown.widths.round(2).tolist(),
                 "p": shown.p.round(3).tolist(),
             },
+            "sweep": None if sweep is None else self._sweep_json(sweep),
         }
 
     def _round_json(self, r: session.Round) -> dict:
@@ -139,6 +148,7 @@ class App:
                     "width_mm": p.width_mm,
                     "feed_mm_min": p.feed_mm_min,
                     "p_stable": p.p_stable,
+                    "chip_load_mm": p.chip_load_mm or r.plan.chip_load_mm,
                     "status": result.status if result else None,
                     "verdict": result.verdict if result else None,
                     "chatter_hz": result.chatter_hz if result else None,
@@ -157,8 +167,28 @@ class App:
             "passes": passes,
         }
 
+    def _sweep_json(self, sweep: session.Sweep) -> dict:
+        found = sweep.stable_chip_load_mm
+        feed = None if found is None else found * self.setup.tool.flutes * sweep.rpm
+        return {
+            "round": sweep.round,
+            "rpm": sweep.rpm,
+            "width_mm": sweep.width_mm,
+            "depth_mm": sweep.depth_mm,
+            "session_chip_load_mm": sweep.session_chip_load_mm,
+            "chip_load_mm": found,
+            "feed_mm_min": None if feed is None else round(feed),
+            "mrr_cm3_min": None
+            if feed is None
+            else round(sweep.depth_mm * sweep.width_mm * feed / 1000, 2),
+        }
+
     def plan(self, stock: Stock) -> None:
         session.plan_next(self.session_dir, self.source, self.env, stock)
+        self.discarded_round = None
+
+    def plan_sweep(self, stock: Stock) -> None:
+        session.plan_sweep(self.session_dir, self.source, self.env, stock)
         self.discarded_round = None
 
     def program(self, number: int, units: gcode.Units) -> str:

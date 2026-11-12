@@ -540,6 +540,16 @@ function renderSetup() {
   }
 }
 
+// Planning on the wrong face position cuts air or too deep: the choice survives redraws.
+function stockSelect() {
+  const stock = el('select', {}, el('option', { value: 'same' }, 'same block'), el('option', { value: 'fresh' }, 'fresh block, face at Y0'));
+  stock.value = stockChoice;
+  stock.onchange = () => {
+    stockChoice = stock.value;
+  };
+  return stock;
+}
+
 function renderStep() {
   const step = $('step');
   step.replaceChildren();
@@ -575,6 +585,21 @@ function renderStep() {
     return;
   }
 
+  if (state.next === 'sweep') {
+    const best = state.best[0];
+    const stock = stockSelect();
+    step.append(
+      el('p', {}, 'Converged: no further cut is expected to add removal rate. The best stable cuts are below.'),
+      el('p', {}, `One more round can find how hard the best cut (${best.rpm} rpm, ${best.width_mm.toFixed(2)} mm wide, ${best.depth_mm} mm deep) can be pushed: the same cut at rising chip loads, lightest first. Its cuts do not change the map.`),
+      el('p', {}, button('Plan the chip-load sweep', async () => {
+        await act('plan_sweep', stockChoice);
+        stockChoice = 'same';
+      }, { className: 'primary' }), ' on the ', stock),
+      el('p', {}, button('Download the report', downloadReport), ' as it stands.'),
+    );
+    return;
+  }
+
   if (state.next === 'setup') {
     step.append(
       el('p', {}, 'This session still holds the example setup, not your machine. Fill it in before planning.'),
@@ -585,11 +610,7 @@ function renderStep() {
 
   if (state.next === 'plan') {
     const first = state.rounds.length === 0;
-    const stock = el('select', {}, el('option', { value: 'same' }, 'same block'), el('option', { value: 'fresh' }, 'fresh block, face at Y0'));
-    stock.value = stockChoice;
-    stock.onchange = () => {
-      stockChoice = stock.value;
-    };
+    const stock = stockSelect();
     const shallower = !first && state.next_depth_mm !== state.depth_mm;
     const label = `Plan round ${state.rounds.length + 1}${shallower ? ` at ${state.next_depth_mm} mm depth` : ''}`;
     const plan = button(label, async () => {
@@ -662,7 +683,8 @@ function renderRound() {
   if (!round) {
     return;
   }
-  $('round-title').textContent = `Round ${round.round}${round.analysed ? ' results' : ''}, ${round.depth_mm} mm deep`;
+  const kind = round.planner === 'sweep' ? ' (chip-load sweep)' : '';
+  $('round-title').textContent = `Round ${round.round}${kind}${round.analysed ? ' results' : ''}, ${round.depth_mm} mm deep`;
   $('passes').replaceChildren(
     ...round.passes.map((p) =>
       el('tr', { className: p.kind === 'test' ? '' : 'prep' },
@@ -747,6 +769,15 @@ function renderBest() {
       ),
     ),
   );
+  const sweep = state?.sweep;
+  $('sweep-result').hidden = !sweep || best.length === 0;
+  if (!sweep) {
+    return;
+  }
+  const where = `At ${sweep.rpm} rpm, ${sweep.width_mm.toFixed(2)} mm wide and ${sweep.depth_mm} mm deep`;
+  $('sweep-result').textContent = sweep.chip_load_mm === null
+    ? `Chip-load sweep: ${where.toLowerCase()}, even its lightest pass chattered. Keep the session's ${sweep.session_chip_load_mm} mm per tooth.`
+    : `Chip-load sweep: ${where.toLowerCase()}, the cut stayed stable up to ${sweep.chip_load_mm} mm per tooth (the session used ${sweep.session_chip_load_mm}): feed ${sweep.feed_mm_min} mm/min, ${sweep.mrr_cm3_min.toFixed(2)} cm³/min.`;
 }
 
 function render() {

@@ -33,6 +33,7 @@ class PassKind(StrEnum):
 class PlannerKind(StrEnum):
     GRID = "grid"
     BAYES = "bayes"
+    SWEEP = "sweep"  # one cut at rising chip loads; not part of the speed x width map
 
 
 @dataclass(frozen=True)
@@ -45,6 +46,7 @@ class Pass:
     expected_cut_s: float
     lead_in_s: float
     p_stable: float | None = None
+    chip_load_mm: float | None = None  # a chip-load sweep's own; else the plan's
 
 
 @dataclass(frozen=True)
@@ -170,8 +172,9 @@ def make_pass(
     rpm: float,
     width_mm: float,
     p_stable: float | None = None,
+    chip_load_mm: float | None = None,
 ) -> Pass:
-    feed = feed_mm_min(setup, env, rpm)
+    feed = (chip_load_mm or env.chip_load_mm) * setup.tool.flutes * rpm
     # The cutter touches the stock when its centre is this far from the stock end.
     reach = math.sqrt(max(width_mm * (setup.tool.diameter_mm - width_mm), 0.0))
     lead_in = setup.program.clearance_mm + setup.tool.diameter_mm / 2 - reach
@@ -184,6 +187,7 @@ def make_pass(
         expected_cut_s=round((setup.stock.length_mm + 2 * reach) / feed * 60, 2),
         lead_in_s=round(lead_in / feed * 60, 2),
         p_stable=None if p_stable is None else round(p_stable, 3),
+        chip_load_mm=chip_load_mm,
     )
 
 
@@ -203,9 +207,13 @@ def assemble(
     planner: PlannerKind,
     face_y_mm: float,
     remnant_mm: float,
-    tests: list[tuple[float, float, float | None]],
+    tests: list[tuple],
 ) -> Plan:
-    """Order tests by increasing width (gradual ramp), prepend face preparation, fit the stock."""
+    """Order tests by increasing width (gradual ramp), prepend face preparation, fit the stock.
+
+    A test is (rpm, width, P(stable)), or in a chip-load sweep (rpm, width, None, chip load),
+    already lightest first: equal widths keep their order.
+    """
     prep = preparation_passes(setup, env, remnant_mm)
     budget = setup.stock.width_mm - face_y_mm - sum(w for _, w in prep)
     ordered = sorted(tests, key=lambda t: (t[1], t[0]))
@@ -231,8 +239,10 @@ def assemble(
     for rpm, width in prep[:-1]:
         passes.append(make_pass(setup, env, len(passes), PassKind.CLEANUP, rpm, width))
     passes.append(make_pass(setup, env, len(passes), PassKind.TRUING, *prep[-1]))
-    for rpm, width, p_stable in kept:
-        passes.append(make_pass(setup, env, len(passes), PassKind.TEST, rpm, width, p_stable))
+    for rpm, width, p_stable, *chip_load in kept:
+        passes.append(
+            make_pass(setup, env, len(passes), PassKind.TEST, rpm, width, p_stable, *chip_load)
+        )
     return Plan(
         round=round_no,
         planner=planner,
@@ -251,6 +261,25 @@ def assemble(
         passes=tuple(passes),
         planned_on=date.today().isoformat(),
     )
+
+
+SWEEP_PASSES = 5
+
+
+def sweep_tests(setup: Setup, env: Envelope, rpm: float, width_mm: float) -> list[tuple]:
+    """(rpm, width, None, chip load) for a chip-load sweep of one cut, lightest first.
+
+    Chip loads step evenly between the planner's bounds, as multiples of the session's chip
+    load. The power cap trims the heaviest.
+    """
+    cfg = setup.planner
+    tests = []
+    for factor in np.linspace(cfg.chip_load_sweep_low, cfg.chip_load_sweep_high, SWEEP_PASSES):
+        chip_load = round(float(factor) * env.chip_load_mm, 4)
+        mrr = setup.cut.axial_depth_mm * width_mm * chip_load * setup.tool.flutes * rpm
+        if mrr <= env.mrr_limit_mm3_min:
+            tests.append((rpm, width_mm, None, chip_load))
+    return tests
 
 
 def grid_tests(setup: Setup, env: Envelope) -> list[tuple[float, float, None]]:

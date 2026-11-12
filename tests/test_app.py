@@ -94,7 +94,7 @@ def converge(engine, setup, machine: synth.Machine = MACHINE, **run) -> dict:
                 continue
             truth = machine.chatters(p["rpm"], p["width_mm"], setup.tool.flutes, latest["depth_mm"])
             assert p["verdict"] == ("unstable" if truth else "stable")
-        if state["next"] == "converged":
+        if state["next"] in ("converged", "sweep"):
             return state
     pytest.fail("did not converge in 16 rounds")
 
@@ -619,6 +619,48 @@ def test_session_names_cannot_escape_the_store(engine):
             engine.call("create", name)
     with pytest.raises(RuntimeError, match="already exists"):
         engine.call("create", NAME)
+
+
+def test_a_chip_load_sweep_follows_convergence_and_stays_off_the_map(engine, setup):
+    engine.call("plan", NAME, "same")
+    engine.run_round(1)
+    with pytest.raises(RuntimeError, match="has not converged"):
+        engine.call("plan_sweep", NAME, "same")
+
+    state = converge(engine, setup)
+    assert state["next"] == "sweep" and state["sweep"] is None
+    best, cuts = state["best"][0], len(state["observations"])
+    state = engine.call("plan_sweep", NAME, "fresh")
+    sweep = state["rounds"][-1]
+    assert sweep["planner"] == "sweep" and state["next"] == "run"
+    tests = [p for p in sweep["passes"] if p["kind"] == "test"]
+    assert 4 <= len(tests) <= 5
+    assert {(p["rpm"], p["width_mm"]) for p in tests} == {(best["rpm"], best["width_mm"])}
+    assert sweep["depth_mm"] == best["depth_mm"]
+    loads = [p["chip_load_mm"] for p in tests]
+    session_load = sweep["passes"][0]["chip_load_mm"]  # the truing pass runs at it
+    assert loads == sorted(loads) and loads[0] == pytest.approx(0.6 * session_load, abs=1e-4)
+    assert loads[-1] <= 1.7 * session_load + 1e-4
+    for p in tests:
+        assert p["feed_mm_min"] == pytest.approx(
+            p["chip_load_mm"] * setup.tool.flutes * p["rpm"], abs=0.1
+        )
+    program = engine.call("program", NAME, sweep["round"], "mm")
+    assert {f"F{p['feed_mm_min']:g}" for p in tests} <= set(program.split())
+
+    state = engine.run_round(sweep["round"])
+    assert state["next"] == "converged"
+    assert len(state["observations"]) == cuts and state["best"][0] == best
+    found = state["sweep"]
+    assert found["chip_load_mm"] == loads[-1], "the simulated machine ignores chip load"
+    assert found["feed_mm_min"] == round(loads[-1] * setup.tool.flutes * best["rpm"])
+
+    # Chatter at the third chip load: the result is the one before it.
+    third = tests[2]["id"]
+    state = engine.call("set_verdict", NAME, sweep["round"], third, "unstable")
+    assert state["sweep"]["chip_load_mm"] == loads[1]
+    page = engine.call("report_html", NAME, "mm")
+    assert "Chip-load sweep, round" in page and "chip-load sweep, planned" in page
 
 
 def converged_report(engine, setup, units: str) -> str:

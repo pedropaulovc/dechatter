@@ -109,6 +109,9 @@ class Planner:
     misclassification: float = 0.05
     sweet_spot_trust: float = 0.5
     power_fraction: float = 0.6
+    # The chip-load sweep after convergence, as multiples of the session's chip load.
+    chip_load_sweep_low: float = 0.6
+    chip_load_sweep_high: float = 1.7
 
 
 @dataclass(frozen=True)
@@ -284,6 +287,8 @@ def _validate(setup: Setup) -> None:
         raise ConfigError("[planner] round1_width_fractions must list numbers in (0, 1]")
     if not 0 < setup.planner.probability_floor <= setup.planner.min_probability < 1:
         raise ConfigError("[planner] need 0 < probability_floor <= min_probability < 1")
+    if not 0 < setup.planner.chip_load_sweep_low < setup.planner.chip_load_sweep_high:
+        raise ConfigError("[planner] need 0 < chip_load_sweep_low < chip_load_sweep_high")
 
 
 TEMPLATE = """\
@@ -335,4 +340,6 @@ batch_size = 8
 min_probability = 0.8      # each cut is this likely stable, if the cut before it passes
 probability_floor = 0.5    # ... and this likely stable on measured data alone
 stop_improvement = 0.05    # converged when no cut promises this much more removal rate
+chip_load_sweep_low = 0.6  # after convergence the best cut can be tried at chip loads
+chip_load_sweep_high = 1.7 # ... from low to high times the session's chip load
 """

@@ -7,6 +7,7 @@ import pytest
 from dechatter import gcode
 from dechatter.config import ConfigError, load_setup
 from dechatter.plan import (
+    SWEEP_PASSES,
     PassKind,
     PlanError,
     PlannerKind,
@@ -14,6 +15,7 @@ from dechatter.plan import (
     envelope,
     grid_tests,
     mrr_mm3_min,
+    sweep_tests,
 )
 
 MM = gcode.Units.MM
@@ -167,3 +169,24 @@ def test_spindle_power_is_given_in_hp_and_the_old_watts_key_is_refused(write_set
     )
     with pytest.raises(ConfigError, match="spindle_power_w is now spindle_power_hp"):
         load_setup(write_setup(p=("spindle_power_hp = 2.0", "spindle_power_w = 1500")))
+
+
+def test_a_chip_load_sweep_steps_lightest_first_inside_the_power_cap(setup, write_setup):
+    env = envelope(setup)
+    tests = sweep_tests(setup, env, 4000, 2.0)
+    loads = [t[3] for t in tests]
+    assert len(tests) == SWEEP_PASSES and loads == sorted(loads)
+    assert loads[0] == pytest.approx(0.6 * env.chip_load_mm, abs=1e-4)
+    assert loads[-1] == pytest.approx(1.7 * env.chip_load_mm, abs=1e-4)
+    plan = assemble(setup, env, 2, PlannerKind.SWEEP, 0.0, 0.0, tests)
+    swept = [p for p in plan.passes if p.kind is PassKind.TEST]
+    assert [p.chip_load_mm for p in swept] == loads
+    assert [p.feed_mm_min for p in swept] == [
+        pytest.approx(load * setup.tool.flutes * 4000, abs=0.1) for load in loads
+    ]
+
+    weak = load_setup(write_setup(p=("spindle_power_hp = 2.0", "spindle_power_hp = 0.3")))
+    capped = sweep_tests(weak, envelope(weak), 4000, 2.0)
+    assert 0 < len(capped) < SWEEP_PASSES
+    with pytest.raises(ConfigError, match="chip_load_sweep_low < chip_load_sweep_high"):
+        load_setup(write_setup(s=("chip_load_sweep_high = 1.7", "chip_load_sweep_high = 0.5")))

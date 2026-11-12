@@ -89,7 +89,11 @@ a page the microphone on those. Then, in the widget:
    pass as stable or chatter, the stability map and the best cuts so far.
 6. If your ears disagree with a verdict, change it in the table. Plan the next round and
    repeat until the widget reports convergence.
-7. Download the report: one HTML page to print (Letter or A4, black and white) and keep with
+7. Optionally, plan the chip-load sweep it then offers: the best cut once more at five
+   chip loads, from 0.6 to 1.7 times the session's (both Advanced planner settings), lightest
+   first and inside the power cap. The result is the highest chip load that stayed stable,
+   with its feed. Its cuts do not change the map, which stays at the session's chip load.
+8. Download the report: one HTML page to print (Letter or A4, black and white) and keep with
    the tool. It holds the recommended cuts per depth with feed, removal rate and spindle
    power, the stability map, every round's passes (marking verdicts set by hand) and the
    setup. Lengths follow the machine's G20/G21, with mm beside. It is offered on convergence
@@ -136,6 +140,7 @@ continuous recording, run the program, stop recording after `M30`. Then:
 ```sh
 dechatter analyze al-10mm recording.wav   # classifies each pass
 dechatter plan al-10mm                    # next round, or "converged"
+dechatter plan al-10mm --sweep            # once converged: chip-load sweep of the best cut
 dechatter report al-10mm                  # stability map and best cuts so far
 dechatter report al-10mm --html al-10mm.html --units in   # printable report
 ```

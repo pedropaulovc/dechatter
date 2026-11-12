@@ -26,6 +26,7 @@ from .plan import (
     assemble,
     grid_tests,
     mrr_mm3_min,
+    sweep_tests,
 )
 
 log = logging.getLogger(__name__)
@@ -132,11 +133,16 @@ DEPTH_TOLERANCE_MM = 1e-6
 
 
 def _tests(rounds: list[Round], wanted) -> list[Observation]:
-    """Classified test cuts of the rounds whose depth `wanted` accepts, as they were made."""
+    """Classified test cuts of the rounds whose depth `wanted` accepts, as they were made.
+
+    A chip-load sweep is left out: its cuts are not at the session's chip load.
+    """
     return [
         Observation(p.rpm, p.width_mm, p.verdict, p.chatter_hz)
         for r in rounds
-        if r.results is not None and wanted(r.plan.axial_depth_mm)
+        if r.results is not None
+        and r.plan.planner is not PlannerKind.SWEEP
+        and wanted(r.plan.axial_depth_mm)
         for p in r.results.passes
         if p.kind is PassKind.TEST and p.verdict is not None
     ]
@@ -361,37 +367,140 @@ class Planned:
     expected_improvement: float
 
 
-def plan_next(session: Path, source: SetupFile, env: Envelope, stock: Stock) -> Planned:
-    """Plan the next round and write its directory, or report convergence.
-
-    The round keeps the setup's text: the setup its plan and program came from.
-    """
+def _rounds_to_plan_after(session: Path, source: SetupFile) -> list[Round]:
+    """The session's rounds, once the setup is one a round may be planned from."""
     if setup_source(source.text) is SetupSource.TEMPLATE:
         raise PlanError(
             f"{SETUP_FILE} is still the example template, not your machine: fill in the "
             "machine, tool, cut and stock (the widget's setup wizard, or edit the file) "
             "before planning"
         )
-    setup = source.setup
     rounds = load_rounds(session)
-    check_measured(rounds, setup)
+    check_measured(rounds, source.setup)
+    return rounds
+
+
+def _place(
+    session: Path,
+    source: SetupFile,
+    env: Envelope,
+    rounds: list[Round],
+    stock: Stock,
+    depth_mm: float,
+    planner: PlannerKind,
+    tests: list,
+) -> Plan:
+    """Lay the tests out on the face as it stands, and write the round."""
     face, remnant = face_after(rounds[-1]) if rounds else (0.0, 0.0)
     if stock is Stock.FRESH:
         face, remnant = 0.0, 0.0
-    stage = next_stage(setup, env, rounds)
-    if not stage.tests:
-        return Planned(None, stage.expected_improvement)
     number = rounds[-1].plan.round + 1 if rounds else 1
     shallowest = _shallowest_on_block(rounds)
-    if face > 0 and stage.depth_mm > shallowest + DEPTH_TOLERANCE_MM:
+    if face > 0 and depth_mm > shallowest + DEPTH_TOLERANCE_MM:
         raise PlanError(
-            f"round {number} would cut {stage.depth_mm:g} mm deep, but this block's face is "
+            f"round {number} would cut {depth_mm:g} mm deep, but this block's face is "
             f"only flat down to {shallowest:g} mm. Mount fresh stock and plan with new stock."
         )
-    at = at_depth(setup, stage.depth_mm)
-    plan = assemble(at, env, number, stage.planner, face, remnant, stage.tests)
+    at = at_depth(source.setup, depth_mm)
+    plan = assemble(at, env, number, planner, face, remnant, tests)
     _write_round(session, source.text, at, plan)
+    return plan
+
+
+def plan_next(session: Path, source: SetupFile, env: Envelope, stock: Stock) -> Planned:
+    """Plan the next round and write its directory, or report convergence.
+
+    The round keeps the setup's text: the setup its plan and program came from.
+    """
+    rounds = _rounds_to_plan_after(session, source)
+    if rounds:
+        face_after(rounds[-1])  # the last round must have been analysed
+    stage = next_stage(source.setup, env, rounds)
+    if not stage.tests:
+        return Planned(None, stage.expected_improvement)
+    plan = _place(session, source, env, rounds, stock, stage.depth_mm, stage.planner, stage.tests)
     return Planned(plan, stage.expected_improvement)
+
+
+def plan_sweep(session: Path, source: SetupFile, env: Envelope, stock: Stock) -> Plan:
+    """Once the map has converged: the best stable cut at rising chip loads, lightest first.
+
+    Its cuts are kept apart from the speed x width map, which stays at the session's chip
+    load. The chip load is not a setup change here: the sweep is the one place it varies.
+    """
+    rounds = _rounds_to_plan_after(session, source)
+    if rounds:
+        face_after(rounds[-1])
+    if next_stage(source.setup, env, rounds).tests:
+        raise PlanError("the stability map has not converged yet: plan the next round first")
+    found = best_cuts(source.setup, env, rounds)
+    if not found:
+        raise PlanError("no stable cut has been measured to sweep")
+    best = found[0]
+    tests = sweep_tests(at_depth(source.setup, best.depth_mm), env, best.rpm, best.width_mm)
+    if not tests:
+        raise PlanError("the power cap leaves no chip load to sweep at the best cut")
+    return _place(session, source, env, rounds, stock, best.depth_mm, PlannerKind.SWEEP, tests)
+
+
+@dataclass(frozen=True)
+class Sweep:
+    """What a chip-load sweep found at one cut."""
+
+    round: int
+    rpm: float
+    width_mm: float
+    depth_mm: float
+    session_chip_load_mm: float
+    stable_chip_load_mm: float | None  # the highest that stayed stable; None: not even the first
+
+
+def sweeps(rounds: list[Round]) -> list[Sweep]:
+    """The analysed chip-load sweeps, oldest first.
+
+    Passes run lightest first, so the result is the last chip load stable before the first
+    pass that chattered, aborted unheard or was not found.
+    """
+    found = []
+    for r in rounds:
+        if r.plan.planner is not PlannerKind.SWEEP or r.results is None:
+            continue
+        verdicts = {p.id: p.verdict for p in r.results.passes}
+        tests = [p for p in r.plan.passes if p.kind is PassKind.TEST]
+        stable = None
+        for p in tests:
+            if verdicts.get(p.id) is not Verdict.STABLE:
+                break
+            stable = p.chip_load_mm
+        first = tests[0]
+        found.append(
+            Sweep(
+                r.plan.round,
+                first.rpm,
+                first.width_mm,
+                r.plan.axial_depth_mm,
+                r.plan.chip_load_mm,
+                stable,
+            )
+        )
+    return found
+
+
+def swept(setup: Setup, env: Envelope, rounds: list[Round]) -> Sweep | None:
+    """The sweep of the best cut as it stands, if one was run."""
+    found = best_cuts(setup, env, rounds)
+    if not found:
+        return None
+    best = found[0]
+    for sweep in reversed(sweeps(rounds)):
+        same = (
+            round(sweep.rpm) == round(best.rpm)
+            and abs(sweep.width_mm - best.width_mm) <= 1e-6
+            and abs(sweep.depth_mm - best.depth_mm) <= DEPTH_TOLERANCE_MM
+        )
+        if same:
+            return sweep
+    return None
 
 
 # The setup fields that may change once a round was cut. They move the program around the

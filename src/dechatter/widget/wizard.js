@@ -33,7 +33,7 @@ const INFO = {
   'cut.other_depths_mm': 'Tested after the deepest depth settles, deepest first. A shallower round leaves the face flat only down to its own depth, so a deeper one after it needs fresh stock.',
   'cut.direction': `Conventional or climb. The results apply to the direction tested. ${FIXED}`,
   'cut.width_max_mm': `The widest radial cut tried. Default: half the cutter diameter. ${FREE}`,
-  'cut.chip_load_mm': `Feed per tooth, held constant for the whole session: feed = chip load × flutes × rpm. The default comes from the work material, the cutter diameter and the machine weight. Chatter barely depends on it, so the default is fine for mapping. Very light chip loads make narrow cuts rub and squeal, which can pass for chatter. ${FIXED}`,
+  'cut.chip_load_mm': `Feed per tooth, held constant for the whole session: feed = chip load × flutes × rpm. The default comes from the work material, the cutter diameter and the machine weight. Chatter barely depends on it, so the default is fine for mapping; the chip-load sweep offered once the map converges finds how far the best cut can be pushed. Very light chip loads make narrow cuts rub and squeal, which can pass for chatter. ${FIXED}`,
   'cut.speed_min_rpm': `The slowest test speed. Default: a quarter of the fastest, and no lower than the machine allows. ${FREE}`,
   'cut.speed_max_rpm': `The fastest test speed. Default: the machine's top speed or the material's surface-speed limit for this cutter, whichever is lower. ${FREE}`,
   'stock.length_mm': `Along X. Every pass cuts the full length. Work zero X is the left end. ${FIXED}`,
@@ -50,6 +50,8 @@ const INFO = {
   'planner.min_probability': 'Higher is more cautious: smaller steps, fewer cuts that chatter, more rounds. The defaults suit most sessions.',
   'planner.probability_floor': 'The same, judged on measured cuts only, ignoring the round\'s own earlier cuts. Higher is more cautious.',
   'planner.stop_improvement': 'Lower keeps searching for smaller gains, at the cost of more rounds.',
+  'planner.chip_load_sweep_low': 'Once the map converges, the best cut can be run again at 5 chip loads, lightest first, from this many times the session\'s chip load up to the next setting. The power cap trims the heaviest. The result is the highest chip load that stayed stable. Its cuts do not change the map.',
+  'planner.chip_load_sweep_high': 'The heaviest chip load of the sweep, as a multiple of the session\'s. Higher finds the limit of a stout tool, but the last passes may chatter hard: watch them, and feed-hold if a cut gets violent.',
 };
 
 export const infoFor = (field, units) => {
@@ -125,6 +127,8 @@ export const STEPS = [
       { at: 'planner.min_probability', section: 'advanced', label: 'Chance of being stable a cut needs', type: 'number', note: 'Assuming the cut before it passes. Between 0 and 1.' },
       { at: 'planner.probability_floor', section: 'advanced', label: 'The same, on measured cuts alone', type: 'number' },
       { at: 'planner.stop_improvement', section: 'advanced', label: 'Stop when a cut would add less than', type: 'number', note: 'As a fraction of the best removal rate so far.' },
+      { at: 'planner.chip_load_sweep_low', section: 'advanced', label: 'Chip-load sweep from', type: 'number', unit: '×', note: 'Times the session\'s chip load.' },
+      { at: 'planner.chip_load_sweep_high', section: 'advanced', label: 'Chip-load sweep up to', type: 'number', unit: '×' },
     ],
   },
 ];

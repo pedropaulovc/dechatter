@@ -16,7 +16,7 @@ from . import __version__, bayes, materials, session
 from .config import WATTS_PER_HP, SpindleControl, load_setup
 from .detect import Verdict
 from .gcode import MM_PER_INCH, Units
-from .plan import SPINDLE_EFFICIENCY, PassKind, envelope, feed_mm_min
+from .plan import SPINDLE_EFFICIENCY, PassKind, PlannerKind, envelope, feed_mm_min
 from .session import Round, VerdictSource
 
 REPORT_FILE = "report.html"
@@ -26,6 +26,12 @@ MM3_PER_IN3 = MM_PER_INCH**3
 # Map plot geometry, in SVG units.
 PLOT_W, PLOT_H = 600, 220
 LEFT, BOTTOM, TOP, RIGHT = 56, 34, 8, 8
+
+PLANNER_NAMES = {
+    PlannerKind.GRID: "grid of round 1",
+    PlannerKind.BAYES: "chosen from the map",
+    PlannerKind.SWEEP: "chip-load sweep",
+}
 
 STABLE_FILL, UNSURE_FILL, CHATTER_FILL = "#ffffff", "#c8c8c8", "#555555"
 
@@ -176,19 +182,22 @@ def render(session_dir: Path, units: Units) -> str:
         "facts",
     )
 
+    def power(mrr_mm3_min: float) -> str:
+        watts = mrr_mm3_min / 60 * material.specific_energy_j_mm3 / SPINDLE_EFFICIENCY
+        return f"{watts / WATTS_PER_HP:.2f} hp ({watts / machine.spindle_power_w:.0%})"
+
     found = session.best_cuts(setup, env, rounds)
     recommended = []
     for depth in sorted({c.depth_mm for c in found}, reverse=True):
         rows = []
         for best in [c for c in found if c.depth_mm == depth][:CUTS_PER_DEPTH]:
-            watts = best.mrr_mm3_min / 60 * material.specific_energy_j_mm3 / SPINDLE_EFFICIENCY
             rows.append(
                 [
                     f"{best.rpm:.0f}",
                     _length(best.width_mm, units),
                     _feed(feed_mm_min(setup, env, best.rpm), units),
                     _rate(best.mrr_mm3_min, units),
-                    f"{watts / WATTS_PER_HP:.2f} hp ({watts / machine.spindle_power_w:.0%})",
+                    power(best.mrr_mm3_min),
                 ]
             )
         speed = "Set the spindle to (rpm)" if manual else "Speed (rpm)"
@@ -198,6 +207,41 @@ def render(session_dir: Path, units: Units) -> str:
         )
     if not recommended:
         recommended.append("<p>No stable cut has been measured yet.</p>")
+    for sweep in session.sweeps(rounds):
+        where = (
+            f"Chip-load sweep, round {sweep.round}: {sweep.rpm:.0f} rpm, "
+            f"{_length(sweep.width_mm, units)} wide, {_length(sweep.depth_mm, units)} deep"
+        )
+        found_load = sweep.stable_chip_load_mm
+        if found_load is None:
+            recommended.append(
+                f"<h3>{_e(where)}</h3><p>Even the lightest pass chattered: keep the session's "
+                f"{_e(_length(sweep.session_chip_load_mm, units, 3))} per tooth.</p>"
+            )
+            continue
+        feed = found_load * tool.flutes * sweep.rpm
+        mrr = sweep.depth_mm * sweep.width_mm * feed
+        recommended.append(
+            f"<h3>{_e(where)}</h3>"
+            + _table(
+                [
+                    "Stable up to (per tooth)",
+                    "Of the session's",
+                    "Feed",
+                    "Removal rate",
+                    "Spindle power",
+                ],
+                [
+                    [
+                        _length(found_load, units, 3),
+                        f"{found_load / sweep.session_chip_load_mm:.2f}×",
+                        _feed(feed, units),
+                        _rate(mrr, units),
+                        power(mrr),
+                    ]
+                ],
+            )
+        )
 
     maps = []
     for depth in sorted({r.plan.axial_depth_mm for r in rounds}, reverse=True):
@@ -230,6 +274,7 @@ def render(session_dir: Path, units: Units) -> str:
                     p.kind.value,
                     str(p.rpm),
                     _length(p.width_mm, units),
+                    _length(p.chip_load_mm or r.plan.chip_load_mm, units, 3),
                     _feed(p.feed_mm_min, units),
                     "" if result is None else result.status.value,
                     verdict,
@@ -239,10 +284,20 @@ def render(session_dir: Path, units: Units) -> str:
         state = "analysed" if r.results else "not analysed"
         log.append(
             f"<h3>Round {r.plan.round}: {_e(_length(r.plan.axial_depth_mm, units))} deep, "
-            f"{_e(r.plan.planner)} planner, planned {_e(r.plan.planned_on)}"
+            f"{_e(PLANNER_NAMES[r.plan.planner])}, planned {_e(r.plan.planned_on)}"
             f", {state}</h3>"
             + _table(
-                ["Pass", "Kind", "rpm", "Width", "Feed", "Status", "Verdict", "Verdict set"],
+                [
+                    "Pass",
+                    "Kind",
+                    "rpm",
+                    "Width",
+                    "Chip load",
+                    "Feed",
+                    "Status",
+                    "Verdict",
+                    "Verdict set",
+                ],
                 rows,
                 "log",
             )

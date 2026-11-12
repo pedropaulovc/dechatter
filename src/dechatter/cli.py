@@ -62,6 +62,21 @@ def _print_known(setup: Setup, env: Envelope, rounds: list[session.Round]) -> No
             f"  S{cut.rpm:.0f}  width {cut.width_mm:.2f} mm  depth {cut.depth_mm:g} mm"
             f"  F{feed:.0f} mm/min  {cut.mrr_mm3_min / 1000:.2f} cm3/min"
         )
+    for sweep in session.sweeps(rounds):
+        _print_sweep(setup, sweep)
+
+
+def _print_sweep(setup: Setup, sweep: session.Sweep) -> None:
+    where = f"S{sweep.rpm:.0f} width {sweep.width_mm:.2f} mm depth {sweep.depth_mm:g} mm"
+    found = sweep.stable_chip_load_mm
+    if found is None:
+        print(f"chip-load sweep (round {sweep.round}) at {where}: its lightest pass chattered")
+        return
+    feed = found * setup.tool.flutes * sweep.rpm
+    print(
+        f"chip-load sweep (round {sweep.round}) at {where}: stable up to {found:g} mm/tooth"
+        f" ({found / sweep.session_chip_load_mm:.2f}x the session's), F{feed:.0f} mm/min"
+    )
 
 
 def _print_map(stability: bayes.StabilityMap, observations: list[bayes.Observation]) -> None:
@@ -96,7 +111,11 @@ def _print_round(session_dir: Path, plan: Plan) -> None:
     )
     for p in tests:
         chance = "" if p.p_stable is None else f"  P(stable) {p.p_stable:.2f}"
-        print(f"  pass {p.id:2d}: S{p.rpm} width {p.width_mm:.2f} mm F{p.feed_mm_min:.0f}{chance}")
+        chip = "" if p.chip_load_mm is None else f"  {p.chip_load_mm:g} mm/tooth"
+        print(
+            f"  pass {p.id:2d}: S{p.rpm} width {p.width_mm:.2f} mm F{p.feed_mm_min:.0f}"
+            f"{chance}{chip}"
+        )
     print(f"wrote {session.round_dir(session_dir, plan.round) / session.PROGRAM_FILE}")
     print(f"run it while recording, then: dechatter analyze {session_dir} <recording>")
 
@@ -109,6 +128,10 @@ def cmd_plan(args: argparse.Namespace) -> int:
     env = envelope(setup)
     rounds = session.load_rounds(args.session)
     stock = Stock.FRESH if args.new_stock else Stock.SAME
+    if args.sweep:
+        plan = session.plan_sweep(args.session, source, env, stock)
+        _print_round(args.session, plan)
+        return 0
     planned = session.plan_next(args.session, source, env, stock)
     if any(r.results is not None for r in rounds):
         _print_known(setup, env, rounds)
@@ -117,6 +140,11 @@ def cmd_plan(args: argparse.Namespace) -> int:
             f"converged: no further cut is expected to add {setup.planner.stop_improvement:.0%} "
             f"removal rate (best candidate {planned.expected_improvement:.1%})"
         )
+        if session.best_cuts(setup, env, rounds) and session.swept(setup, env, rounds) is None:
+            print(
+                f"to find how far the chip load can go at the best cut: "
+                f"dechatter plan {args.session} --sweep"
+            )
         return 0
     _print_round(args.session, planned.plan)
     return 0
@@ -200,6 +228,11 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("session", type=Path)
     plan.add_argument(
         "--new-stock", action="store_true", help="fresh stock is mounted: front face is back at Y0"
+    )
+    plan.add_argument(
+        "--sweep",
+        action="store_true",
+        help="once converged: try the best cut at rising chip loads",
     )
     plan.set_defaults(run=cmd_plan)
 

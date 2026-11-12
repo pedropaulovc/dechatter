@@ -44,6 +44,12 @@ What changed for people who use the dechatter widget and command line. The forma
 
 ### Added
 
+- A chip-load sweep after convergence: the widget offers it, and `dechatter plan --sweep`
+  plans it. The best stable cut runs again at five chip loads, by default 0.6 to 1.7 times
+  the session's, lightest first and inside the power cap. The result, the highest chip load
+  that stayed stable with its feed, shows beside the best cuts, in `dechatter report` and in
+  the printed report. Its cuts do not change the stability map. The bounds are two new
+  planner settings, `chip_load_sweep_low` and `chip_load_sweep_high`.
 - A printable report: one HTML page for Letter or A4 with the recommended cuts per depth
   (feed, removal rate, spindle power), the stability map, every round's passes with
   verdicts set by hand marked, and the setup. The widget offers it on convergence and beside
