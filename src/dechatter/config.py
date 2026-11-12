@@ -145,6 +145,18 @@ def load_setup(path: Path) -> Setup:
     return parse_setup(path.read_text(encoding="utf-8"), path.name)
 
 
+@dataclass(frozen=True)
+class SetupFile:
+    """A setup and the file text it was parsed from, which a planned round keeps."""
+
+    text: str
+    setup: Setup
+
+
+def read_setup(text: str, origin: str) -> SetupFile:
+    return SetupFile(text, parse_setup(text, origin))
+
+
 def parse_setup(text: str, origin: str) -> Setup:
     """A setup from setup file text; `origin` names it in errors."""
     try:

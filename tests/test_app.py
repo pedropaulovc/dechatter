@@ -301,11 +301,15 @@ def test_the_search_can_be_widened_or_narrowed_after_a_round_was_cut(engine):
     cuts = len(state["observations"])
     widest = max(p["width_mm"] for p in state["rounds"][0]["passes"])
 
-    # Narrower than cuts already made: they stay evidence, and the map still builds.
+    # Narrower than cuts already made: those stay in their round, but leave the map and
+    # the recommendations.
     narrowed = json.loads(json.dumps(form))
     narrowed["cut"]["width_max_mm"] = round(widest * 0.6, 2)
     state = engine.call("save_setup", NAME, json.dumps(narrowed))
-    assert len(state["observations"]) == cuts
+    assert 0 < len(state["observations"]) < cuts
+    assert all(o["width_mm"] <= widest * 0.6 for o in state["observations"])
+    assert all(b["width_mm"] <= widest * 0.6 for b in state["best"])
+    assert len(state["rounds"][0]["passes"]) > cuts
     assert state["map"]["widths"][-1] <= widest * 0.6
 
     form["machine"]["max_rpm"] = 5000
@@ -317,7 +321,29 @@ def test_the_search_can_be_widened_or_narrowed_after_a_round_was_cut(engine):
     assert max(planned) > 3000 and max(planned) <= 4500
 
 
-def test_a_session_planned_by_an_older_dechatter_still_opens(engine):
+def test_narrowing_the_speeds_after_cutting_recommends_and_plans_only_inside_them(engine):
+    engine.call("plan", NAME, "same")
+    engine.run_round(1)
+    engine.call("plan", NAME, "same")
+    state = engine.run_round(2)
+    assert state["best"][0]["rpm"] > 2000
+
+    form = engine.call("setup_form", NAME)["values"]
+    form["machine"]["max_rpm"] = 2000
+    state = engine.call("save_setup", NAME, json.dumps(form))
+    assert state["best"] and all(b["rpm"] <= 2000 for b in state["best"])
+    assert all(o["rpm"] <= 2000 for o in state["observations"])
+    assert state["next"] == "plan"
+    state = engine.call("plan", NAME, "fresh")
+    planned = [p for p in state["rounds"][-1]["passes"] if p["kind"] == "test"]
+    assert planned and all(p["rpm"] <= 2000 for p in planned)
+
+
+def test_a_session_whose_rounds_have_no_setup_copy_still_opens(engine):
+    """Rounds without a setup copy, under a setup in today's format, open for viewing.
+
+    (A setup still in 0.1.1's format, with spindle_power_w, does not load at all.)
+    """
     engine.call("plan", NAME, "same")
     engine.run_round(1)
     (session.round_dir(engine.root / NAME, 1) / session.SETUP_FILE).unlink()

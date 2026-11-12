@@ -3,7 +3,7 @@
 // and analysis are dechatter's Python running in a worker (engine.js).
 
 import { Mic } from './mic.js';
-import { STEPS, draw, read, reveal } from './wizard.js';
+import { STEPS, draw, placehold, read, reveal } from './wizard.js';
 
 const params = new URLSearchParams(location.search);
 const token = params.get('token') ?? '';
@@ -138,13 +138,29 @@ async function openWizard() {
 }
 
 // What the planner makes of the entries left empty, from what the wizard holds so far.
-// Only shown as placeholders: values the wizard cannot make sense of yet show none.
+// Only shown as placeholders, filled in when the answer comes: the step is already drawn
+// and may hold typing. Values the wizard cannot make sense of yet show none, and an answer
+// overtaken by a later request is dropped.
 async function preview(wizard) {
+  wizard.asked = (wizard.asked ?? 0) + 1;
+  const asked = wizard.asked;
+  let computed = null;
   try {
-    wizard.computed = await engine('setup_preview', JSON.stringify(wizard.values));
+    computed = await engine('setup_preview', JSON.stringify(wizard.values));
   } catch {
-    wizard.computed = null;
+    computed = null;
   }
+  if (editing !== wizard || wizard.asked !== asked) {
+    return;
+  }
+  wizard.computed = computed;
+  placehold($('setup-form'), STEPS[wizard.step], units(), wizard);
+}
+
+function goToStep(step) {
+  editing.step = Math.min(Math.max(step, 0), STEPS.length - 1);
+  render();
+  preview(editing);
 }
 
 async function editSetup() {
@@ -172,14 +188,11 @@ async function nextStep() {
   }
   keepStep();
   if (editing.step < STEPS.length - 1) {
-    const wizard = editing;
-    await preview(wizard);
-    if (editing !== wizard) {
-      return;
-    }
-    wizard.step += 1;
-    render();
+    goToStep(editing.step + 1);
     return;
+  }
+  if (busy) {
+    return; // already saving
   }
   // A job may be running one of this session's programs; a new setup could discard it.
   if (cnc.workflow === 'running' || cnc.workflow === 'paused') {
@@ -197,15 +210,9 @@ async function nextStep() {
   render();
 }
 
-async function previousStep() {
+function previousStep() {
   keepStep();
-  const wizard = editing;
-  await preview(wizard);
-  if (editing !== wizard) {
-    return;
-  }
-  wizard.step -= 1;
-  render();
+  goToStep(editing.step - 1);
 }
 
 async function exportSession() {

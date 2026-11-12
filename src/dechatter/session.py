@@ -15,7 +15,7 @@ import numpy as np
 
 from . import audio, bayes, detect, gcode
 from .bayes import Observation
-from .config import Setup, SetupSource, load_setup, parse_setup, setup_source
+from .config import Setup, SetupFile, SetupSource, load_setup, setup_source
 from .detect import Thresholds, Verdict
 from .plan import (
     Envelope,
@@ -24,7 +24,6 @@ from .plan import (
     PlanError,
     PlannerKind,
     assemble,
-    envelope,
     grid_tests,
     mrr_mm3_min,
 )
@@ -121,33 +120,37 @@ def load_rounds(session: Path) -> list[Round]:
 DEPTH_TOLERANCE_MM = 1e-6
 
 
-def _cuts(rounds: list[Round], wanted) -> list[Observation]:
-    """Classified test cuts of the rounds whose depth `wanted` accepts."""
+def _cuts(rounds: list[Round], env: Envelope, wanted) -> list[Observation]:
+    """Classified test cuts, inside the envelope, of the rounds whose depth `wanted` accepts.
+
+    A cut outside the speeds and widths searched now (the bounds may have been narrowed
+    since it was made) stays in its round, but neither informs the map nor is recommended.
+    """
     return [
         Observation(p.rpm, p.width_mm, p.verdict, p.chatter_hz)
         for r in rounds
         if r.results is not None and wanted(r.plan.axial_depth_mm)
         for p in r.results.passes
-        if p.kind is PassKind.TEST and p.verdict is not None
+        if p.kind is PassKind.TEST and p.verdict is not None and env.contains(p.rpm, p.width_mm)
     ]
 
 
-def observations(rounds: list[Round], depth_mm: float) -> list[Observation]:
-    """The test cuts made at one depth."""
-    return _cuts(rounds, lambda depth: abs(depth - depth_mm) <= DEPTH_TOLERANCE_MM)
+def observations(rounds: list[Round], depth_mm: float, env: Envelope) -> list[Observation]:
+    """The test cuts made at one depth, inside the envelope."""
+    return _cuts(rounds, env, lambda depth: abs(depth - depth_mm) <= DEPTH_TOLERANCE_MM)
 
 
-def evidence(rounds: list[Round], depth_mm: float) -> list[Observation]:
+def evidence(rounds: list[Round], depth_mm: float, env: Envelope) -> list[Observation]:
     """What is known at one depth: the cuts made there, and the stable cuts made deeper.
 
     A width that was stable in a deeper cut is stable in a shallower one. Chatter in a
     deeper cut says nothing here, so those cuts are left out.
     """
-    deeper = _cuts(rounds, lambda depth: depth > depth_mm + DEPTH_TOLERANCE_MM)
+    deeper = _cuts(rounds, env, lambda depth: depth > depth_mm + DEPTH_TOLERANCE_MM)
     carried = [
         Observation(o.rpm, o.width_mm, o.verdict) for o in deeper if o.verdict is Verdict.STABLE
     ]
-    return [*observations(rounds, depth_mm), *carried]
+    return [*observations(rounds, depth_mm, env), *carried]
 
 
 def depths(setup: Setup) -> list[float]:
@@ -181,7 +184,7 @@ def best_cuts(setup: Setup, env: Envelope, rounds: list[Round]) -> list[StableCu
             o.width_mm,
         )
         for depth in cut_depths
-        for o in observations(rounds, depth)
+        for o in observations(rounds, depth, env)
         if o.verdict is Verdict.STABLE
     ]
     return sorted(found, key=lambda cut: -cut.mrr_mm3_min)
@@ -206,7 +209,7 @@ def next_stage(setup: Setup, env: Envelope, rounds: list[Round]) -> Stage:
     target = found[0].mrr_mm3_min if found else 0.0
     stage = Stage(base, PlannerKind.BAYES, [], 0.0)
     for depth in depths(setup):
-        proposal = bayes.propose(at_depth(setup, depth), env, evidence(rounds, depth), target)
+        proposal = bayes.propose(at_depth(setup, depth), env, evidence(rounds, depth, env), target)
         stage = Stage(depth, PlannerKind.BAYES, proposal.tests, proposal.expected_improvement)
         if stage.tests:
             return stage
@@ -328,17 +331,18 @@ class Planned:
     expected_improvement: float
 
 
-def plan_next(session: Path, setup_text: str, stock: Stock) -> Planned:
-    """Plan the next round from setup file text and write its directory, or report
-    convergence. The round keeps that text: the setup its plan and program came from."""
-    if setup_source(setup_text) is SetupSource.TEMPLATE:
+def plan_next(session: Path, source: SetupFile, env: Envelope, stock: Stock) -> Planned:
+    """Plan the next round and write its directory, or report convergence.
+
+    The round keeps the setup's text: the setup its plan and program came from.
+    """
+    if setup_source(source.text) is SetupSource.TEMPLATE:
         raise PlanError(
             f"{SETUP_FILE} is still the example template, not your machine: fill in the "
             "machine, tool, cut and stock (the widget's setup wizard, or edit the file) "
             "before planning"
         )
-    setup = parse_setup(setup_text, SETUP_FILE)
-    env = envelope(setup)
+    setup = source.setup
     rounds = load_rounds(session)
     check_measured(rounds, setup)
     face, remnant = face_after(rounds[-1]) if rounds else (0.0, 0.0)
@@ -356,7 +360,7 @@ def plan_next(session: Path, setup_text: str, stock: Stock) -> Planned:
         )
     at = at_depth(setup, stage.depth_mm)
     plan = assemble(at, env, number, stage.planner, face, remnant, stage.tests)
-    _write_round(session, setup_text, at, plan)
+    _write_round(session, source.text, at, plan)
     return Planned(plan, stage.expected_improvement)
 
 

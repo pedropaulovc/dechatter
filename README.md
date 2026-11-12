@@ -76,7 +76,8 @@ a page the microphone on those. Then, in the widget:
    to the setup it was measured with: start a new session instead. What only bounds the
    search may still change (the machine's speed range and power, the cut's speed and width
    limits and shallower depths), as may the machine's name, the safe height, clearance,
-   plunge feed, truing width, stock width and the planner's settings. A round
+   plunge feed, truing width, stock width and the planner's settings. Cuts outside narrowed
+   bounds stay in their round but leave the map and the recommendations. A round
    planned but not yet run is discarded when the setup changes its program, so the next
    plan uses the new setup. `dechatter plan` refuses the same changes made by hand.
 2. Plan a round. Round 1 is a coarse grid of speeds and widths.

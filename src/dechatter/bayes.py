@@ -93,12 +93,7 @@ def build_map(setup: Setup, env: Envelope, observations: list[Observation]) -> S
     stability = StabilityMap(
         env.speeds(cfg.speed_step_rpm), env.widths(cfg.width_step_mm), cfg.misclassification
     )
-    # Chatter in a cut wider than any width searched says nothing about the widths that are,
-    # as when the widest width was narrowed after cutting.
-    widest = stability.widths[-1] + cfg.width_step_mm / 2
     for obs in observations:
-        if obs.verdict is Verdict.UNSTABLE and obs.width_mm > widest:
-            continue
         stability.update(obs.rpm, obs.width_mm, obs.verdict, cfg.speed_sigma_fraction * obs.rpm)
 
     for chatter_hz, width_mm in chatter_modes(observations, cfg.speed_sigma_fraction):

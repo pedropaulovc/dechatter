@@ -11,7 +11,7 @@ import numpy as np
 
 from . import audio, bayes, materials, session
 from .audio import AudioError
-from .config import TEMPLATE, ConfigError, Setup, load_setup, parse_setup
+from .config import TEMPLATE, ConfigError, Setup, load_setup, read_setup
 from .detect import Thresholds, Verdict
 from .export import ExportError, export
 from .plan import Envelope, PassKind, Plan, PlanError, envelope
@@ -46,10 +46,10 @@ def _print_known(setup: Setup, env: Envelope, rounds: list[session.Round]) -> No
     """The stability map of each depth that was cut, then the best cuts of them all."""
     for depth in sorted({r.plan.axial_depth_mm for r in rounds}, reverse=True):
         stability = bayes.build_map(
-            session.at_depth(setup, depth), env, session.evidence(rounds, depth)
+            session.at_depth(setup, depth), env, session.evidence(rounds, depth, env)
         )
         print(f"depth {depth:g} mm:")
-        _print_map(stability, session.observations(rounds, depth))
+        _print_map(stability, session.observations(rounds, depth, env))
     ranked = session.best_cuts(setup, env, rounds)
     if not ranked:
         print("no stable cut measured yet")
@@ -101,12 +101,14 @@ def _print_round(session_dir: Path, plan: Plan) -> None:
 
 
 def cmd_plan(args: argparse.Namespace) -> int:
-    text = (args.session / session.SETUP_FILE).read_text(encoding="utf-8")
-    setup = parse_setup(text, session.SETUP_FILE)
+    source = read_setup(
+        (args.session / session.SETUP_FILE).read_text(encoding="utf-8"), session.SETUP_FILE
+    )
+    setup = source.setup
     env = envelope(setup)
     rounds = session.load_rounds(args.session)
     stock = Stock.FRESH if args.new_stock else Stock.SAME
-    planned = session.plan_next(args.session, text, stock)
+    planned = session.plan_next(args.session, source, env, stock)
     if any(r.results is not None for r in rounds):
         _print_known(setup, env, rounds)
     if planned.plan is None:

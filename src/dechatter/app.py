@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 
 from . import audio, bayes, gcode, session
-from .config import SetupSource, SpindleControl, parse_setup, setup_source
+from .config import SetupSource, SpindleControl, read_setup, setup_source
 from .detect import Thresholds, Verdict
 from .plan import PassKind, envelope, feed_mm_min
 from .session import PassStatus, SessionError, Stock
@@ -43,8 +43,10 @@ class App:
         self.session_dir = session_dir
         self.thresholds = thresholds
         # Kept as read: a round planned now stores exactly the setup it was planned from.
-        self.setup_text = (session_dir / session.SETUP_FILE).read_text(encoding="utf-8")
-        self.setup = parse_setup(self.setup_text, session.SETUP_FILE)
+        self.source = read_setup(
+            (session_dir / session.SETUP_FILE).read_text(encoding="utf-8"), session.SETUP_FILE
+        )
+        self.setup = self.source.setup
         self.env = envelope(self.setup)
         self.recording_round: int | None = None
         self.discarded_round: int | None = None  # unrun round a setup change threw away
@@ -72,9 +74,9 @@ class App:
         rounds = session.load_rounds(self.session_dir)
         # What is shown belongs to the depth of the latest round: the one planned or just cut.
         depth = rounds[-1].plan.axial_depth_mm if rounds else self.setup.cut.axial_depth_mm
-        observations = session.observations(rounds, depth)
+        observations = session.observations(rounds, depth, self.env)
         stability = bayes.build_map(
-            session.at_depth(self.setup, depth), self.env, session.evidence(rounds, depth)
+            session.at_depth(self.setup, depth), self.env, session.evidence(rounds, depth, self.env)
         )
         speeds = np.unique(
             np.linspace(0, len(stability.speeds) - 1, MAP_SPEEDS).round().astype(int)
@@ -90,7 +92,7 @@ class App:
             stage = session.next_stage(self.setup, self.env, rounds)
             upcoming = Next.PLAN if stage.tests else Next.CONVERGED
             next_depth = stage.depth_mm
-        template = setup_source(self.setup_text) is SetupSource.TEMPLATE
+        template = setup_source(self.source.text) is SetupSource.TEMPLATE
         if upcoming is Next.PLAN and template:
             upcoming = Next.SETUP
 
@@ -163,7 +165,7 @@ class App:
         }
 
     def plan(self, stock: Stock) -> None:
-        session.plan_next(self.session_dir, self.setup_text, stock)
+        session.plan_next(self.session_dir, self.source, self.env, stock)
         self.discarded_round = None
 
     def program(self, number: int, units: gcode.Units) -> str:

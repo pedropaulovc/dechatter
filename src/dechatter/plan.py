@@ -15,6 +15,8 @@ from .config import Setup, SpindleControl
 
 SCHEMA = 1
 SPINDLE_EFFICIENCY = 0.8
+SPEED_TOLERANCE_RPM = 0.5
+WIDTH_TOLERANCE_MM = 1e-6
 
 
 class PlanError(RuntimeError):
@@ -89,6 +91,15 @@ class Envelope:
     speed_max_rpm: int
     width_max_mm: float
     mrr_limit_mm3_min: float
+
+    def contains(self, rpm: float, width_mm: float) -> bool:
+        """Whether a cut lies in the region searched now; bounds may change after cutting."""
+        return (
+            self.speed_min_rpm - SPEED_TOLERANCE_RPM
+            <= rpm
+            <= self.speed_max_rpm + SPEED_TOLERANCE_RPM
+            and width_mm <= self.width_max_mm + WIDTH_TOLERANCE_MM
+        )
 
     def speeds(self, step_rpm: int) -> np.ndarray:
         return np.arange(self.speed_min_rpm, self.speed_max_rpm + 1, step_rpm, dtype=float)
