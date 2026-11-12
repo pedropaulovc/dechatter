@@ -3,7 +3,7 @@
 // and analysis are dechatter's Python running in a worker (engine.js).
 
 import { Mic } from './mic.js';
-import { STEPS, draw, read } from './wizard.js';
+import { STEPS, draw, read, reveal } from './wizard.js';
 
 const params = new URLSearchParams(location.search);
 const token = params.get('token') ?? '';
@@ -39,7 +39,7 @@ let fatal = ''; // why the engine could not start; nothing works without it
 let names = []; // sessions stored in this browser
 let current = localStorage.getItem(SESSION_KEY) ?? '';
 let state = null; // the current session, as the engine last reported it
-let editing = null; // { values, materials, step } while the setup wizard is open, else null
+let editing = null; // { values, defaults, materials, computed, step } while the setup wizard is open, else null
 let timeline = []; // what cncjs reported since the job last started; saved with the recording
 let busy = false; // an engine request is in flight
 let stockChoice = 'same'; // survives redraws: planning on the wrong face position cuts air or too deep
@@ -133,8 +133,18 @@ async function newSession() {
 // Start the wizard on the session's stored setup. The form is redrawn even when it last
 // showed this same step, so nothing typed into an earlier wizard is left on screen.
 async function openWizard() {
-  editing = { ...(await engine('setup_form', current)), step: 0 };
+  editing = { ...(await engine('setup_form', current)), computed: null, step: 0 };
   $('setup-form').dataset.key = '';
+}
+
+// What the planner makes of the entries left empty, from what the wizard holds so far.
+// Only shown as placeholders: values the wizard cannot make sense of yet show none.
+async function preview(wizard) {
+  try {
+    wizard.computed = await engine('setup_preview', JSON.stringify(wizard.values));
+  } catch {
+    wizard.computed = null;
+  }
 }
 
 async function editSetup() {
@@ -156,12 +166,18 @@ function keepStep() {
 }
 
 async function nextStep() {
+  reveal($('setup-form'));
   if (!$('setup-form').reportValidity()) {
     return;
   }
   keepStep();
   if (editing.step < STEPS.length - 1) {
-    editing.step += 1;
+    const wizard = editing;
+    await preview(wizard);
+    if (editing !== wizard) {
+      return;
+    }
+    wizard.step += 1;
     render();
     return;
   }
@@ -181,9 +197,14 @@ async function nextStep() {
   render();
 }
 
-function previousStep() {
+async function previousStep() {
   keepStep();
-  editing.step -= 1;
+  const wizard = editing;
+  await preview(wizard);
+  if (editing !== wizard) {
+    return;
+  }
+  wizard.step -= 1;
   render();
 }
 
@@ -483,7 +504,7 @@ function renderSetup() {
   // interrupted otherwise. A change of units drops an entry that is only half typed.
   const key = `${current}|${editing.step}|${units()}`;
   if ($('setup-form').dataset.key !== key) {
-    draw($('setup-form'), step, editing.values, units(), editing.materials);
+    draw($('setup-form'), step, editing.values, units(), editing);
     $('setup-form').dataset.key = key;
   }
 }

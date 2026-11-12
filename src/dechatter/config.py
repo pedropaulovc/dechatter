@@ -135,10 +135,15 @@ def _build[T](cls: type[T], section: str, data: dict) -> T:
 
 
 def load_setup(path: Path) -> Setup:
+    return parse_setup(path.read_text(encoding="utf-8"), path.name)
+
+
+def parse_setup(text: str, origin: str) -> Setup:
+    """A setup from setup file text; `origin` names it in errors."""
     try:
-        data = tomllib.loads(path.read_text(encoding="utf-8"))
+        data = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
-        raise ConfigError(f"{path.name} is not valid TOML: {exc}") from exc
+        raise ConfigError(f"{origin} is not valid TOML: {exc}") from exc
     sections = {f.name: f for f in dataclasses.fields(Setup)}
     unknown = set(data) - set(sections)
     if unknown:
@@ -205,6 +210,19 @@ def setup_values(path: Path) -> dict:
         if key not in written:
             del values["planner"][key]
     return values
+
+
+def setup_defaults() -> dict:
+    """Each section's default values, for the entries that have one."""
+    hints = typing.get_type_hints(Setup)
+    return {
+        section.name: {
+            entry.name: entry.default
+            for entry in dataclasses.fields(hints[section.name])
+            if entry.default is not dataclasses.MISSING
+        }
+        for section in dataclasses.fields(Setup)
+    }
 
 
 def dump_setup(values: dict) -> str:

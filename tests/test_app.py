@@ -392,6 +392,27 @@ def test_setup_form_round_trips_and_an_invalid_one_keeps_the_old_setup(engine):
         engine.call("save_setup", NAME, json.dumps({**good, "machine": {"rpm": 1}}))
 
 
+def test_setup_form_gives_the_defaults_and_what_empty_entries_become(engine):
+    form = engine.call("setup_form", NAME)
+    defaults = form["defaults"]
+    assert defaults["program"]["dwell_s"] == 4.0 and defaults["machine"]["name"] == ""
+    assert defaults["cut"]["chip_load_mm"] is None
+    assert defaults["planner"]["round1_width_fractions"] == [0.1, 0.2, 0.35]
+    assert "diameter_mm" not in defaults["tool"], "no default: always asked"
+
+    values = form["values"]
+    computed = engine.call("setup_preview", json.dumps(values))["cut"]
+    assert computed["width_max_mm"] == round(values["tool"]["diameter_mm"] / 2, 3)
+    assert computed["speed_max_rpm"] <= values["machine"]["max_rpm"]
+    assert computed["chip_load_mm"] > 0
+    # What the wizard holds so far, not what is saved: a wider cutter, a wider limit.
+    values["tool"]["diameter_mm"] = 12.7
+    assert engine.call("setup_preview", json.dumps(values))["cut"]["width_max_mm"] == 6.35
+    values["cut"]["material"] = "unobtainium"
+    with pytest.raises(RuntimeError, match="unknown material"):
+        engine.call("setup_preview", json.dumps(values))
+
+
 def test_saved_setup_pins_shown_values_and_survives_unstorable_text(engine):
     path = engine.root / NAME / session.SETUP_FILE
     with path.open("a", encoding="utf-8") as setup_file:

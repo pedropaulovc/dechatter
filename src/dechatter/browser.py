@@ -20,9 +20,16 @@ import numpy as np
 from . import gcode, materials, session
 from .app import App
 from .audio import AudioError
-from .config import TEMPLATE, ConfigError, dump_setup, setup_values
+from .config import (
+    TEMPLATE,
+    ConfigError,
+    dump_setup,
+    parse_setup,
+    setup_defaults,
+    setup_values,
+)
 from .detect import Thresholds, Verdict
-from .plan import PlanError
+from .plan import PlanError, envelope
 from .session import SessionError, Stock
 
 log = logging.getLogger(__name__)
@@ -68,7 +75,20 @@ class Sessions:
         self._app(name)  # the session must exist and its setup must load
         return {
             "values": setup_values(self._dir(name) / session.SETUP_FILE),
+            "defaults": setup_defaults(),
             "materials": sorted(materials.MATERIALS),
+        }
+
+    def setup_preview(self, values_json: str) -> dict:
+        """What the planner makes of entries left empty in a setup the wizard is editing."""
+        env = envelope(parse_setup(dump_setup(json.loads(values_json)), "the setup"))
+        return {
+            "cut": {
+                "width_max_mm": round(env.width_max_mm, 3),
+                "chip_load_mm": env.chip_load_mm,
+                "speed_min_rpm": env.speed_min_rpm,
+                "speed_max_rpm": env.speed_max_rpm,
+            }
         }
 
     def save_setup(self, name: str, values_json: str) -> dict:

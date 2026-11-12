@@ -60,7 +60,11 @@ a page the microphone on those. Then, in the widget:
 1. Create a session. A short wizard asks for the machine, the tool, the cut and the stock. It
    shows lengths in inches when the machine is in G20 and in millimetres when it is in G21,
    or with no machine connected. Its last step holds the planner's settings, which rarely
-   need changing. Saving from the wizard rewrites the session's setup file without comments.
+   need changing. Settings with a sensible default or a computed value (the machine's name,
+   the holder, the cut's limits and chip load, the program's dwell, clearance, plunge feed,
+   truing width and coolant, and the planner) sit in a collapsed Advanced section of their
+   step, showing what an empty entry becomes. A section holding a changed setting opens by
+   itself. Saving from the wizard rewrites the session's setup file without comments.
    Programs are written in the machine's units too (G20 or G21, as cncjs reports it), so a
    job never changes them, even one stopped part-way. Their comments, like the plan and the
    results, stay in millimetres.
