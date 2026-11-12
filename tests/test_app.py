@@ -791,6 +791,55 @@ def test_a_finished_reset_that_could_not_delete_its_rounds_is_swept_later(engine
     assert sorted(p.name for p in folder.iterdir()) == [session.SETUP_FILE]
 
 
+def test_a_reset_that_cannot_mark_its_folder_discards_it_or_says_where(engine, monkeypatch):
+    folder = engine.root / NAME
+    real_touch, real_rename = Path.touch, Path.rename
+
+    def no_marker(self, *args, **kwargs):
+        if self.name.endswith(".done"):
+            raise OSError("storage refused")
+        return real_touch(self, *args, **kwargs)
+
+    # Unmarked but discarded right away: a clean reset.
+    engine.call("plan", NAME, "same")
+    monkeypatch.setattr(Path, "touch", no_marker)
+    assert engine.call("reset", NAME)["rounds"] == []
+    assert sorted(p.name for p in folder.iterdir()) == [session.SETUP_FILE]
+
+    # Nor can it be renamed: the reset says where the rounds are.
+    def no_discard(self, target):
+        if self.name.startswith(".reset-"):
+            raise OSError("storage refused")
+        return real_rename(self, target)
+
+    engine.call("plan", NAME, "same")
+    monkeypatch.setattr(Path, "rename", no_discard)
+    with pytest.raises(
+        RuntimeError, match=r"discarded rounds are still in .*\.reset-.*delete that"
+    ):
+        engine.call("reset", NAME)
+    monkeypatch.undo()
+    left = [p for p in folder.glob(".reset-*") if p.is_dir()]
+    assert len(left) == 1 and (left[0] / "round-01").exists()
+
+
+def test_a_marker_that_will_not_go_does_not_stop_the_session_opening(engine, monkeypatch):
+    folder = engine.root / NAME
+    (folder / ".reset-0ddba11.done").touch()
+    real = Path.unlink
+
+    def refuse(self, *args, **kwargs):
+        if self.name.endswith(".done"):
+            raise OSError("storage refused")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", refuse)
+    assert Engine(engine.root).call("state", NAME)["rounds"] == []
+    monkeypatch.undo()
+    session.sweep_discarded(folder)
+    assert sorted(p.name for p in folder.iterdir()) == [session.SETUP_FILE]
+
+
 def test_a_reset_goes_ahead_when_the_report_cannot_be_removed(engine, monkeypatch):
     engine.call("plan", NAME, "same")
     report = engine.root / NAME / "report.html"

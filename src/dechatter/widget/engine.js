@@ -68,7 +68,8 @@ async function handle({ method, args }) {
     return { ok: bytes };
   }
   const reply = JSON.parse(result);
-  if ('ok' in reply && WRITES.has(method)) {
+  // Also after a refused or failed write: memory may have changed before it failed.
+  if (WRITES.has(method)) {
     await sync(false);
   }
   return reply;

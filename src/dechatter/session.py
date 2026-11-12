@@ -695,6 +695,10 @@ def _done(aside: Path) -> Path:
     return aside.with_name(aside.name + DONE)
 
 
+def _discarded_for(aside: Path) -> Path:
+    return aside.with_name(DISCARDED + aside.name[len(RESETTING) :])
+
+
 def finished_reset(path: Path) -> bool:
     """A reset's folder, or its marker, that is only waiting to be deleted."""
     if path.name.endswith(DONE):
@@ -705,15 +709,18 @@ def finished_reset(path: Path) -> bool:
 def _finish_resets(session: Path) -> None:
     for aside in session.glob(f"{RESETTING}*"):
         if not aside.is_dir():
-            if aside.name.endswith(DONE) and not aside.with_name(aside.name[: -len(DONE)]).exists():
-                aside.unlink(missing_ok=True)
+            orphan = aside.name.endswith(DONE)
+            if orphan and not aside.with_name(aside.name[: -len(DONE)]).exists():
+                try:
+                    aside.unlink(missing_ok=True)
+                except OSError as exc:
+                    log.warning("could not remove %s: %s", aside.name, exc)
             continue
         try:
             if not any(aside.iterdir()):
                 aside.rmdir()
             elif _done(aside).exists():
-                discarded = session / f"{DISCARDED}{aside.name[len(RESETTING) :]}"
-                aside.rename(discarded)
+                aside.rename(_discarded_for(aside))
             else:
                 continue
             _done(aside).unlink(missing_ok=True)
@@ -771,22 +778,32 @@ def reset(session: Path) -> None:
         (session / REPORT_FILE).unlink(missing_ok=True)
     except OSError as exc:
         log.warning("reset %s: could not remove %s: %s", session.name, REPORT_FILE, exc)
+    discarded = _discarded_for(aside)
     try:
         _done(aside).touch()
-    except OSError as exc:
-        log.warning("reset %s: the discarded rounds stay in %s: %s", session.name, aside, exc)
-        return
-    discarded = session / f"{DISCARDED}{marker}"
-    try:
-        aside.rename(discarded)
-        _done(aside).unlink()
-    except OSError as exc:
-        log.warning("reset %s: the next sweep deletes %s: %s", session.name, aside, exc)
-        return
+    except OSError as unmarked:
+        # Unmarked, no sweep would delete it: discard it now, or say where the rounds are.
+        try:
+            aside.rename(discarded)
+        except OSError as exc:
+            raise SessionError(
+                f"reset {session.name}, but its discarded rounds are still in {aside} "
+                f"({unmarked}; {exc}): delete that folder"
+            ) from exc
+    else:
+        try:
+            aside.rename(discarded)
+        except OSError as exc:
+            log.warning("reset %s: the next sweep deletes %s: %s", session.name, aside, exc)
+            return
+        try:
+            _done(aside).unlink(missing_ok=True)
+        except OSError as exc:
+            log.warning("reset %s: the next sweep removes %s: %s", session.name, _done(aside), exc)
     try:
         shutil.rmtree(discarded)
     except OSError as exc:
-        log.warning("could not delete %s yet: %s", discarded.name, exc)
+        log.warning("reset %s: the next sweep deletes %s: %s", session.name, discarded, exc)
 
 
 def _write_round(session: Path, setup_text: str, setup: Setup, plan: Plan) -> None:
