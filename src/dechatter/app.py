@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 
 from . import audio, bayes, gcode, session
-from .config import SetupSource, SpindleControl, load_setup, setup_source
+from .config import SetupSource, SpindleControl, parse_setup, setup_source
 from .detect import Thresholds, Verdict
 from .plan import PassKind, envelope, feed_mm_min
 from .session import PassStatus, SessionError, Stock
@@ -42,7 +42,9 @@ class App:
     def __init__(self, session_dir: Path, thresholds: Thresholds):
         self.session_dir = session_dir
         self.thresholds = thresholds
-        self.setup = load_setup(session_dir / session.SETUP_FILE)
+        # Kept as read: a round planned now stores exactly the setup it was planned from.
+        self.setup_text = (session_dir / session.SETUP_FILE).read_text(encoding="utf-8")
+        self.setup = parse_setup(self.setup_text, session.SETUP_FILE)
         self.env = envelope(self.setup)
         self.recording_round: int | None = None
         self.discarded_round: int | None = None  # unrun round a setup change threw away
@@ -51,8 +53,10 @@ class App:
         """Names one planned program: a round planned again after a setup change gets a new
         name, so a program still loaded in cncjs never passes for it."""
         digest = hashlib.sha256()
-        for name in (session.SETUP_FILE, session.PLAN_FILE):
-            digest.update((r.path / name).read_bytes())
+        # A round planned by an older dechatter has no setup copy; its plan alone names it.
+        for path in (r.path / session.SETUP_FILE, r.path / session.PLAN_FILE):
+            if path.exists():
+                digest.update(path.read_bytes())
         return (
             f"dechatter-{self.session_dir.resolve().name}-round-{r.plan.round:02d}-"
             f"{digest.hexdigest()[:PROGRAM_ID_LENGTH]}.nc"
@@ -86,7 +90,7 @@ class App:
             stage = session.next_stage(self.setup, self.env, rounds)
             upcoming = Next.PLAN if stage.tests else Next.CONVERGED
             next_depth = stage.depth_mm
-        template = setup_source(self.session_dir / session.SETUP_FILE) is SetupSource.TEMPLATE
+        template = setup_source(self.setup_text) is SetupSource.TEMPLATE
         if upcoming is Next.PLAN and template:
             upcoming = Next.SETUP
 
@@ -159,7 +163,7 @@ class App:
         }
 
     def plan(self, stock: Stock) -> None:
-        session.plan_next(self.session_dir, self.setup, self.env, stock)
+        session.plan_next(self.session_dir, self.setup_text, stock)
         self.discarded_round = None
 
     def program(self, number: int, units: gcode.Units) -> str:

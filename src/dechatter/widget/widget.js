@@ -391,6 +391,12 @@ window.addEventListener('message', (event) => {
 
 // ---- recording follows the job ---------------------------------------------------------
 
+// cncjs holds this round's program as this widget loaded it, in the units the machine
+// reports now. After a reload of the widget the units it was loaded in are unknown.
+function loadedHere(round) {
+  return cnc.program === round.program && cnc.loadedUnits !== null && cnc.loadedUnits === cnc.units;
+}
+
 function plannedRound() {
   const last = state?.rounds.at(-1);
   return last && !last.analysed ? last : null;
@@ -402,7 +408,11 @@ function syncRecording() {
     return;
   }
   const round = plannedRound();
-  if (!mic.recording && round && cnc.workflow === 'running' && cnc.program === round.program) {
+  if (!mic.recording && round && cnc.workflow === 'running' && cnc.program === round.program && !loadedHere(round)) {
+    showError('This run is not recorded: the program in cncjs may be in other units than the machine is in now. Stop the job, load the program again from here, then run it.');
+    return;
+  }
+  if (!mic.recording && round && cnc.workflow === 'running' && loadedHere(round)) {
     if (!mic.open) {
       showError('The job is running but the microphone is not open, so this run cannot be analysed. Enable the microphone and run the round again.');
       return;
@@ -572,8 +582,9 @@ function renderStep() {
 
   const tests = round.passes.filter((p) => p.kind === 'test').length;
   const speedChanges = (r) => r.passes.filter((p, i) => i === 0 || p.rpm !== r.passes[i - 1].rpm).length;
-  // Loaded in other units than the machine's now: it has to be loaded again.
-  const loaded = cnc.program === round.program && cnc.loadedUnits === cnc.units;
+  const loaded = loadedHere(round);
+  // The name matches, but the units it was loaded in differ or are not known: load it again.
+  const unsure = cnc.program === round.program && !loaded;
   // The program is written in the machine's units, so they have to be known first.
   const ready = cnc.link === 'ready' && cnc.workflow === 'idle' && cnc.units !== null && mic.open;
   const load = button(loaded ? 'Reload program' : 'Load into cncjs', () => loadProgram(round), { className: loaded ? '' : 'primary', disabled: !ready });
@@ -595,6 +606,9 @@ function renderStep() {
       ...(state.spindle === 'manual' ? [el('li', {}, `The program pauses before each of its ${speedChanges(round)} spindle speeds. Set the speed shown here, then resume in cncjs.`)] : []),
     ),
   );
+  if (unsure) {
+    step.append(el('p', { className: 'instruction' }, 'cncjs holds this round\'s program, but it was loaded in other units than the machine is in now, or before this widget was reloaded. Load it again before pressing play; a run of it as it is will not be recorded.'));
+  }
   if (round.has_recording) {
     step.append(el('p', {}, 'The last run could not be analysed. Run the round again, or ', button('Analyse the last recording again', () => act('analyze', round.round))));
   }

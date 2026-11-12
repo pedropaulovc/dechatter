@@ -6,6 +6,7 @@ import dataclasses
 import json
 import logging
 import shutil
+import uuid
 from dataclasses import asdict, dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -14,7 +15,7 @@ import numpy as np
 
 from . import audio, bayes, detect, gcode
 from .bayes import Observation
-from .config import Setup, SetupSource, load_setup, setup_source
+from .config import Setup, SetupSource, load_setup, parse_setup, setup_source
 from .detect import Thresholds, Verdict
 from .plan import (
     Envelope,
@@ -23,6 +24,7 @@ from .plan import (
     PlanError,
     PlannerKind,
     assemble,
+    envelope,
     grid_tests,
     mrr_mm3_min,
 )
@@ -326,14 +328,17 @@ class Planned:
     expected_improvement: float
 
 
-def plan_next(session: Path, setup: Setup, env: Envelope, stock: Stock) -> Planned:
-    """Plan the next round and write its directory, or report convergence."""
-    if setup_source(session / SETUP_FILE) is SetupSource.TEMPLATE:
+def plan_next(session: Path, setup_text: str, stock: Stock) -> Planned:
+    """Plan the next round from setup file text and write its directory, or report
+    convergence. The round keeps that text: the setup its plan and program came from."""
+    if setup_source(setup_text) is SetupSource.TEMPLATE:
         raise PlanError(
             f"{SETUP_FILE} is still the example template, not your machine: fill in the "
             "machine, tool, cut and stock (the widget's setup wizard, or edit the file) "
             "before planning"
         )
+    setup = parse_setup(setup_text, SETUP_FILE)
+    env = envelope(setup)
     rounds = load_rounds(session)
     check_measured(rounds, setup)
     face, remnant = face_after(rounds[-1]) if rounds else (0.0, 0.0)
@@ -351,16 +356,25 @@ def plan_next(session: Path, setup: Setup, env: Envelope, stock: Stock) -> Plann
         )
     at = at_depth(setup, stage.depth_mm)
     plan = assemble(at, env, number, stage.planner, face, remnant, stage.tests)
-    _write_round(session, at, plan)
+    _write_round(session, setup_text, at, plan)
     return Planned(plan, stage.expected_improvement)
 
 
-# The setup fields that may change once a round was cut: they move the program around the
-# cuts, or bound how much stock is left, but do not change what a cut sounds like. Every
-# other field, [planner] aside, is part of what was measured.
+# The setup fields that may change once a round was cut. They move the program around the
+# cuts, bound how much stock is left, or bound where the planner searches (speeds, widths,
+# depths and the power cap: the chip load and feed of a cut do not depend on them), but do
+# not change what a cut was or sounded like. Every other field, [planner] aside, is part of
+# what was measured; the machine's weight among them, since it derates the chip load.
 FREE_AFTER_CUT = frozenset(
     {
         "machine.name",
+        "machine.min_rpm",
+        "machine.max_rpm",
+        "machine.spindle_power_w",
+        "cut.width_max_mm",
+        "cut.speed_min_rpm",
+        "cut.speed_max_rpm",
+        "cut.other_depths_mm",
         "program.safe_z_mm",
         "program.clearance_mm",
         "program.plunge_feed_mm_min",
@@ -437,21 +451,37 @@ def stale_round(session: Path, setup: Setup) -> Round | None:
     return rounds[-1]
 
 
+DISCARDED = ".discarded-"
+
+
 def set_aside(r: Round) -> Path:
-    """Move a round out of the session; `restore` brings it back, deleting it is final."""
-    aside = r.path.with_name(f".discarded-{r.path.name}")
+    """Move a round out of the session; `restore` brings it back, deleting it is final.
+
+    Each gets its own name, so one whose deletion failed never blocks the next.
+    """
+    sweep_discarded(r.path.parent)
+    aside = r.path.with_name(f"{DISCARDED}{r.path.name}-{uuid.uuid4().hex[:8]}")
     r.path.rename(aside)
     return aside
+
+
+def sweep_discarded(session: Path) -> None:
+    """Delete what is left of rounds discarded earlier; one that will not go is left."""
+    for leftover in session.glob(f"{DISCARDED}*"):
+        try:
+            shutil.rmtree(leftover)
+        except OSError as exc:
+            log.warning("could not delete %s: %s", leftover.name, exc)
 
 
 def restore(aside: Path, r: Round) -> None:
     aside.rename(r.path)
 
 
-def _write_round(session: Path, setup: Setup, plan: Plan) -> None:
+def _write_round(session: Path, setup_text: str, setup: Setup, plan: Plan) -> None:
     target = round_dir(session, plan.round)
     target.mkdir()
-    shutil.copyfile(session / SETUP_FILE, target / SETUP_FILE)
+    (target / SETUP_FILE).write_text(setup_text, encoding="utf-8")
     plan.save(target / PLAN_FILE)
     (target / PROGRAM_FILE).write_text(gcode.render(plan, setup, gcode.Units.MM), encoding="ascii")
     log.info("planned round %d: %d passes", plan.round, len(plan.passes))

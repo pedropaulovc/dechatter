@@ -11,7 +11,7 @@ import numpy as np
 
 from . import audio, bayes, materials, session
 from .audio import AudioError
-from .config import TEMPLATE, ConfigError, Setup, load_setup
+from .config import TEMPLATE, ConfigError, Setup, load_setup, parse_setup
 from .detect import Thresholds, Verdict
 from .export import ExportError, export
 from .plan import Envelope, PassKind, Plan, PlanError, envelope
@@ -101,11 +101,12 @@ def _print_round(session_dir: Path, plan: Plan) -> None:
 
 
 def cmd_plan(args: argparse.Namespace) -> int:
-    setup = load_setup(args.session / session.SETUP_FILE)
+    text = (args.session / session.SETUP_FILE).read_text(encoding="utf-8")
+    setup = parse_setup(text, session.SETUP_FILE)
     env = envelope(setup)
     rounds = session.load_rounds(args.session)
     stock = Stock.FRESH if args.new_stock else Stock.SAME
-    planned = session.plan_next(args.session, setup, env, stock)
+    planned = session.plan_next(args.session, text, stock)
     if any(r.results is not None for r in rounds):
         _print_known(setup, env, rounds)
     if planned.plan is None:

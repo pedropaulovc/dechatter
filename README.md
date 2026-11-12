@@ -71,10 +71,12 @@ a page the microphone on those. Then, in the widget:
    Nothing is planned until the wizard has been saved: a new session holds only an example
    setup. Each round keeps a copy of the setup it was planned from. Once a round has been
    cut, the setup can no longer change in anything that shapes the cut or its sound (the
-   machine's speeds, power, weight and spindle control, the tool, the cut, the stock length,
-   the dwell and the coolant), since the stability map belongs to the setup it was measured
-   with: start a new session instead. The machine's name, the safe height, clearance, plunge
-   feed, truing width, stock width and the planner's settings may still change. A round
+   machine's weight and spindle control, the tool, the work material, depth, direction and
+   chip load, the stock length, the dwell and the coolant), since the stability map belongs
+   to the setup it was measured with: start a new session instead. What only bounds the
+   search may still change (the machine's speed range and power, the cut's speed and width
+   limits and shallower depths), as may the machine's name, the safe height, clearance,
+   plunge feed, truing width, stock width and the planner's settings. A round
    planned but not yet run is discarded when the setup changes its program, so the next
    plan uses the new setup. `dechatter plan` refuses the same changes made by hand.
 2. Plan a round. Round 1 is a coarse grid of speeds and widths.

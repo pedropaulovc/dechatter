@@ -56,6 +56,7 @@ class Sessions:
         if name not in self._apps:
             if not (self._dir(name) / session.SETUP_FILE).exists():
                 raise SessionError(f"no session named {name!r}")
+            session.sweep_discarded(self._dir(name))
             self._apps[name] = App(self._dir(name), self.thresholds)
         return self._apps[name]
 
@@ -119,11 +120,14 @@ class Sessions:
             path.write_bytes(previous)
             self._apps.pop(name, None)
             raise
-        if aside is not None:
+        if aside is None:
+            return shown
+        log.info("%s: discarded unrun round %d planned from the old setup", name, stale.plan.round)
+        # The new setup is saved: a round that will not delete now goes with the next sweep.
+        try:
             shutil.rmtree(aside)
-            log.info(
-                "%s: discarded unrun round %d planned from the old setup", name, stale.plan.round
-            )
+        except OSError as exc:
+            log.warning("%s: could not delete %s yet: %s", name, aside.name, exc)
         return shown
 
     def state(self, name: str) -> dict:
@@ -160,8 +164,9 @@ class Sessions:
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
             for path in sorted(self._dir(name).rglob("*")):
-                if path.is_file():
-                    archive.write(path, f"{name}/{path.relative_to(self._dir(name)).as_posix()}")
+                inside = path.relative_to(self._dir(name))
+                if path.is_file() and not inside.parts[0].startswith(session.DISCARDED):
+                    archive.write(path, f"{name}/{inside.as_posix()}")
         return buffer.getvalue()
 
     def import_zip(self, data: bytes) -> str:

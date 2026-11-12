@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import re
+import shutil
 import zipfile
 
 import numpy as np
@@ -257,8 +258,10 @@ def test_a_setup_change_after_a_round_was_cut_is_refused_where_it_was_measured(e
     for section, key, value in [
         ("tool", "flutes", 2),
         ("tool", "holder", "ER20"),
-        ("machine", "max_rpm", 2800),
-        ("cut", "other_depths_mm", [2.5]),
+        ("machine", "weight_kg", 100.0),
+        ("machine", "spindle", "manual"),
+        ("cut", "material", "brass-360"),
+        ("cut", "chip_load_mm", 0.03),
         ("stock", "length_mm", 80.0),
         ("program", "dwell_s", 2.0),
         ("program", "coolant", "mist"),
@@ -270,8 +273,13 @@ def test_a_setup_change_after_a_round_was_cut_is_refused_where_it_was_measured(e
         assert files(folder) == before
         assert engine.call("setup_form", NAME)["values"] == form
 
-    # Moves around the cuts, the name, the stock left and the planner are free.
+    # Moves around the cuts, the name, the stock left, where to search and the planner are
+    # free.
     form["machine"]["name"] = "renamed mill"
+    form["machine"]["min_rpm"] = 600
+    form["machine"]["spindle_power_w"] = 1200.0
+    form["cut"]["other_depths_mm"] = [2.5]
+    form["cut"]["speed_min_rpm"] = 1500
     form["program"]["safe_z_mm"] = 20.0
     form["program"]["clearance_mm"] = 5.0
     form["program"]["plunge_feed_mm_min"] = 100.0
@@ -282,6 +290,93 @@ def test_a_setup_change_after_a_round_was_cut_is_refused_where_it_was_measured(e
     assert state["rounds"][0]["analysed"] and state["discarded_round"] is None
     state = engine.call("plan", NAME, "same")
     assert [r["round"] for r in state["rounds"]] == [1, 2]
+
+
+def test_the_search_can_be_widened_or_narrowed_after_a_round_was_cut(engine):
+    form = engine.call("setup_form", NAME)["values"]
+    form["machine"]["max_rpm"] = 3000
+    engine.call("save_setup", NAME, json.dumps(form))
+    engine.call("plan", NAME, "same")
+    state = engine.run_round(1)
+    cuts = len(state["observations"])
+    widest = max(p["width_mm"] for p in state["rounds"][0]["passes"])
+
+    # Narrower than cuts already made: they stay evidence, and the map still builds.
+    narrowed = json.loads(json.dumps(form))
+    narrowed["cut"]["width_max_mm"] = round(widest * 0.6, 2)
+    state = engine.call("save_setup", NAME, json.dumps(narrowed))
+    assert len(state["observations"]) == cuts
+    assert state["map"]["widths"][-1] <= widest * 0.6
+
+    form["machine"]["max_rpm"] = 5000
+    form["cut"]["speed_max_rpm"] = 4500
+    state = engine.call("save_setup", NAME, json.dumps(form))
+    assert 3000 < state["map"]["speeds"][-1] <= 4500
+    state = engine.call("plan", NAME, "fresh")
+    planned = [p["rpm"] for p in state["rounds"][1]["passes"] if p["kind"] == "test"]
+    assert max(planned) > 3000 and max(planned) <= 4500
+
+
+def test_a_session_planned_by_an_older_dechatter_still_opens(engine):
+    engine.call("plan", NAME, "same")
+    engine.run_round(1)
+    (session.round_dir(engine.root / NAME, 1) / session.SETUP_FILE).unlink()
+    engine.sessions = browser.Sessions(engine.root)
+
+    state = engine.call("state", NAME)
+    assert state["rounds"][0]["analysed"] and state["rounds"][0]["program"].endswith(".nc")
+    tests = [p for p in state["rounds"][0]["passes"] if p["kind"] == "test"]
+    engine.call("set_verdict", NAME, 1, tests[0]["id"], "unstable")
+    assert engine.call("export_zip", NAME)
+    older = "planned by an older dechatter"
+    with pytest.raises(RuntimeError, match=older):
+        engine.call("plan", NAME, "same")
+    form = engine.call("setup_form", NAME)["values"]
+    form["program"]["safe_z_mm"] = 20.0
+    with pytest.raises(RuntimeError, match=older):
+        engine.call("save_setup", NAME, json.dumps(form))
+    with pytest.raises(RuntimeError, match=older):
+        engine.call("program", NAME, 1, "mm")
+
+
+def test_a_round_keeps_the_setup_it_was_planned_with_even_if_the_file_changed_since(engine):
+    path = engine.root / NAME / session.SETUP_FILE
+    loaded = path.read_text(encoding="utf-8")
+    engine.call("state", NAME)
+    # Another tab saves a setup between this one loading the session and planning.
+    path.write_text(loaded.replace("safe_z_mm = 10.0", "safe_z_mm = 30.0"), encoding="utf-8")
+    engine.call("plan", NAME, "same")
+    copy = session.round_dir(engine.root / NAME, 1) / session.SETUP_FILE
+    assert copy.read_text(encoding="utf-8") == loaded
+    assert "G0 Z10" in engine.call("program", NAME, 1, "mm").splitlines()
+
+
+def test_a_discarded_round_that_will_not_delete_blocks_nothing(engine, monkeypatch):
+    folder = engine.root / NAME
+    form = engine.call("setup_form", NAME)["values"]
+    real = shutil.rmtree
+    failures = []
+
+    def fail_once(path, *args, **kwargs):
+        if not failures:
+            failures.append(path)
+            raise OSError("storage refused")
+        real(path, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", fail_once)
+    engine.call("plan", NAME, "same")
+    form["program"]["safe_z_mm"] = 20.0
+    state = engine.call("save_setup", NAME, json.dumps(form))
+    assert state["discarded_round"] == 1 and failures
+    assert list(folder.glob(".discarded-*"))
+    names = zipfile.ZipFile(io.BytesIO(engine.call("export_zip", NAME))).namelist()
+    assert not [n for n in names if ".discarded-" in n]
+
+    engine.call("plan", NAME, "same")
+    form["program"]["safe_z_mm"] = 25.0
+    assert engine.call("save_setup", NAME, json.dumps(form))["discarded_round"] == 1
+    assert not list(folder.glob(".discarded-*"))
+    assert [p.name for p in folder.iterdir()] == [session.SETUP_FILE]
 
 
 def test_a_round_that_was_recorded_but_not_analysed_counts_as_cut(engine):

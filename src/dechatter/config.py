@@ -159,11 +159,11 @@ def parse_setup(text: str, origin: str) -> Setup:
     return setup
 
 
-def setup_source(path: Path) -> SetupSource:
-    """Whether the setup file is still the template. Whitespace alone does not fill it in:
+def setup_source(text: str) -> SetupSource:
+    """Whether setup file text is still the template. Whitespace alone does not fill it in:
     an editor that only re-wrapped lines or line endings left the example values in place.
     """
-    if path.read_text(encoding="utf-8").split() == TEMPLATE.split():
+    if text.split() == TEMPLATE.split():
         return SetupSource.TEMPLATE
     return SetupSource.FILLED_IN
 
