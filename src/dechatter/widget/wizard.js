@@ -11,6 +11,52 @@ const LENGTH_UNITS = {
   feed: { mm: 'mm/min', in: 'in/min' },
 };
 
+// The longer explanation behind each field's (i) button. An entry is text, or a function of
+// the units lengths are shown in. Every field has one.
+const SPEED_RANGE = 'The speeds this machine really runs at. Test speeds stay inside them. They only bound the search, so they may change after cuts.';
+const FIXED = 'Fixed once a cut is made.';
+const FREE = 'Safe to change after cuts.';
+const INFO = {
+  'machine.name': 'A label for your own records. It changes nothing else.',
+  'machine.max_rpm': SPEED_RANGE,
+  'machine.min_rpm': SPEED_RANGE,
+  'machine.spindle_power_hp': `From the motor plate. It only sets the power cap, which leaves out cuts that would remove metal faster than the spindle can drive. ${FREE}`,
+  'machine.weight_kg': `A lighter machine starts with a lighter chip load: under 150 kg ×0.5, under 400 kg ×0.7, under 1500 kg ×0.85. ${FIXED} It sets the default chip load.`,
+  'machine.spindle': `"By hand": the program stops (M0) before each new speed and the widget shows the rpm to set. The detector allows for the spindle being up to 5% off. Cuts are grouped by speed, so there is one stop per speed. ${FIXED}`,
+  'tool.diameter_mm': `Sets the default chip load and the widest cut tried (half the diameter), and with the cutter material the top speed. ${FIXED}`,
+  'tool.flutes': `Feed = chip load × flutes × rpm, and the detector listens for the tooth-passing frequency. ${FIXED}`,
+  'tool.stickout_mm': 'From the holder face to the cutter tip. Chatter depends strongly on it, so the results apply only at this stickout. Change it and start a new session.',
+  'tool.holder': `Part of the tool assembly: it changes how the tool vibrates. ${FIXED}`,
+  'tool.material': `Sets the top speed: high-speed steel gets 0.3× the carbide surface speed for the work material. ${FIXED}`,
+  'cut.material': `Sets the default chip load, the top surface speed and the power each cut needs. ${FIXED}`,
+  'cut.axial_depth_mm': `The deepest cut to test, from the top of the stock. The face must be clear of jaws and parallels down past this depth, along its whole length and about one cutter radius plus the clearance beyond each end, where the cutter plunges. ${FIXED}`,
+  'cut.other_depths_mm': 'Tested after the deepest depth settles, deepest first. A shallower round leaves the face flat only down to its own depth, so a deeper one after it needs fresh stock.',
+  'cut.direction': `Conventional or climb. The results apply to the direction tested. ${FIXED}`,
+  'cut.width_max_mm': `The widest radial cut tried. Default: half the cutter diameter. ${FREE}`,
+  'cut.chip_load_mm': `Feed per tooth, held constant for the whole session: feed = chip load × flutes × rpm. The default comes from the work material, the cutter diameter and the machine weight. Chatter barely depends on it, so the default is fine for mapping. Very light chip loads make narrow cuts rub and squeal, which can pass for chatter. ${FIXED}`,
+  'cut.speed_min_rpm': `The slowest test speed. Default: a quarter of the fastest, and no lower than the machine allows. ${FREE}`,
+  'cut.speed_max_rpm': `The fastest test speed. Default: the machine's top speed or the material's surface-speed limit for this cutter, whichever is lower. ${FREE}`,
+  'stock.length_mm': `Along X. Every pass cuts the full length. Work zero X is the left end. ${FIXED}`,
+  'stock.width_mm': `Along Y: how much the test may cut back from the front face. Work zero Y is the front face as first mounted. ${FREE}`,
+  'program.coolant': `Coolant noise makes chatter harder to hear: none is best for detection. ${FIXED}`,
+  'program.dwell_s': `Before each cut the spindle runs in the air beside the stock, already at depth. That lets it reach speed and records the quiet sound each cut is compared with. Do not shorten it much. With a manual spindle, the time at each M0 stop comes on top. ${FIXED}`,
+  'program.clearance_mm': `The cutter plunges in the air this far beyond the end of the stock, and backs off this far from the face after each cut. The plunge must never touch the stock. ${FREE}`,
+  'program.safe_z_mm': (units) => `Height above the top of the stock (Z0) for every rapid move. Set it above the tallest clamp, jaw, parallel or stop the tool passes over, plus ${units === 'in' ? 'about 0.1 in' : 'a few mm'}, and within the Z travel left above your work zero. ${FREE}`,
+  'program.plunge_feed_mm_min': `The feed of the plunge from the clearance height down to depth, in the air beside the stock. ${FREE}`,
+  'program.truing_width_mm': `A light first pass that leaves the face flat, at a known position, before the test cuts. ${FREE}`,
+  'planner.round1_speeds': 'More speeds in round 1 find the stable pockets sooner, but take more cuts and more stock.',
+  'planner.round1_width_fractions': 'Round 1 cuts each speed at these widths, as fractions of the widest cut. Wider fractions learn more per cut but chatter more often.',
+  'planner.batch_size': 'More cuts per round means fewer rounds, but each round leans on guesses the earlier cuts of the same round have not confirmed.',
+  'planner.min_probability': 'Higher is more cautious: smaller steps, fewer cuts that chatter, more rounds. The defaults suit most sessions.',
+  'planner.probability_floor': 'The same, judged on measured cuts only, ignoring the round\'s own earlier cuts. Higher is more cautious.',
+  'planner.stop_improvement': 'Lower keeps searching for smaller gains, at the cost of more rounds.',
+};
+
+export const infoFor = (field, units) => {
+  const text = INFO[field.at];
+  return typeof text === 'function' ? text(units) : text;
+};
+
 export const STEPS = [
   {
     title: 'Machine',
@@ -178,16 +224,67 @@ function row(field, values, units, setup) {
   input.dataset.shown = input.value;
   const label = document.createElement('label');
   const unit = LENGTH_UNITS[field.type]?.[units] ?? field.unit ?? '';
-  label.append(
-    Object.assign(document.createElement('span'), { textContent: field.label }),
-    input,
-    Object.assign(document.createElement('small'), { textContent: unit }),
-  );
+  const bubble = Object.assign(document.createElement('p'), {
+    className: 'bubble',
+    id: `info-${field.at.replace('.', '-')}`,
+    hidden: true,
+    textContent: infoFor(field, units),
+  });
+  bubble.setAttribute('role', 'note');
+  const about = Object.assign(document.createElement('button'), { type: 'button', className: 'info', textContent: 'i' });
+  about.setAttribute('aria-label', `About ${field.label}`);
+  about.setAttribute('aria-expanded', 'false');
+  about.setAttribute('aria-controls', bubble.id);
+  about.onclick = (event) => {
+    event.preventDefault(); // inside a label: do not move focus to its input
+    toggle(about, bubble);
+  };
+  const name = Object.assign(document.createElement('span'), { textContent: `${field.label} ` });
+  name.append(about);
+  label.append(name, input, Object.assign(document.createElement('small'), { textContent: unit }));
   if (field.note) {
     label.append(Object.assign(document.createElement('em'), { textContent: field.note }));
   }
+  label.append(bubble);
   return label;
 }
+
+// One info bubble open at a time. It closes on its button, Escape, or a click elsewhere.
+let openInfo = null; // { about, bubble } while a bubble is open
+
+function closeInfo() {
+  if (openInfo === null) {
+    return;
+  }
+  openInfo.bubble.hidden = true;
+  openInfo.about.setAttribute('aria-expanded', 'false');
+  openInfo = null;
+}
+
+function toggle(about, bubble) {
+  const wasOpen = openInfo?.bubble === bubble;
+  closeInfo();
+  if (wasOpen) {
+    return;
+  }
+  bubble.hidden = false;
+  about.setAttribute('aria-expanded', 'true');
+  openInfo = { about, bubble };
+}
+
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape' || openInfo === null) {
+    return;
+  }
+  const { about } = openInfo;
+  closeInfo();
+  about.focus();
+});
+document.addEventListener('click', (event) => {
+  if (openInfo !== null && !openInfo.bubble.contains(event.target) && !openInfo.about.contains(event.target)) {
+    closeInfo();
+  }
+});
 
 // Whether a field holds something other than its default, so it must not stay hidden.
 function changed(field, values, defaults) {
@@ -199,6 +296,7 @@ function changed(field, values, defaults) {
 // Fill `form` with the fields of one step: the ones to answer, then the advanced ones in a
 // section that starts open when any of them differs from its default.
 export function draw(form, step, values, units, setup) {
+  closeInfo();
   const basic = step.fields.filter((field) => !advanced(field));
   const more = step.fields.filter(advanced);
   form.replaceChildren(...basic.map((field) => row(field, values, units, setup)));

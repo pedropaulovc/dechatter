@@ -64,7 +64,9 @@ a page the microphone on those. Then, in the widget:
    the holder, the cut's limits and chip load, the program's dwell, clearance, plunge feed,
    truing width and coolant, and the planner) sit in a collapsed Advanced section of their
    step, showing what an empty entry becomes. A section holding a changed setting opens by
-   itself. Saving from the wizard rewrites the session's setup file without comments.
+   itself. Every field has an (i) button with a longer explanation: what it changes, its
+   default, and whether it may change after a cut. Saving from the wizard rewrites the
+   session's setup file without comments.
    Programs are written in the machine's units too (G20 or G21, as cncjs reports it), so a
    job never changes them, even one stopped part-way. Their comments, like the plan and the
    results, stay in millimetres.
