@@ -3,6 +3,7 @@
 // and analysis are dechatter's Python running in a worker (engine.js).
 
 import { Mic } from './mic.js';
+import { chipLoad, feed, length, rate } from './units.js';
 import { STEPS, draw, placehold, read, reveal } from './wizard.js';
 
 const params = new URLSearchParams(location.search);
@@ -577,12 +578,18 @@ function renderSessions() {
   );
   select.value = names.includes(current) ? current : '';
   select.disabled = busy || mic.recording;
-  $('summary').textContent = state?.summary ?? '';
+  $('summary').textContent = state ? summary(state) : '';
   for (const id of ['edit-setup', 'export']) {
     $(id).disabled = !state || busy || mic.recording;
   }
   // Also for a session that failed to load: deleting it is the way to be rid of it.
   $('delete-session').disabled = !names.includes(current) || busy || Boolean(deleteRefusal(current));
+}
+
+// The session's tool and cut in one line, lengths in the machine's units.
+function summary({ summary: s, spindle }) {
+  const depths = s.depths_mm.map((depth) => length(depth, units())).join(', ');
+  return `Ø ${length(s.diameter_mm, units())}, ${s.flutes} flutes, ${s.material}, depth ${depths}, ${chipLoad(s.chip_load_mm, units())} per tooth${spindle === 'manual' ? ', manual spindle' : ''}`;
 }
 
 function minutes(seconds) {
@@ -672,7 +679,7 @@ function renderStep() {
     const stock = stockSelect();
     step.append(
       el('p', {}, 'Converged: no further cut is expected to add removal rate. The best stable cuts are below.'),
-      el('p', {}, `One more round can find how hard the best cut (${best.rpm} rpm, ${best.width_mm.toFixed(2)} mm wide, ${best.depth_mm} mm deep) can be pushed: the same cut at rising chip loads, lightest first. Its cuts do not change the map.`),
+      el('p', {}, `One more round can find how hard the best cut (${best.rpm} rpm, ${length(best.width_mm, units())} wide, ${length(best.depth_mm, units())} deep) can be pushed: the same cut at rising chip loads, lightest first. Its cuts do not change the map.`),
       el('p', {}, button('Plan the chip-load sweep', async () => {
         await act('plan_sweep', stockChoice);
         stockChoice = 'same';
@@ -694,13 +701,13 @@ function renderStep() {
     const first = state.rounds.length === 0;
     const stock = stockSelect();
     const shallower = !first && state.next_depth_mm !== state.depth_mm;
-    const label = `Plan round ${state.rounds.length + 1}${shallower ? ` at ${state.next_depth_mm} mm depth` : ''}`;
+    const label = `Plan round ${state.rounds.length + 1}${shallower ? ` at ${length(state.next_depth_mm, units())} depth` : ''}`;
     const plan = button(label, async () => {
       await act('plan', first ? 'same' : stockChoice);
       stockChoice = 'same';
     }, { className: 'primary' });
     const next = shallower
-      ? `${state.depth_mm} mm depth is settled. Next come cuts ${state.next_depth_mm} mm deep, starting from the widths that were stable.`
+      ? `${length(state.depth_mm, units(), { mmToo: true })} depth is settled. Next come cuts ${length(state.next_depth_mm, units(), { mmToo: true })} deep, starting from the widths that were stable.`
       : 'Plan the next cuts from what was measured.';
     step.append(el('p', {}, first ? 'Plan a coarse grid of test cuts.' : next));
     step.append(el('p', {}, plan, ...(first ? [] : [' on the ', stock])));
@@ -725,7 +732,7 @@ function renderStep() {
   };
   const unknownUnits = mic.open && cnc.link === 'ready' && cnc.units === null;
   step.append(
-    el('p', {}, `Round ${round.round}: ${tests} test cuts ${round.depth_mm} mm deep, about ${minutes(round.run_time_s)} plus rapids. The front face ends at Y${round.face_y_end_mm}.`),
+    el('p', {}, `Round ${round.round}: ${tests} test cuts ${length(round.depth_mm, units(), { mmToo: true })} deep, about ${minutes(round.run_time_s)} plus rapids. The front face ends at Y ${length(round.face_y_end_mm, units(), { mmToo: true })}.`),
     el('ol', {},
       el('li', {}, 'Zero X at the left end of the stock, Y on its front face, Z on top.'),
       el('li', {}, load, ...(unknownUnits ? [' cncjs has not reported G20 or G21 yet; the machine is in ', declare] : []), mic.open || dryRun ? '' : ' (enable the microphone first)'),
@@ -770,14 +777,14 @@ function renderRound() {
     return;
   }
   const kind = round.planner === 'sweep' ? ' (chip-load sweep)' : '';
-  $('round-title').textContent = `Round ${round.round}${kind}${round.analysed ? ' results' : ''}, ${round.depth_mm} mm deep`;
+  $('round-title').textContent = `Round ${round.round}${kind}${round.analysed ? ' results' : ''}, ${length(round.depth_mm, units(), { mmToo: true })} deep`;
   $('passes').replaceChildren(
     ...round.passes.map((p) =>
       el('tr', { className: p.kind === 'test' ? '' : 'prep' },
         el('td', {}, String(p.id)),
         el('td', {}, String(p.rpm)),
-        el('td', {}, p.width_mm.toFixed(2)),
-        el('td', {}, String(Math.round(p.feed_mm_min))),
+        el('td', {}, length(p.width_mm, units())),
+        el('td', {}, feed(p.feed_mm_min, units())),
         el('td', {}, p.p_stable === null ? '' : p.p_stable.toFixed(2)),
         verdictCell(round, p),
       ),
@@ -791,11 +798,11 @@ function renderMap() {
   if ($('map-section').hidden) {
     return;
   }
-  $('map-title').textContent = `Stability map at ${state.depth_mm} mm depth`;
+  $('map-title').textContent = `Stability map at ${length(state.depth_mm, units(), { mmToo: true })} depth`;
   const { speeds, widths, p } = state.map;
   const canvas = $('map');
   const ctx = canvas.getContext('2d');
-  const pad = { left: 40, bottom: 16, top: 4, right: 4 };
+  const pad = { left: units() === 'in' ? 56 : 40, bottom: 16, top: 4, right: 4 };
   const w = canvas.width - pad.left - pad.right;
   const h = canvas.height - pad.top - pad.bottom;
   ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -836,9 +843,9 @@ function renderMap() {
   ctx.fillText(`${speeds[0]} rpm`, pad.left, pad.top + h + 3);
   ctx.textAlign = 'right';
   ctx.fillText(String(speeds.at(-1)), pad.left + w, pad.top + h + 3);
-  ctx.fillText(`${widths.at(-1)}`, pad.left - 3, pad.top);
+  ctx.fillText(length(widths.at(-1), units()).split(' ')[0], pad.left - 3, pad.top);
   ctx.textBaseline = 'bottom';
-  ctx.fillText(`${widths[0]} mm`, pad.left - 3, pad.top + h);
+  ctx.fillText(length(widths[0], units()), pad.left - 3, pad.top + h);
 }
 
 function renderBest() {
@@ -848,10 +855,10 @@ function renderBest() {
     ...best.map((b) =>
       el('tr', {},
         el('td', {}, String(b.rpm)),
-        el('td', {}, `${b.width_mm.toFixed(2)} mm`),
-        el('td', {}, `${b.depth_mm} mm`),
-        el('td', {}, String(b.feed_mm_min)),
-        el('td', {}, b.mrr_cm3_min.toFixed(2)),
+        el('td', {}, length(b.width_mm, units())),
+        el('td', {}, length(b.depth_mm, units())),
+        el('td', {}, feed(b.feed_mm_min, units())),
+        el('td', {}, rate(b.mrr_cm3_min, units())),
       ),
     ),
   );
@@ -860,10 +867,11 @@ function renderBest() {
   if (!sweep) {
     return;
   }
-  const where = `At ${sweep.rpm} rpm, ${sweep.width_mm.toFixed(2)} mm wide and ${sweep.depth_mm} mm deep`;
+  const u = units();
+  const where = `at ${sweep.rpm} rpm, ${length(sweep.width_mm, u)} wide and ${length(sweep.depth_mm, u)} deep`;
   $('sweep-result').textContent = sweep.chip_load_mm === null
-    ? `Chip-load sweep: ${where.toLowerCase()}, even its lightest pass chattered. Keep the session's ${sweep.session_chip_load_mm} mm per tooth.`
-    : `Chip-load sweep: ${where.toLowerCase()}, the cut stayed stable up to ${sweep.chip_load_mm} mm per tooth (the session used ${sweep.session_chip_load_mm}): feed ${sweep.feed_mm_min} mm/min, ${sweep.mrr_cm3_min.toFixed(2)} cm³/min.`;
+    ? `Chip-load sweep: ${where}, even its lightest pass chattered. Keep the session's ${chipLoad(sweep.session_chip_load_mm, u, { mmToo: true })} per tooth.`
+    : `Chip-load sweep: ${where}, the cut stayed stable up to ${chipLoad(sweep.chip_load_mm, u, { mmToo: true })} per tooth (the session used ${chipLoad(sweep.session_chip_load_mm, u)}): feed ${feed(sweep.feed_mm_min, u, { mmToo: true })}, ${rate(sweep.mrr_cm3_min, u, { mmToo: true })}.`;
 }
 
 function render() {

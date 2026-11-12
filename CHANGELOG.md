@@ -6,6 +6,13 @@ What changed for people who use the dechatter widget and command line. The forma
 
 ## [Unreleased]
 
+### Changed
+
+- On a machine in G20 the whole widget shows inches, not only the wizard and the programs:
+  the session summary, round headings and pass table, the front face position, the best
+  cuts, the chip-load sweep result and the stability map's axes. Inches have 4 decimals
+  (chip loads 5), with millimetres alongside where there is room. Files stay in mm.
+
 ### Added
 
 - A **Dry run** toggle in the widget, off by default, to run a round's program in the air

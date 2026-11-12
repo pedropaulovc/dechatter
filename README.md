@@ -59,7 +59,7 @@ a page the microphone on those. Then, in the widget:
 
 1. Create a session. A short wizard asks for the machine, the tool, the cut and the stock. It
    shows lengths in inches when the machine is in G20 and in millimetres when it is in G21,
-   or with no machine connected. Its last step holds the planner's settings, which rarely
+   or with no machine connected; so does the rest of the widget. Its last step holds the planner's settings, which rarely
    need changing. Settings with a sensible default or a computed value (the machine's name,
    the holder, the cut's limits and chip load, the program's dwell, clearance, plunge feed,
    truing width and coolant, and the planner) sit in a collapsed Advanced section of their

@@ -583,7 +583,7 @@ def test_setup_form_round_trips_and_an_invalid_one_keeps_the_old_setup(engine):
     edited["tool"]["holder"] = 'ER32 "short" 🔧'
     edited["cut"]["width_max_mm"] = 3.5
     state = engine.call("save_setup", NAME, json.dumps(edited))
-    assert "2 flutes" in state["summary"]
+    assert state["summary"]["flutes"] == 2
     assert engine.call("setup_form", NAME)["values"] == edited
 
     with pytest.raises(RuntimeError, match="unknown keys: rpm"):
