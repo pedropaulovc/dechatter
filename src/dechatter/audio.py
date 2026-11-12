@@ -36,11 +36,15 @@ FLOOR_PASSES = 3
 FLOOR_MIN_S = 80.0
 FLOOR_PERCENTILE_PER_AIR = 40  # percentile per unit of the smallest air share of a pass
 FLOOR_PERCENTILE = (5, 25)
-# Silence is this far under the loud part of the recording (its 90th percentile: the cuts,
-# or the spindle). Not under the median: a recorder left running after the run makes the
-# median silence. The spindle sits 10-15 dB under its cuts in the recordings at hand.
-LOUD_PERCENTILE = 90
-QUIET_DB = 30.0
+# Silence (the spindle off) is told apart by its level and where it is. Where: stretches
+# at the lowest mode of the level's histogram (within a margin) that last longer than the
+# spindle is ever in the air between two cuts (a pass's cycle), or that start or end the
+# recording. Its level: a margin under the spindle, the floor percentile of the rest (it
+# lands on the air); a spindle left running after the round is as long, but no quieter.
+# No fixed offset from the median or a percentile holds: silence can be most of a
+# recording, and a cut 40 dB over the spindle.
+SILENCE_MARGIN_DB = 6.0
+MODE_MIN_SHARE = 0.02  # of the frames, for a histogram peak to count as a mode
 LOWEST_THRESHOLD_DB = 1.0
 
 
@@ -128,9 +132,13 @@ def envelope_db(samples: np.ndarray, rate: int) -> np.ndarray:
     return 10 * np.log10(mean + 1e-14)
 
 
+def pass_cycle_s(plan: Plan) -> float:
+    """The longest pass, from its dwell to the end of its lead-out."""
+    return max(p.expected_cut_s + 2 * p.lead_in_s for p in plan.passes) + plan.dwell_s
+
+
 def floor_window_s(plan: Plan) -> float:
-    longest = max(p.expected_cut_s + 2 * p.lead_in_s for p in plan.passes)
-    return max(FLOOR_MIN_S, FLOOR_PASSES * (longest + plan.dwell_s))
+    return max(FLOOR_MIN_S, FLOOR_PASSES * pass_cycle_s(plan))
 
 
 def floor_percentile(plan: Plan) -> float:
@@ -142,15 +150,48 @@ def floor_percentile(plan: Plan) -> float:
     return float(np.clip(FLOOR_PERCENTILE_PER_AIR * share, low, high))
 
 
-def local_floor(level_db: np.ndarray, window_s: float, percentile: float) -> np.ndarray:
+def lowest_mode_db(level_db: np.ndarray) -> float:
+    """The lowest level the recording dwells at: the lowest peak of its histogram (1 dB
+    bins, smoothed) that holds at least MODE_MIN_SHARE of the frames."""
+    low, high = np.floor(level_db.min()), np.ceil(level_db.max()) + 1
+    counts, edges = np.histogram(level_db, bins=np.arange(low, high + 1))
+    smooth = np.convolve(counts, np.ones(3) / 3)[1:-1]  # "same" would pad a short histogram
+    padded = np.concatenate(([-1.0], smooth, [-1.0]))
+    peaks = (padded[1:-1] >= padded[:-2]) & (padded[1:-1] > padded[2:])
+    peaks &= smooth >= MODE_MIN_SHARE * len(level_db)
+    first = int(np.flatnonzero(peaks)[0]) if peaks.any() else int(np.argmax(smooth))
+    return float(edges[first] + 0.5)
+
+
+def silence(level_db: np.ndarray, min_s: float, percentile: float) -> np.ndarray:
+    """Frames of silence. Where it can be: stretches at the recording's lowest mode, longer
+    than min_s or at either end of the recording (before the spindle starts, after it
+    stops). What in them is silence: what sits a margin under the spindle, the percentile
+    of the frames outside them that lands on the air."""
+    low = level_db < lowest_mode_db(level_db) + SILENCE_MARGIN_DB
+    edges = np.flatnonzero(np.diff(np.concatenate(([0], low, [0]))))
+    stretches = np.zeros(len(level_db), dtype=bool)
+    for start, end in zip(edges[::2], edges[1::2], strict=True):
+        if (end - start) * HOP_S > min_s or start == 0 or end == len(level_db):
+            stretches[start:end] = True
+    if stretches.all() or not stretches.any():
+        return np.zeros(len(level_db), dtype=bool)
+    spindle = np.percentile(level_db[~stretches], percentile)
+    return stretches & (level_db < spindle - SILENCE_MARGIN_DB)
+
+
+def local_floor(
+    level_db: np.ndarray, window_s: float, percentile: float, min_silence_s: float
+) -> np.ndarray:
     """The level the spindle alone makes around each moment.
 
     Silence (before the spindle starts, or after it stops) is no spindle noise: it is left
-    out by ranking it above everything, so the floor beside it is the spindle's.
+    out by ranking it above everything, so the floor beside it is the spindle's. Inside the
+    recording, only a stretch longer than min_silence_s counts: the spindle is never in the
+    air that long between two cuts.
     """
     size = max(1, int(window_s / HOP_S))
-    quiet = level_db < np.percentile(level_db, LOUD_PERCENTILE) - QUIET_DB
-    ranked = np.where(quiet, level_db.max(), level_db)
+    ranked = np.where(silence(level_db, min_silence_s, percentile), level_db.max(), level_db)
     return ndimage.percentile_filter(ranked, percentile, size=size, mode="reflect")
 
 
@@ -225,7 +266,8 @@ def find_cuts(samples: np.ndarray, rate: int, plan: Plan) -> Alignment:
 
 def find_cuts_in(level: np.ndarray, plan: Plan) -> Alignment:
     """Sweep the threshold over the local floor; keep the one whose cuts best fit the plan."""
-    over = level - local_floor(level, floor_window_s(plan), floor_percentile(plan))
+    floor = local_floor(level, floor_window_s(plan), floor_percentile(plan), pass_cycle_s(plan))
+    over = level - floor
     low, high = LOWEST_THRESHOLD_DB, max(float(np.percentile(over, 98)), LOWEST_THRESHOLD_DB + 1)
     min_s = 0.5 * min(p.expected_cut_s for p in plan.passes)
     thresholds = np.linspace(low, high, THRESHOLD_STEPS + 2)[1:-1]

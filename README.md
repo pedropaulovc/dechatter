@@ -92,9 +92,9 @@ a page the microphone on those. Then, in the widget:
    So it knows when every cut starts and ends, and records those times with the sound; at
    most one move is ever queued, so if the tab closes or the connection drops the machine
    finishes that move and stands. Hold, Resume and Stop are in the widget (cncjs's own feed
-   hold works too). Stop holds, waits until the controller reports the hold complete and
-   its position stops changing, then resets it; if the hold never completes it does not
-   reset, and says so. An alarm stops the round with nothing more sent and is left for you
+   hold works too). Stop holds, waits until the controller reports the hold complete (or
+   Idle) and nothing changes for a second, then resets it; if the hold never completes, or
+   the connection drops meanwhile, it does not reset, and says so. An alarm stops the round with nothing more sent and is left for you
    to clear in cncjs (home, or unlock): the widget never unlocks. While a round runs, its
    session stays open: the session list, New, Import and Setup wait for it to end. Start is refused while cncjs runs a job of its own, while the machine is in
    alarm or held, or before its G20/G21 mode is known, and a job cncjs starts during the

@@ -213,6 +213,10 @@ class Sessions:
         self._app(name).record_start(number)
         return self.state(name)
 
+    def record_cancel(self, name: str) -> dict:
+        self._app(name).record_cancel()
+        return self.state(name)
+
     def record_stop(self, name: str, samples, rate: float, timeline: str) -> dict:
         mono = np.asarray(samples, dtype=np.float32)
         self._app(name).record_stop(mono, int(round(rate)), json.loads(timeline))

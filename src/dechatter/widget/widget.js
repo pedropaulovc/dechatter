@@ -103,20 +103,28 @@ function showError(message) {
   $('error').hidden = !message;
 }
 
-// Run one request that answers with the session's new state.
-async function act(method, ...args) {
+// Run one request on a session that answers with its new state. The page takes that state
+// only while the session is still the one open. Resolves whether the request succeeded.
+async function actOn(name, method, ...args) {
   requests += 1;
   render();
   try {
-    state = await engine(method, current, ...args);
+    const next = await engine(method, name, ...args);
+    if (name === current) {
+      state = next;
+    }
     showError('');
+    return true;
   } catch (err) {
     showError(err.message);
+    return false;
   } finally {
     requestDone();
     render();
   }
 }
+
+const act = (method, ...args) => actOn(current, method, ...args);
 
 async function openSession(name) {
   current = name;
@@ -630,33 +638,40 @@ async function startRound(round) {
   try {
     await mic.resume(); // capture has to be running before the first cut
     blocks = await engine('steps', name, round.round, cnc.units);
-    timeline = [];
-    mic.record();
-    note('record', { round: round.round, units: cnc.units });
-    const started = await engine('record_start', name, round.round);
-    if (name === current) {
-      state = started;
-    }
   } catch (err) {
-    if (mic.recording) {
-      mic.finish();
-    }
     run = null;
     showError(err.message);
     render();
     return;
   }
-  // The machine may have changed during those waits.
-  const late = machineRefusal();
-  if (late) {
-    stepper.fail(late);
+  // The machine may have changed during those waits: check again before recording.
+  if (notStarted(stepper)) {
+    return;
   }
-  render();
+  timeline = [];
+  mic.record();
+  note('record', { round: round.round, units: cnc.units });
+  if (!(await actOn(name, 'record_start', round.round))) {
+    mic.finish();
+    run = null;
+    render();
+    return;
+  }
+  // Once more: nothing has been sent, so a refusal now drops the recording unsaved.
+  const late = notStartedReason(stepper);
+  if (late) {
+    mic.finish();
+    await actOn(name, 'record_cancel');
+    run = null;
+    showError(late);
+    render();
+    return;
+  }
   const outcome = await stepper.run(blocks);
   note('run', { outcome, reason: stepper.reason });
   const samples = mic.finish();
   run = null;
-  await stopRecording(name, samples);
+  await actOn(name, 'record_stop', samples, mic.rate, JSON.stringify(timeline));
   if (outcome === PHASE.FAILED) {
     // Both, when the analysis refused too: why the round ended, then why it was not analysed.
     const analysis = $('error').hidden ? '' : ` ${$('error').textContent}`;
@@ -664,22 +679,25 @@ async function startRound(round) {
   }
 }
 
-// Store the run's recording with the session it was started in.
-async function stopRecording(name, samples) {
-  requests += 1;
-  render();
-  try {
-    const stopped = await engine('record_stop', name, samples, mic.rate, JSON.stringify(timeline));
-    if (name === current) {
-      state = stopped;
-    }
-    showError('');
-  } catch (err) {
-    showError(err.message);
-  } finally {
-    requestDone();
-    render();
+// Why a round about to start cannot: the machine now refuses, or the stepper was ended
+// (a lost link, an error or alarm line, a cncjs job) before it sent a block; '' if it can.
+function notStartedReason(stepper) {
+  if (stepper.finished) {
+    return `The round did not start: ${stepper.reason.replace(/\.$/, '')}. Nothing was sent.`;
   }
+  return machineRefusal();
+}
+
+// Whether the round cannot start after all; if so, says why and lets Start go again.
+function notStarted(stepper) {
+  const reason = notStartedReason(stepper);
+  if (!reason) {
+    return false;
+  }
+  run = null;
+  showError(reason);
+  render();
+  return true;
 }
 
 // ---- rendering -------------------------------------------------------------------------

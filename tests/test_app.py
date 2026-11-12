@@ -560,6 +560,17 @@ def test_the_report_does_not_call_passes_likely_not_run_unheard(engine):
     assert not any("not heard" in cells for cells in trailing)
 
 
+def test_a_run_refused_after_record_start_keeps_no_recording(engine):
+    engine.call("plan", NAME, "same")
+    engine.call("record_start", NAME, 1)
+    state = engine.call("record_cancel", NAME)
+    assert state["recording_round"] is None and state["next"] == "run"
+    assert not state["rounds"][0]["has_recording"]
+    with pytest.raises(RuntimeError, match="not recording"):
+        engine.call("record_cancel", NAME)
+    engine.call("record_start", NAME, 1)  # free to start again
+
+
 def test_a_widget_run_that_ended_before_its_first_cut_leaves_the_round_runnable(engine):
     engine.call("plan", NAME, "same")
     engine.call("record_start", NAME, 1)

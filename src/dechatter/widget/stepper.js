@@ -26,9 +26,10 @@ const HOLD_STATES = new Set(['Hold', 'Door']);
 // reset while the machine still moves loses its position (Grbl ALARM:3), so if it does not
 // settle in this long, nothing is reset and the operator is told.
 const SETTLE_TIMEOUT_S = 15;
-// Grbl 0.9 reports a bare Hold, which cncjs reads as Hold:0, while it still decelerates. A
-// hold is complete once it has said Hold:0 and nothing has changed for this long: cncjs
-// polls about every 250 ms and reports only changes, the position among them.
+// The machine is at rest once it has said Hold:0 or Idle and nothing has changed for this
+// long: cncjs polls about every 250 ms and reports changes, the position among them. Grbl
+// 0.9 reports a bare Hold, which cncjs reads as Hold:0, while it still decelerates, and an
+// Idle can be stale (see holdThenReset).
 const QUIET_S = 1;
 const POLL_MS = 250;
 const ALARM_ADVICE = 'Clear it in cncjs (home, or unlock if you are sure the position is still right).';
@@ -42,7 +43,13 @@ const HALT = {
   ALARM: 'alarm', // the controller went into alarm: it stopped itself
 };
 
-const holdComplete = (state) => state.activeState === 'Hold' && state.subState === 0;
+// The link to cncjs and the machine. Once lost, nothing more is sent: socket.io buffers
+// what is emitted while disconnected and sends it on reconnect, maybe minutes later.
+const LINK = { UP: 'up', LOST: 'lost' };
+
+// A report that says the machine is at rest, once nothing changes for QUIET_S.
+const atRest = (state) => state.activeState === 'Idle' || (state.activeState === 'Hold' && state.subState === 0);
+const UNSETTLED_ADVICE = 'so it was not reset. Make sure it has stopped, then reset it in cncjs.';
 
 // Positions match within this many mm: controllers report three decimals in mm, or four in
 // inches, and a program in inches rounds its words to four decimals.
@@ -67,6 +74,7 @@ export class Stepper {
     this.state = { activeState: '', subState: null, wpos: null };
     this.watchers = []; // halt() waiting for the next report; unlike waiters, they outlive the end of the run
     this.alarmedBy = null; // the alarm that ended the run, if one did
+    this.link = LINK.UP;
     this.waiters = [];
     this.ended = null; // the Ended error every wait rejects with, once the run is over
     this.holds = []; // [start, end] of holds during the current block
@@ -129,8 +137,13 @@ export class Stepper {
     }
   }
 
+  // The socket or the port went away. A halt under way ends at once, sending nothing.
   disconnected() {
+    this.link = LINK.LOST;
     this.end(PHASE.FAILED, 'the connection to cncjs or the machine was lost');
+    for (const resolve of this.watchers.splice(0)) {
+      resolve(this.state);
+    }
   }
 
   // ---- what the operator does --------------------------------------------------------
@@ -172,6 +185,9 @@ export class Stepper {
     if (this.alarmedBy !== null) {
       return HALT.ALARM;
     }
+    if (this.link === LINK.LOST) {
+      return HALT.UNSETTLED;
+    }
     if (was !== PHASE.MOVING && was !== PHASE.HELD) {
       // Dwelling or waiting for the spindle: the last move was seen to end where it should.
       this.io.reset();
@@ -184,29 +200,35 @@ export class Stepper {
     }
   }
 
-  // A move was sent: the last report may predate it (cncjs reports only changes), so an
-  // Idle counts only once reported after the hold. A hold already complete when the move
-  // was sent keeps that move from starting, so it counts once nothing changes.
+  // A move was sent: the last report may predate it (cncjs reports only changes), and even
+  // a report after the hold can carry the status of a `?` answered before the move started
+  // (cncjs re-emits the last status when the parser state changes). So Idle or Hold:0
+  // counts only once reported after the hold and unchanged for QUIET_S. A hold already
+  // complete when the move was sent keeps that move from starting: it counts the same way.
   async holdThenReset() {
     const since = this.now();
     let report = this.nextReport(); // watch before holding: the controller may answer at once
     this.io.feedhold();
-    let quietSince = holdComplete(this.state) ? since : null;
+    let quietSince = this.state.activeState === 'Hold' && this.state.subState === 0 ? since : null;
     for (;;) {
       const state = await Promise.race([report, this.sleep(POLL_MS).then(() => null)]);
       if (this.alarmedBy !== null) {
         return HALT.ALARM;
       }
+      if (this.link === LINK.LOST) {
+        this.reason = `${this.reason} before the machine reported the hold complete, ${UNSETTLED_ADVICE}`;
+        return HALT.UNSETTLED;
+      }
       if (state) {
         report = this.nextReport();
-        quietSince = holdComplete(state) ? this.now() : null;
+        quietSince = atRest(state) ? this.now() : null;
       }
-      if (state?.activeState === 'Idle' || (quietSince !== null && this.now() - quietSince >= QUIET_S)) {
+      if (quietSince !== null && this.now() - quietSince >= QUIET_S) {
         this.io.reset();
         return HALT.RESET;
       }
       if (this.now() - since >= SETTLE_TIMEOUT_S) {
-        this.reason = `${this.reason}; the machine did not report the hold complete, so it was not reset. Make sure it has stopped, then reset it in cncjs.`;
+        this.reason = `${this.reason}; the machine did not report the hold complete, ${UNSETTLED_ADVICE}`;
         return HALT.UNSETTLED;
       }
     }

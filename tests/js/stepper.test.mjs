@@ -13,6 +13,9 @@ const HOLD = {
   NEVER: 'never', // never reports the hold complete
   ALARMS: 'alarms', // goes into alarm instead
   SLOWS: 'slows', // reports Hold:0 while its position still changes (Grbl 0.9's bare Hold)
+  // cncjs emits an Idle from a `?` answered before the move started (a $G reply changed the
+  // parser state), then the move and its hold.
+  STALE_IDLE: 'stale-idle',
 };
 
 // A controller as cncjs reports it: each move takes `seconds` of virtual time, shows Run
@@ -68,6 +71,15 @@ class Machine {
     await tick();
     if (this.hold === HOLD.ALARMS) {
       this.report('Alarm');
+      return;
+    }
+    if (this.hold === HOLD.STALE_IDLE) {
+      this.report('Idle');
+      await tick();
+      this.wpos = { ...this.wpos, x: (Number(this.wpos.x) + 0.5).toFixed(3) };
+      this.report('Run');
+      await tick();
+      this.report('Hold', 0);
       return;
     }
     if (this.hold === HOLD.SLOWS) {
@@ -417,4 +429,37 @@ test('a hold counts as complete only once the position stops changing', async ()
   };
   assert.equal(await stepper.run(round([1])), PHASE.STOPPED);
   assert.ok(machine.resetAt - machine.lastReport >= 1, `reset ${machine.resetAt - machine.lastReport} s after the last move`);
+});
+
+test('an Idle reported after the hold counts only once nothing changes', async () => {
+  const machine = new Machine();
+  machine.hold = HOLD.STALE_IDLE;
+  const { stepper } = machine.stepper_for();
+  machine.onMove = async (lines) => {
+    if (lines[0] === 'G1 X68 F500') {
+      machine.moving = false;
+      stepper.stop();
+    }
+  };
+  assert.equal(await stepper.run(round([1])), PHASE.STOPPED);
+  assert.ok(machine.resetAt - machine.lastReport >= 1, `reset ${machine.resetAt - machine.lastReport} s after the last report`);
+});
+
+test('a lost connection during a stop ends it without a reset, then or on reconnect', async () => {
+  const machine = new Machine();
+  machine.hold = HOLD.NEVER;
+  const { stepper } = machine.stepper_for();
+  machine.onMove = async (lines) => {
+    if (lines[0] === 'G1 X68 F500') {
+      machine.moving = false;
+      stepper.stop();
+      await tick();
+      machine.report('Hold', 0); // the hold completes, then the link drops before the reset
+      stepper.disconnected();
+    }
+  };
+  assert.equal(await stepper.run(round([1])), PHASE.FAILED);
+  assert.ok(!machine.log.includes('^X'), 'no reset to be buffered and sent on reconnect');
+  assert.ok(machine.t < 5 + 10 + 2, 'it does not wait out the settle time');
+  assert.match(stepper.reason, /connection.*lost.*not reset/);
 });

@@ -89,19 +89,22 @@ const start = async () => {
     // What reached the controller, and when it said it had stopped.
     const hold = written.find((w) => w.what === 'feedhold');
     const reset = written.find((w) => w.what === 'reset');
-    const settled = hold && reports.find((r) => r.t >= hold.t && r.settled);
+    // The last report between the hold and the reset: it must say the machine was at rest,
+    // and nothing may have changed for most of a second (cncjs polls every 250 ms).
+    const last = hold && reset && reports.findLast((r) => r.t >= hold.t && r.t <= reset.t);
     const problems = [
       phase !== PHASE.STOPPED && `ended ${phase}`,
       !hold && 'no feed hold was sent',
       !reset && 'no reset was sent',
-      hold && reset && !settled && 'no Hold:0 or Idle was reported after the hold',
-      settled && reset && reset.t < settled.t && `reset ${(settled.t - reset.t).toFixed(3)} s before the hold was reported complete`,
+      hold && reset && !last && 'nothing was reported between the hold and the reset',
+      last && last.rest === REST.OTHER && `reset while the machine reported ${last.state}`,
+      last && reset.t - last.t < 900 && `reset ${reset.t - last.t} ms after the last report`,
       written.some((w) => w.what === 'unlock') && 'an unlock ($X) was sent',
       lastState === 'Alarm' && 'the controller is in alarm',
     ].filter(Boolean);
     const ok = problems.length === 0;
     const at = (w) => (w ? `${(w.t - t0) / 1000}s` : 'never');
-    log(`${ok ? 'PASS' : `FAIL (${problems.join('; ')})`}: stopped in cut ${stopInCut} at ${stopAt}: ${phase}; hold ${at(hold)}, ${settled?.state ?? 'nothing'} ${at(settled)}, reset ${at(reset)}; controller ${lastState}; aborted window: ${JSON.stringify(windows.at(-1))}`);
+    log(`${ok ? 'PASS' : `FAIL (${problems.join('; ')})`}: stopped in cut ${stopInCut} at ${stopAt}: ${phase}; hold ${at(hold)}, last report ${last?.state ?? 'none'} ${at(last)}, reset ${at(reset)}; controller ${lastState}; aborted window: ${JSON.stringify(windows.at(-1))}`);
     socket.emit('close', port, () => process.exit(ok ? 0 : 1));
     return;
   }
@@ -135,12 +138,22 @@ socket.on('startup', () => socket.emit('open', port, { controllerType: 'Grbl', b
 socket.on('controller:settings', () => setTimeout(start, 500));
 socket.on('serialport:open', () => setTimeout(start, 1500));
 let lastState = '';
-const reports = []; // { t, state, settled }: each controller state cncjs reported
+// What a report says of the machine's motion.
+const REST = {
+  IDLE: 'idle',
+  HOLD_COMPLETE: 'hold-complete', // Hold:0
+  OTHER: 'other', // moving, decelerating, or in another state
+};
+const rest = (activeState, subState) => {
+  if (activeState === 'Idle') return REST.IDLE;
+  if (activeState === 'Hold' && subState === 0) return REST.HOLD_COMPLETE;
+  return REST.OTHER;
+};
+const reports = []; // { t, state, rest }: each controller state cncjs reported
 socket.on('controller:state', (_t, state) => {
   const { activeState, subState, wpos } = state?.status ?? {};
   lastState = activeState;
-  const settled = activeState === 'Idle' || (activeState === 'Hold' && subState === 0);
-  reports.push({ t: Date.now(), state: activeState === 'Hold' ? `Hold:${subState}` : activeState, settled });
+  reports.push({ t: Date.now(), state: activeState === 'Hold' ? `Hold:${subState}` : activeState, rest: rest(activeState, subState) });
   stepper.controller({ activeState, subState, wpos });
 });
 // What cncjs wrote to the controller, from any sender: the realtime bytes included.

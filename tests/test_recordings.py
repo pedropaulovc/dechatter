@@ -188,6 +188,45 @@ def test_cuts_are_found_when_silence_is_most_of_the_recording(setup):
         assert padded.matches[index].end_s == pytest.approx(segment.end_s, abs=1.0)
 
 
+def level_trace(plan: Plan, spindle_db: float, cut_db: float, silence: tuple[float, float]):
+    """A level trace (dB per HOP_S) of running `plan`, with `silence` seconds of quiet before
+    and after it, and the true cut times."""
+    rng = np.random.default_rng(2)
+    hop = audio.HOP_S
+    parts, cuts, t = [np.full(int(silence[0] / hop), -90.0)], [], silence[0]
+    for index, p in enumerate(plan.passes):
+        air = 2.0 + plan.dwell_s + p.lead_in_s
+        parts.append(np.full(int(air / hop), spindle_db))
+        parts.append(np.full(int(p.expected_cut_s / hop), cut_db + 3.0 * (index % 3)))
+        cuts.append((t + air, t + air + p.expected_cut_s))
+        t += air + p.expected_cut_s
+    parts.append(np.full(int(silence[1] / hop), -90.0))
+    level = np.concatenate(parts)
+    return level + rng.normal(0, 1.0, len(level)), cuts
+
+
+@pytest.mark.parametrize(
+    ("what", "spindle_db", "cut_db", "silence"),
+    [
+        ("loud chatter over a quiet spindle", -70.0, -25.0, (3.0, 2.0)),
+        ("a recorder left running long after the round", -45.0, -35.0, (5.0, 0.0)),
+    ],
+)
+def test_silence_is_told_from_a_quiet_spindle(setup, what, spindle_db, cut_db, silence):
+    from test_plan import round1
+
+    plan = round1(setup)
+    if silence[1] == 0.0:  # silence 95 % of the recording
+        _, cuts = level_trace(plan, spindle_db, cut_db, (5.0, 0.0))
+        silence = (5.0, 19 * cuts[-1][1])
+    level, cuts = level_trace(plan, spindle_db, cut_db, silence)
+    found = audio.find_cuts_in(level, plan)
+    assert sorted(found.matches) == list(range(len(plan.passes))), what
+    for index, (start, end) in enumerate(cuts):
+        assert found.matches[index].start_s == pytest.approx(start, abs=1.0), what
+        assert found.matches[index].end_s == pytest.approx(end, abs=1.0), what
+
+
 def held(timeline: list, pass_id: int, offsets: tuple[float, float]) -> None:
     cut = next(e for e in timeline if e["event"] == "cut" and e["pass"] == pass_id)
     cut["holds"] = [[cut["start"] + offsets[0], cut["start"] + offsets[1]]]

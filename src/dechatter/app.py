@@ -206,6 +206,12 @@ class App:
         self._round(number)
         self.recording_round = number
 
+    def record_cancel(self) -> None:
+        """Drop the recording under way unsaved: the run ended before it sent a block."""
+        if self.recording_round is None:
+            raise SessionError("not recording")
+        self.recording_round = None
+
     def record_stop(self, samples: np.ndarray, rate: int, timeline: list) -> None:
         """Keep the recording and the job timeline cncjs reported, then analyse."""
         if self.recording_round is None:
