@@ -43,11 +43,6 @@ let state = null; // the current session, as the engine last reported it
 let editing = null; // { values, defaults, materials, computed, step } while the setup wizard is open, else null
 let timeline = []; // what cncjs reported since the job last started; saved with the recording
 let busy = false; // an engine request is in flight
-// A dry run checks the toolpath in the air; it is never recorded. `dryRun` is the toggle,
-// off on every load and for every session; `dryJob` is true from the start of a job run
-// with it on until that job ends, which also turns the toggle off.
-let dryRun = false;
-let dryJob = false;
 let stockChoice = 'same'; // survives redraws: planning on the wrong face position cuts air or too deep
 
 // ---- engine (Python in a worker) -------------------------------------------------------
@@ -110,7 +105,6 @@ async function openSession(name) {
   current = name;
   editing = null;
   state = null;
-  dryRun = false;
   localStorage.setItem(SESSION_KEY, name);
   if (name) {
     await act('state');
@@ -446,12 +440,6 @@ async function connectCncjs() {
   socket.on('workflow:state', (workflow) => {
     if (workflow === 'running' && cnc.workflow !== 'paused') {
       timeline = [];
-      dryJob = dryRun;
-    }
-    // The dry job ended, finished or stopped: the next run records again.
-    if (workflow === 'idle' && dryJob) {
-      dryJob = false;
-      dryRun = false;
     }
     cnc.workflow = workflow;
     note('workflow', { state: workflow });
@@ -496,9 +484,6 @@ function syncRecording() {
     return;
   }
   const round = plannedRound();
-  if (dryJob || (dryRun && !mic.recording)) {
-    return; // a dry run is never recorded, whatever the microphone does
-  }
   if (!mic.recording && round && cnc.workflow === 'running' && cnc.program === round.program && !loadedHere(round)) {
     showError('This run is not recorded: the program in cncjs may be in other units than the machine is in now. Stop the job, load the program again from here, then run it.');
     return;
@@ -628,17 +613,6 @@ function stockSelect() {
   return stock;
 }
 
-// Off by default; it turns itself off when the dry job ends. It cannot change while a job
-// runs or a run is being recorded.
-function dryRunToggle() {
-  const box = el('input', { type: 'checkbox', checked: dryRun, disabled: mic.recording || dryJob || cnc.workflow === 'running' || cnc.workflow === 'paused' });
-  box.onchange = () => {
-    dryRun = box.checked;
-    render();
-  };
-  return el('p', {}, el('label', {}, box, ' Dry run: run the program in the air, Z zero raised, to check the toolpath. It is not recorded.'));
-}
-
 function renderStep() {
   const step = $('step');
   step.replaceChildren();
@@ -720,7 +694,7 @@ function renderStep() {
   // The name matches, but the units it was loaded in differ or are not known: load it again.
   const unsure = cnc.program === round.program && !loaded;
   // The program is written in the machine's units, so they have to be known first.
-  const ready = cnc.link === 'ready' && cnc.workflow === 'idle' && cnc.units !== null && (mic.open || dryRun);
+  const ready = cnc.link === 'ready' && cnc.workflow === 'idle' && cnc.units !== null && mic.open;
   const load = button(loaded ? 'Reload program' : 'Load into cncjs', () => loadProgram(round), { className: loaded ? '' : 'primary', disabled: !ready });
   // cncjs reports the mode from the controller's parser state. Until it does, the operator
   // can say which it is: the program sets that mode itself, so a wrong choice cannot
@@ -735,16 +709,12 @@ function renderStep() {
     el('p', {}, `Round ${round.round}: ${tests} test cuts ${length(round.depth_mm, units(), { mmToo: true })} deep, about ${minutes(round.run_time_s)} plus rapids. The front face ends at Y ${length(round.face_y_end_mm, units(), { mmToo: true })}.`),
     el('ol', {},
       el('li', {}, 'Zero X at the left end of the stock, Y on its front face, Z on top.'),
-      el('li', {}, load, ...(unknownUnits ? [' cncjs has not reported G20 or G21 yet; the machine is in ', declare] : []), mic.open || dryRun ? '' : ' (enable the microphone first)'),
-      el('li', {}, dryRun ? 'Press play in cncjs. This run is not recorded and does not count.' : loaded ? 'Press play in cncjs. Recording starts and stops with the job. Keep this tab open.' : 'Press play in cncjs.'),
+      el('li', {}, load, ...(unknownUnits ? [' cncjs has not reported G20 or G21 yet; the machine is in ', declare] : []), mic.open ? '' : ' (enable the microphone first)'),
+      el('li', {}, loaded ? 'Press play in cncjs. Recording starts and stops with the job. Keep this tab open.' : 'Press play in cncjs.'),
       ...(state.spindle === 'manual' ? [el('li', {}, `The program pauses before each of its ${speedChanges(round)} spindle speeds. Set the speed shown here, then resume in cncjs.`)] : []),
     ),
   );
-  step.append(dryRunToggle());
-  if (dryRun || dryJob) {
-    step.append(el('p', { className: 'instruction' }, `${dryJob ? 'Dry run in progress: not recorded, and the round still waits for its real run.' : 'Dry run: the next run of the program is not recorded and does not count.'} Before the real run, put Z zero back on the top of the stock.`));
-  }
-  if (unsure && !dryRun) {
+  if (unsure) {
     step.append(el('p', { className: 'instruction' }, 'cncjs holds this round\'s program, but it was loaded in other units than the machine is in now, or before this widget was reloaded. Load it again before pressing play; a run of it as it is will not be recorded.'));
   }
   if (round.has_recording) {

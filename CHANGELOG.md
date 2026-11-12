@@ -15,10 +15,6 @@ What changed for people who use the dechatter widget and command line. The forma
 
 ### Added
 
-- A **Dry run** toggle in the widget, off by default, to run a round's program in the air
-  first: that run is never recorded or analysed, even with the microphone open, and the
-  round still waits for its real run. It turns itself off when the job ends and on every
-  reload, and reminds you to put Z zero back on the stock before the real run.
 - **Delete** next to the widget's session list removes a session from the browser for good,
   after a confirmation that names its rounds and recordings and offers Export first. It
   works for sessions that no longer load, such as ones from dechatter 0.1.x, and is refused
