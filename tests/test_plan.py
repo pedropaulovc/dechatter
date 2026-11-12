@@ -16,6 +16,8 @@ from dechatter.plan import (
     mrr_mm3_min,
 )
 
+MM = gcode.Units.MM
+
 
 def round1(setup, face=0.0, remnant=0.0):
     env = envelope(setup)
@@ -78,7 +80,7 @@ def cutting_moves(program: str) -> list[tuple[float, float, float]]:
 
 def test_gcode_steps_the_cutter_into_the_face_by_each_pass_width(setup):
     plan = round1(setup, face=4.0)
-    moves = cutting_moves(gcode.render(plan, setup))
+    moves = cutting_moves(gcode.render(plan, setup, MM))
     assert len(moves) == len(plan.passes)
     face = plan.face_y_start_mm
     for (y, x_end, feed), p in zip(moves, plan.passes, strict=True):
@@ -90,11 +92,11 @@ def test_gcode_steps_the_cutter_into_the_face_by_each_pass_width(setup):
 
 def test_climb_reverses_travel(write_setup):
     climb = load_setup(write_setup(d=('direction = "conventional"', 'direction = "climb"')))
-    assert all(x_end < 0 for _, x_end, _ in cutting_moves(gcode.render(round1(climb), climb)))
+    assert all(x_end < 0 for _, x_end, _ in cutting_moves(gcode.render(round1(climb), climb, MM)))
 
 
 def test_dwell_precedes_every_cut(setup):
-    program = gcode.render(round1(setup), setup).splitlines()
+    program = gcode.render(round1(setup), setup, MM).splitlines()
     cuts = [i for i, line in enumerate(program) if line.startswith("G1 X")]
     assert all(program[i - 1] == "G4 P4" for i in cuts)
 
@@ -102,21 +104,33 @@ def test_dwell_precedes_every_cut(setup):
 MANUAL = {"s": ('spindle = "program"', 'spindle = "manual"')}
 
 
-def test_an_inch_machine_is_put_back_in_inches_even_by_a_program_without_m30():
-    restore = gcode.RESTORE_INCH
-    assert gcode.for_machine("G21\nG0 X1\nM30\n", gcode.Units.MM) == "G21\nG0 X1\nM30\n"
-    assert (
-        gcode.for_machine("G21\nG0 X1\nM30\n", gcode.Units.INCH) == f"G21\nG0 X1\n{restore}\nM30\n"
+def test_an_inch_machine_gets_the_same_program_in_inches(setup):
+    plan = round1(setup, face=4.0)
+    mm = gcode.render(plan, setup, MM).splitlines()
+    inch = gcode.render(plan, setup, gcode.Units.INCH).splitlines()
+
+    assert [line for line in mm if re.match(r"G2[01]\b", line)] == ["G21 G90 G94 G17"]
+    # The program never leaves inches: its machine stays in them however the job ends.
+    assert [line for line in inch if re.match(r"G2[01]\b", line)] == ["G20 G90 G94 G17"]
+    assert all(len(f) <= 4 for line in inch for f in re.findall(r"\.(\d+)", line.split("(")[0]))
+    # Four decimals of an inch: within 0.0013 mm, plus the mm program's own rounding.
+    in_mm = [v * 25.4 for move in cutting_moves("\n".join(inch)) for v in move]
+    assert in_mm == pytest.approx(
+        [v for move in cutting_moves("\n".join(mm)) for v in move], abs=0.002
     )
-    # Hand-edited: no M30, and a last line that would swallow anything glued onto it.
-    assert gcode.for_machine("G21\n; end", gcode.Units.INCH) == f"G21\n; end\n{restore}\n"
-    assert gcode.for_machine("G21\nG0 X1\n\n\n", gcode.Units.INCH) == f"G21\nG0 X1\n{restore}\n"
+    # Dwell seconds, spindle speeds and the mm in the comments are the same.
+    for start in ("G4", "M3", "(pass", "(dechatter", "(front face"):
+        assert [x for x in inch if x.startswith(start)] == [x for x in mm if x.startswith(start)]
+    plunge = next(line for line in inch if line.startswith("G1 Z"))
+    depth, feed = re.fullmatch(r"G1 Z(\S+) F(\S+)", plunge).groups()
+    assert float(depth) * 25.4 == pytest.approx(-plan.axial_depth_mm, abs=0.002)
+    assert float(feed) * 25.4 == pytest.approx(setup.program.plunge_feed_mm_min, abs=0.002)
 
 
 def test_manual_spindle_pauses_once_per_speed_and_never_commands_the_spindle(write_setup):
     manual = load_setup(write_setup(**MANUAL))
     plan = round1(manual)
-    program = gcode.render(plan, manual).splitlines()
+    program = gcode.render(plan, manual, MM).splitlines()
 
     assert not [line for line in program if re.match(r"M[345]\b|S\d", line)]
     asked = [

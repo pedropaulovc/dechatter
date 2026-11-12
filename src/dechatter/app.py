@@ -14,7 +14,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import audio, bayes, session
+from . import audio, bayes, gcode, session
 from .config import SetupSource, SpindleControl, load_setup, setup_source
 from .detect import Thresholds, Verdict
 from .plan import PassKind, envelope, feed_mm_min
@@ -152,8 +152,10 @@ class App:
         session.plan_next(self.session_dir, self.setup, self.env, stock)
         self.discarded_round = None
 
-    def program(self, number: int) -> str:
-        return (self._round(number).path / session.PROGRAM_FILE).read_text(encoding="ascii")
+    def program(self, number: int, units: gcode.Units) -> str:
+        """The round's program in the machine's units. The file beside the plan is in mm."""
+        plan = self._round(number).plan
+        return gcode.render(plan, session.at_depth(self.setup, plan.axial_depth_mm), units)
 
     def record_start(self, number: int) -> None:
         if self.recording_round is not None:

@@ -397,7 +397,7 @@ def _write_round(session: Path, setup: Setup, plan: Plan) -> None:
     target = round_dir(session, plan.round)
     target.mkdir()
     plan.save(target / PLAN_FILE)
-    (target / PROGRAM_FILE).write_text(gcode.render(plan, setup), encoding="ascii")
+    (target / PROGRAM_FILE).write_text(gcode.render(plan, setup, gcode.Units.MM), encoding="ascii")
     log.info("planned round %d: %d passes", plan.round, len(plan.passes))
 
 

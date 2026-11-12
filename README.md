@@ -61,9 +61,9 @@ a page the microphone on those. Then, in the widget:
    shows lengths in inches when the machine is in G20 and in millimetres when it is in G21,
    or with no machine connected. Its last step holds the planner's settings, which rarely
    need changing. Saving from the wizard rewrites the session's setup file without comments.
-   Programs are always in millimetres (G21); one run on an inch machine switches it back to
-   G20 before it ends. A job you stop part-way leaves the machine in G21: the wizard keeps
-   showing inches and tells you to send G20, or you can choose to carry on in mm.
+   Programs are written in the machine's units too (G20 or G21, as cncjs reports it), so a
+   job never changes them, even one stopped part-way. Their comments, like the plan and the
+   results, stay in millimetres.
    Nothing is planned until the wizard has been saved: a new session holds only an example
    setup. Once a round has been cut, the wizard refuses changes other than the planner's
    settings, since the stability map belongs to the setup it was measured with: start a new

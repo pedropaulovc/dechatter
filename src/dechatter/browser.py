@@ -109,7 +109,7 @@ class Sessions:
 
     def program(self, name: str, number: int, machine_units: str) -> str:
         """The round's program for a machine in `machine_units` ("mm" or "in")."""
-        return gcode.for_machine(self._app(name).program(number), gcode.Units(machine_units))
+        return self._app(name).program(number, gcode.Units(machine_units))
 
     def record_start(self, name: str, number: int) -> dict:
         self._app(name).record_start(number)
