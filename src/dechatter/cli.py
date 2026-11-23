@@ -15,7 +15,7 @@ from .config import TEMPLATE, ConfigError, Setup, load_setup, read_setup
 from .detect import Thresholds, Verdict
 from .export import ExportError, export
 from .gcode import Units
-from .plan import Envelope, PassKind, Plan, PlanError, envelope
+from .plan import Envelope, PassKind, Plan, PlanError, envelope, lane_x_mm
 from .session import PassStatus, SessionError, Stock
 
 TOP_RESULTS = 5
@@ -109,6 +109,15 @@ def _print_round(session_dir: Path, plan: Plan) -> None:
         f"about {plan.run_time_s / 60:.0f} min, "
         f"uses {plan.consumed_mm:.1f} mm of stock width"
     )
+    if plan.lanes > 1:
+        first, last = lane_x_mm(
+            load_setup(session.round_dir(session_dir, plan.round) / session.SETUP_FILE),
+            plan.lane,
+            plan.lanes,
+        )
+        fresh = plan.face_y_start_mm == 0 and plan.lane > 1
+        fresh = " (a fresh face: keep the same zero)" if fresh else ""
+        print(f"  lane {plan.lane} of {plan.lanes}, X{first:g} to X{last:g}{fresh}")
     for p in tests:
         chance = "" if p.p_stable is None else f"  P(stable) {p.p_stable:.2f}"
         chip = "" if p.chip_load_mm is None else f"  {p.chip_load_mm:g} mm/tooth"

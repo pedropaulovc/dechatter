@@ -18,7 +18,7 @@ import numpy as np
 from . import audio, bayes, gcode, session
 from .config import Setup, SetupSource, read_setup, setup_source
 from .detect import Thresholds, Verdict
-from .plan import PassKind, envelope, feed_mm_min
+from .plan import PassKind, envelope, feed_mm_min, lane_x_mm
 from .session import PassStatus, SessionError, Stock
 
 log = logging.getLogger(__name__)
@@ -158,7 +158,11 @@ class App:
             "planner": r.plan.planner,
             "program": self.program_name(r),
             "run_time_s": round(r.plan.run_time_s),
+            "face_y_start_mm": r.plan.face_y_start_mm,
             "face_y_end_mm": round(r.plan.face_y_start_mm + r.plan.consumed_mm, 2),
+            "lane": r.plan.lane,
+            "lanes": r.plan.lanes,
+            "lane_x_mm": list(lane_x_mm(self.setup, r.plan.lane, r.plan.lanes)),
             "analysed": r.results is not None,
             "has_recording": (r.path / RECORDING_FILE).exists(),
             "passes": passes,

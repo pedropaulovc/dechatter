@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 
 from . import materials
-from .config import Setup, SpindleControl
+from .config import Direction, Setup, SpindleControl
 
 SCHEMA = 2  # 2: dechatter 0.2.0 (planned_on, per-pass chip loads)
 SPINDLE_EFFICIENCY = 0.8
@@ -70,6 +70,11 @@ class Plan:
     plunge_s: float  # feed move from the clearance plane down to depth, beside the stock
     passes: tuple[Pass, ...]
     planned_on: str  # ISO date
+    # The lane of the stock the round cuts (1 is the first the cutter meets), of how many,
+    # and how far back its face may go: the face the lane before it was left with.
+    lane: int = 1
+    lanes: int = 1
+    lane_cap_mm: float | None = None
     schema: int = SCHEMA
 
     @property
@@ -172,6 +177,64 @@ def mrr_mm3_min(setup: Setup, env: Envelope, rpm: float, width_mm: float) -> flo
     return setup.cut.axial_depth_mm * width_mm * feed_mm_min(setup, env, rpm)
 
 
+def _reach(diameter_mm: float, width_mm: float) -> float:
+    """How far along the feed a cutter `width_mm` into a face touches it, from its centre."""
+    return math.sqrt(max(width_mm * (diameter_mm - width_mm), 0.0))
+
+
+@dataclass(frozen=True)
+class Travel:
+    """One pass's cutting move along the feed, in mm from the end of the stock the cutter
+    meets first (the left end in conventional milling, the right end in climb)."""
+
+    start: float  # where the feed move starts, in the air
+    contact: float  # where the cutter meets the lane's stock
+    leave: float  # where it stops cutting
+    end: float  # where the feed move ends
+
+
+def travel(setup: Setup, lane: int, lanes: int, face_mm: float, width_mm: float) -> Travel:
+    """The feed move of a pass that leaves the face at `face_mm` from Y0, `width_mm` wide.
+
+    A lane starts where the one before it was cut back, so the cutter starts in the air: in
+    front of the stock in the first lane, and a diameter clear of what the lane before left
+    at its far end in the others. A pass in the last lane runs out past the stock's end. One
+    in an earlier lane stops in the stock, its cutter just short of the next lane, still
+    uncut at Y0: nowhere does it reach past that lane's start.
+    """
+    diameter, clearance = setup.tool.diameter_mm, setup.program.clearance_mm
+    radius = diameter / 2
+    length = setup.stock.length_mm / lanes
+    first, last = (lane - 1) * length, lane * length
+    start = first - radius - clearance - (radius if lane > 1 else 0.0)
+    contact = first - _reach(diameter, width_mm)
+    if lane == lanes:
+        leave = setup.stock.length_mm + _reach(diameter, width_mm)
+        return Travel(start, contact, leave, setup.stock.length_mm + radius + clearance)
+    stop = last - _reach(diameter, min(face_mm, radius))
+    return Travel(start, contact, stop, stop)
+
+
+def auto_lanes(setup: Setup, env: Envelope) -> int:
+    """The setup's lanes, or when it leaves them empty, as many as the stock length holds
+    with every cut at least `planner.min_cut_s` long at the fastest test speed (where cuts
+    are shortest) and every lane at least twice the cutter diameter long."""
+    if setup.stock.lanes is not None:
+        return setup.stock.lanes
+    feed_mm_s = env.chip_load_mm * setup.tool.flutes * env.speed_max_rpm / 60
+    shortest = max(2 * setup.tool.diameter_mm, feed_mm_s * setup.planner.min_cut_s)
+    return max(1, int(setup.stock.length_mm / shortest + 1e-9))
+
+
+def lane_x_mm(setup: Setup, lane: int, lanes: int) -> tuple[float, float]:
+    """Where a lane lies along X, left end first; climb milling uses the lanes from the right."""
+    length = setup.stock.length_mm / lanes
+    first, last = (lane - 1) * length, lane * length
+    if setup.cut.direction is Direction.CLIMB:
+        first, last = setup.stock.length_mm - last, setup.stock.length_mm - first
+    return round(first, 3), round(last, 3)
+
+
 def make_pass(
     setup: Setup,
     env: Envelope,
@@ -181,19 +244,19 @@ def make_pass(
     width_mm: float,
     p_stable: float | None = None,
     chip_load_mm: float | None = None,
+    *,
+    path: Travel | None = None,
 ) -> Pass:
     feed = (chip_load_mm or env.chip_load_mm) * setup.tool.flutes * rpm
-    # The cutter touches the stock when its centre is this far from the stock end.
-    reach = math.sqrt(max(width_mm * (setup.tool.diameter_mm - width_mm), 0.0))
-    lead_in = setup.program.clearance_mm + setup.tool.diameter_mm / 2 - reach
+    path = path or travel(setup, 1, 1, width_mm, width_mm)
     return Pass(
         id=pass_id,
         kind=kind,
         rpm=int(round(rpm)),
         width_mm=round(width_mm, 3),
         feed_mm_min=round(feed, 1),
-        expected_cut_s=round((setup.stock.length_mm + 2 * reach) / feed * 60, 2),
-        lead_in_s=round(lead_in / feed * 60, 2),
+        expected_cut_s=round((path.leave - path.contact) / feed * 60, 2),
+        lead_in_s=round((path.contact - path.start) / feed * 60, 2),
         p_stable=None if p_stable is None else round(p_stable, 3),
         chip_load_mm=chip_load_mm,
     )
@@ -208,6 +271,44 @@ def preparation_passes(setup: Setup, env: Envelope, remnant_mm: float) -> list[t
     return [*cleanup, (rpm, setup.program.truing_width_mm)]
 
 
+def lane_budget_mm(setup: Setup, lane_cap_mm: float | None) -> float:
+    """How far back from Y0 the lane's face may go: the stock width to use, and in a lane
+    after the first, no further than the lane before it was cut back (the cutter crosses it)."""
+    return min(setup.stock.width_mm, math.inf if lane_cap_mm is None else lane_cap_mm)
+
+
+def _fit(
+    setup: Setup,
+    env: Envelope,
+    face_y_mm: float,
+    remnant_mm: float,
+    lane_cap_mm: float | None,
+    tests: list[tuple],
+) -> tuple[list[tuple[float, float]], list[tuple]]:
+    """(face preparation, the tests that fit after it), narrowest tests first."""
+    prep = preparation_passes(setup, env, remnant_mm)
+    budget = lane_budget_mm(setup, lane_cap_mm) - face_y_mm - sum(w for _, w in prep)
+    kept = []
+    for test in sorted(tests, key=lambda t: (t[1], t[0])):
+        if test[1] > budget + 1e-9:
+            break
+        budget -= test[1]
+        kept.append(test)
+    return prep, kept
+
+
+def fitting(
+    setup: Setup,
+    env: Envelope,
+    face_y_mm: float,
+    remnant_mm: float,
+    tests: list[tuple],
+    lane_cap_mm: float | None = None,
+) -> int:
+    """How many of the tests a lane's face, as it stands, still has room for."""
+    return len(_fit(setup, env, face_y_mm, remnant_mm, lane_cap_mm, tests)[1])
+
+
 def assemble(
     setup: Setup,
     env: Envelope,
@@ -216,25 +317,25 @@ def assemble(
     face_y_mm: float,
     remnant_mm: float,
     tests: list[tuple],
+    *,
+    lane: int = 1,
+    lanes: int | None = None,
+    lane_cap_mm: float | None = None,
 ) -> Plan:
     """Order tests by increasing width (gradual ramp), prepend face preparation, fit the stock.
 
     A test is (rpm, width, P(stable)), or in a chip-load sweep (rpm, width, None, chip load),
-    already lightest first: equal widths keep their order.
+    already lightest first: equal widths keep their order. The round cuts lane `lane` of the
+    setup's lanes (unless `lanes` says otherwise), whose face stands at `face_y_mm`.
     """
-    prep = preparation_passes(setup, env, remnant_mm)
-    budget = setup.stock.width_mm - face_y_mm - sum(w for _, w in prep)
-    ordered = sorted(tests, key=lambda t: (t[1], t[0]))
-    kept = []
-    for test in ordered:
-        if test[1] > budget + 1e-9:
-            break
-        budget -= test[1]
-        kept.append(test)
+    lanes = lanes or auto_lanes(setup, env)
+    prep, kept = _fit(setup, env, face_y_mm, remnant_mm, lane_cap_mm, tests)
     if not kept:
+        room = lane_budget_mm(setup, lane_cap_mm)
+        where = f" in lane {lane} of {lanes}" if lanes > 1 else ""
         raise PlanError(
-            f"stock exhausted: {setup.stock.width_mm - face_y_mm:.1f} mm left of "
-            f"{setup.stock.width_mm:.1f} mm. Mount fresh stock and rerun with --new-stock."
+            f"stock exhausted: {max(room - face_y_mm, 0.0):.1f} mm left of "
+            f"{room:.1f} mm{where}. Mount fresh stock and rerun with --new-stock."
         )
 
     if setup.machine.spindle is SpindleControl.MANUAL:
@@ -243,14 +344,17 @@ def assemble(
         kept.sort(key=lambda t: (t[0], t[1]))
         prep = [(kept[0][0], width) for _, width in prep]
 
+    planned = [
+        *[(PassKind.CLEANUP, rpm, width) for rpm, width in prep[:-1]],
+        (PassKind.TRUING, *prep[-1]),
+        *[(PassKind.TEST, *test) for test in kept],
+    ]
     passes = []
-    for rpm, width in prep[:-1]:
-        passes.append(make_pass(setup, env, len(passes), PassKind.CLEANUP, rpm, width))
-    passes.append(make_pass(setup, env, len(passes), PassKind.TRUING, *prep[-1]))
-    for rpm, width, p_stable, *chip_load in kept:
-        passes.append(
-            make_pass(setup, env, len(passes), PassKind.TEST, rpm, width, p_stable, *chip_load)
-        )
+    face = face_y_mm
+    for kind, rpm, width, *rest in planned:
+        face += width
+        path = travel(setup, lane, lanes, face, width)
+        passes.append(make_pass(setup, env, len(passes), kind, rpm, width, *rest, path=path))
     return Plan(
         round=round_no,
         planner=planner,
@@ -268,6 +372,9 @@ def assemble(
         ),
         passes=tuple(passes),
         planned_on=date.today().isoformat(),
+        lane=lane,
+        lanes=lanes,
+        lane_cap_mm=None if lane_cap_mm is None else round(lane_cap_mm, 3),
     )
 
 

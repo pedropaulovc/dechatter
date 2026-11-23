@@ -6,7 +6,7 @@ import enum
 from dataclasses import dataclass
 
 from .config import Coolant, Direction, Setup, SpindleControl
-from .plan import PassKind, Plan
+from .plan import PassKind, Plan, lane_x_mm, travel
 
 
 class Units(enum.StrEnum):
@@ -66,8 +66,14 @@ def blocks(plan: Plan, setup: Setup, units: Units) -> list[Block]:
     n = _length(units)
     radius = plan.diameter_mm / 2
     clearance = setup.program.clearance_mm
-    near, far = -(radius + clearance), setup.stock.length_mm + radius + clearance
-    x_start, x_end = (near, far) if setup.cut.direction is Direction.CONVENTIONAL else (far, near)
+    length = setup.stock.length_mm
+    climb = setup.cut.direction is Direction.CLIMB
+
+    def x_at(along: float) -> float:
+        # Distance along the feed from the end the cutter meets first, as X: climb milling
+        # feeds in -X, from the right end.
+        return length - along if climb else along
+
     manual = setup.machine.spindle is SpindleControl.MANUAL
     at: dict[str, float] = {}
 
@@ -90,6 +96,8 @@ def blocks(plan: Plan, setup: Setup, units: Units) -> list[Block]:
     for p in plan.passes:
         face += p.width_mm
         y_cut = face - radius
+        path = travel(setup, plan.lane, plan.lanes, face, p.width_mm)
+        x_start, x_end = x_at(path.start), x_at(path.end)
         found.append(
             Block(
                 Step.RAPID,
@@ -143,6 +151,16 @@ def _file_lines(block: Block, plan: Plan) -> list[str]:
     return list(block.lines)
 
 
+def _lane_lines(plan: Plan, setup: Setup) -> list[str]:
+    if plan.lanes == 1:
+        return []
+    first, last = lane_x_mm(setup, plan.lane, plan.lanes)
+    return [
+        f"(lane {plan.lane} of {plan.lanes}: X{_n(first)} to X{_n(last)}; "
+        "the lanes before it are cut back, the ones after it untouched)"
+    ]
+
+
 def render(plan: Plan, setup: Setup, units: Units) -> str:
     """The plan's program in the machine's own units, so running it never changes them.
 
@@ -155,6 +173,7 @@ def render(plan: Plan, setup: Setup, units: Units) -> str:
         f"(tool: D{_n(plan.diameter_mm)} mm, {plan.flutes} flutes; "
         f"depth {_n(plan.axial_depth_mm)} mm; {_n(plan.chip_load_mm)} mm per tooth)",
         "(WCS zero: X = left end of stock, Y = front face as first mounted, Z = top)",
+        *_lane_lines(plan, setup),
         f"(front face starts this round at Y{_n(plan.face_y_start_mm)}; "
         f"ends at Y{_n(plan.face_y_start_mm + plan.consumed_mm)})",
         "(RECORD: start one continuous recording before cycle start; stop after M30)",

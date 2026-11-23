@@ -965,9 +965,11 @@ function renderStep() {
   };
   const unknownUnits = cnc.link === 'ready' && cnc.units === null;
   step.append(
-    el('p', {}, `Round ${round.round}: ${tests} test cuts ${length(round.depth_mm, units(), { mmToo: true })} deep, about ${minutes(round.run_time_s)} plus rapids. The front face ends at Y ${length(round.face_y_end_mm, units(), { mmToo: true })}.`),
+    el('p', {}, `Round ${round.round}: ${tests} test cuts ${length(round.depth_mm, units(), { mmToo: true })} deep, about ${minutes(round.run_time_s)} plus rapids.${laneText(round)} The front face ends at Y ${length(round.face_y_end_mm, units(), { mmToo: true })}.`),
     el('ol', {},
-      el('li', {}, 'Zero X at the left end of the stock, Y on its front face, Z on top.'),
+      el('li', {}, round.lane > 1 && round.face_y_start_mm === 0
+        ? 'A fresh lane: keep the zero the first lane was cut with (X at the left end of the stock, Y on its front face as first mounted, Z on top).'
+        : 'Zero X at the left end of the stock, Y on its front face, Z on top.'),
       el('li', {}, start, ' runs the round from here, one move at a time, and records it. Keep this tab open.', ...(unknownUnits ? [' cncjs has not reported G20 or G21 yet; the machine is in ', declare] : [])),
       ...(state.spindle === 'manual' ? [el('li', {}, `Before each of its ${speedChanges(round)} spindle speeds the round stops; set the speed shown here and press Continue.`)] : []),
     ),
@@ -978,6 +980,15 @@ function renderStep() {
   if (round.has_recording) {
     step.append(el('p', {}, 'The last run could not be analysed. Run the round again, or ', button('Analyse the last recording again', () => act('analyze', round.round))));
   }
+}
+
+// Where along the stock a round cuts, when the stock is in lanes.
+function laneText(round) {
+  if (!round.lanes || round.lanes === 1) {
+    return '';
+  }
+  const [first, last] = round.lane_x_mm;
+  return ` It cuts lane ${round.lane} of ${round.lanes}, X ${length(first, units())} to ${length(last, units())}.`;
 }
 
 function verdictCell(round, pass) {
@@ -1013,7 +1024,7 @@ function renderRound() {
     return;
   }
   const kind = round.planner === 'sweep' ? ' (chip-load sweep)' : '';
-  $('round-title').textContent = `Round ${round.round}${kind}${round.analysed ? ' results' : ''}, ${length(round.depth_mm, units(), { mmToo: true })} deep`;
+  $('round-title').textContent = `Round ${round.round}${kind}${round.analysed ? ' results' : ''}, ${length(round.depth_mm, units(), { mmToo: true })} deep${round.lanes > 1 ? `, lane ${round.lane} of ${round.lanes}` : ''}`;
   $('passes').replaceChildren(
     ...round.passes.map((p) =>
       el('tr', { className: p.kind === 'test' ? '' : 'prep' },

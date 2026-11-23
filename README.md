@@ -74,7 +74,7 @@ a page the microphone on those. Then, in the widget:
    setup. Each round keeps a copy of the setup it was planned from. Once a round has been
    cut, the setup can no longer change in anything that shapes the cut or its sound (the
    machine's weight and spindle control, the tool, the work material, depth, direction and
-   chip load, the stock length, the dwell and the coolant), since the stability map belongs
+   chip load, the stock length and lanes, the dwell and the coolant), since the stability map belongs
    to the setup it was measured with: start a new session instead. What only bounds the
    search may still change (the machine's speed range and power, the cut's speed and width
    limits and shallower depths), as may the machine's name, the safe height, clearance,
@@ -274,7 +274,28 @@ Three things differ from the paper, which tests one cut at a time under closed-l
   width that was stable where the chatter was heard, so the planner tries them.
 
 The stock runs out before the search does on small blocks. `plan` then asks for fresh stock;
-mount it, reset the face to `Y0` and run `dechatter plan --new-stock`.
+mount it, reset the face to `Y0` and run `dechatter plan --new-stock` (in the widget: plan on
+the "fresh block, face at Y0").
+
+### Lanes: fresh faces without remounting
+
+A long block is split into lanes along X. By default there are as many as leave every cut
+at least 6 s long at the fastest test speed, where cuts are shortest (`min_cut_s` in
+`[planner]`, the wizard's Shortest cut to listen to), so a short block keeps a single lane;
+the wizard shows the number it works out. `lanes` in `[stock]` (Lanes along X, under
+Advanced in the wizard's Stock step) sets it by hand. The session's first round settles it:
+it stays fixed even if a later change to the speed limits would allow more. The lanes are
+used one after another, starting at the end the cutter meets first (the left end in
+conventional milling, the right in climb). When a lane's face
+has room for fewer of a round's cuts than a fresh lane would, the round moves to the next
+lane: a new face at `Y0`, at the same height above the vise jaws as the first, with the same
+work zero. Each pass then cuts one lane: it starts a cutter diameter clear of the lane
+before, which is already cut back, and stops just short of the next lane, still untouched,
+then backs off the face (the last lane runs out past the end of the stock as usual). A
+lane is never cut further back than the one before it, since the cutter crosses that one
+on its way in, and each lane must be at least twice the cutter diameter long. A deeper
+depth still needs fresh stock, since the cutter would cross the earlier lanes below where
+they were cut. The number of lanes cannot change once a round was cut.
 
 ## Development
 

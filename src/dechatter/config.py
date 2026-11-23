@@ -83,6 +83,10 @@ class Cut:
 class Stock:
     length_mm: float
     width_mm: float
+    # Equal lengths along X the test uses one after another, from the end the cutter meets
+    # first: each a fresh face at Y0, cut at the same height above the vise jaws. None: as
+    # many as leave every cut at least planner.min_cut_s long (see plan.auto_lanes).
+    lanes: int | None = None
 
 
 @dataclass(frozen=True)
@@ -112,6 +116,9 @@ class Planner:
     # The chip-load sweep after convergence, as multiples of the session's chip load.
     chip_load_sweep_low: float = 0.6
     chip_load_sweep_high: float = 1.7
+    # The shortest cut worth listening to, at the fastest test speed: bounds the automatic
+    # number of lanes.
+    min_cut_s: float = 6.0
 
 
 @dataclass(frozen=True)
@@ -271,6 +278,19 @@ def _validate(setup: Setup) -> None:
         raise ConfigError("[tool] diameter_mm and flutes must be positive")
     if cut.width_max_mm is not None and not 0 < cut.width_max_mm <= tool.diameter_mm:
         raise ConfigError("[cut] width_max_mm must be within (0, tool diameter]")
+    stock = setup.stock
+    if stock.lanes is not None and (type(stock.lanes) is not int or stock.lanes < 1):
+        raise ConfigError("[stock] lanes must be a whole number, at least 1")
+    if (
+        stock.lanes is not None
+        and stock.lanes > 1
+        and stock.length_mm / stock.lanes < 2 * tool.diameter_mm
+    ):
+        raise ConfigError(
+            "[stock] each lane must be at least twice the tool diameter long: "
+            f"{stock.length_mm:g} mm in {stock.lanes} lanes is "
+            f"{stock.length_mm / stock.lanes:.1f} mm each"
+        )
     if machine.min_rpm >= machine.max_rpm:
         raise ConfigError("[machine] min_rpm must be below max_rpm")
     depths = cut.other_depths_mm
@@ -289,6 +309,8 @@ def _validate(setup: Setup) -> None:
         raise ConfigError("[planner] round1_width_fractions must list numbers in (0, 1]")
     if not 0 < setup.planner.probability_floor <= setup.planner.min_probability < 1:
         raise ConfigError("[planner] need 0 < probability_floor <= min_probability < 1")
+    if not 0 < setup.planner.min_cut_s:
+        raise ConfigError("[planner] min_cut_s must be positive")
     if not 0 < setup.planner.chip_load_sweep_low < setup.planner.chip_load_sweep_high:
         raise ConfigError("[planner] need 0 < chip_load_sweep_low < chip_load_sweep_high")
 
