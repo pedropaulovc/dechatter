@@ -1170,3 +1170,31 @@ def test_import_refuses_archives_that_are_not_a_session(engine):
     with pytest.raises(RuntimeError, match="not a dechatter session export"):
         engine.call("import_zip", memoryview(buffer.getvalue()))
     assert not (engine.root.parent / "outside").exists()
+
+
+def test_a_round_moves_on_to_the_next_lane_when_its_face_runs_out(engine):
+    form = engine.call("setup_form", NAME)["values"]
+    form["stock"]["lanes"] = 2
+    form["stock"]["width_mm"] = 20.0
+    engine.call("save_setup", NAME, json.dumps(form))
+    state = engine.call("plan", NAME, "same")
+    first = state["rounds"][-1]
+    assert (first["lane"], first["lanes"], first["face_y_start_mm"]) == (1, 2, 0.0)
+    assert first["lane_x_mm"] == [0.0, form["stock"]["length_mm"] / 2]
+    state = engine.run_round(first["round"])
+
+    state = engine.call("plan", NAME, "same")
+    second = state["rounds"][-1]
+    # The first lane's face had little width left: the round starts a fresh lane, which
+    # the first one bounds, and keeps the same zero.
+    assert (second["lane"], second["face_y_start_mm"]) == (2, 0.0)
+    assert second["face_y_end_mm"] <= first["face_y_end_mm"] + 1e-9
+    plan = Plan.load(session.round_dir(engine.root / NAME, second["round"]) / session.PLAN_FILE)
+    assert plan.lane_cap_mm == pytest.approx(first["face_y_end_mm"])
+    program = session.round_dir(engine.root / NAME, second["round"]) / session.PROGRAM_FILE
+    assert "lane 2 of 2" in program.read_text(encoding="utf-8")
+
+    # Changing the lanes once a round was cut would change what was measured.
+    form["stock"]["lanes"] = 3
+    with pytest.raises(RuntimeError, match="stock.lanes"):
+        engine.call("save_setup", NAME, json.dumps(form))

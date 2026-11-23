@@ -289,7 +289,8 @@ def render(session_dir: Path, units: Units) -> str:
         log.append(
             f"<h3>Round {r.plan.round}: {_e(_length(r.plan.axial_depth_mm, units))} deep, "
             f"{_e(PLANNER_NAMES[r.plan.planner])}, planned {_e(r.plan.planned_on)}"
-            f", {state}</h3>"
+            + (f", lane {r.plan.lane} of {r.plan.lanes}" if r.plan.lanes > 1 else "")
+            + f", {state}</h3>"
             + _table(
                 [
                     "Pass",

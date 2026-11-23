@@ -25,6 +25,7 @@ from .plan import (
     PlannerKind,
     SchemaError,
     assemble,
+    fitting,
     grid_tests,
     mrr_mm3_min,
     sweep_tests,
@@ -301,11 +302,11 @@ def next_stage(setup: Setup, env: Envelope, rounds: list[Round], found: list[Sta
 
 
 def _shallowest_on_block(rounds: list[Round]) -> float:
-    """The shallowest depth cut since the block now mounted was fresh."""
+    """The shallowest depth cut since the block now mounted was fresh, over all its lanes."""
     shallowest = float("inf")
     for r in reversed(rounds):
         shallowest = min(shallowest, r.plan.axial_depth_mm)
-        if r.plan.face_y_start_mm == 0:
+        if r.plan.face_y_start_mm == 0 and r.plan.lane == 1:
             break
     return shallowest
 
@@ -540,19 +541,29 @@ def _place(
     planner: PlannerKind,
     tests: list,
 ) -> Plan:
-    """Lay the tests out on the face as it stands, and write the round."""
-    face, remnant = face_after(rounds[-1]) if rounds else (0.0, 0.0)
-    if stock is Stock.FRESH:
-        face, remnant = 0.0, 0.0
+    """Lay the tests out on the face as it stands, and write the round.
+
+    With the stock in lanes, a round moves on to the next lane, a fresh face at Y0, once
+    that lane has room for more of its tests than the face it would otherwise cut.
+    """
+    face, remnant, lane, cap = 0.0, 0.0, 1, None
+    if rounds and stock is Stock.SAME:
+        last = rounds[-1].plan
+        face, remnant = face_after(rounds[-1])
+        lane, cap = last.lane, last.lane_cap_mm
     number = rounds[-1].plan.round + 1 if rounds else 1
     shallowest = _shallowest_on_block(rounds)
-    if face > 0 and depth_mm > shallowest + DEPTH_TOLERANCE_MM:
+    if (face > 0 or lane > 1) and depth_mm > shallowest + DEPTH_TOLERANCE_MM:
         raise PlanError(
             f"round {number} would cut {depth_mm:g} mm deep, but this block's face is "
             f"only flat down to {shallowest:g} mm. Mount fresh stock and plan with new stock."
         )
     at = at_depth(source.setup, depth_mm)
-    plan = assemble(at, env, number, planner, face, remnant, tests)
+    if lane < at.stock.lanes and face > 0:
+        here = fitting(at, env, face, remnant, tests, cap)
+        if fitting(at, env, 0.0, 0.0, tests, face) > here:
+            face, remnant, lane, cap = 0.0, 0.0, lane + 1, face
+    plan = assemble(at, env, number, planner, face, remnant, tests, lane=lane, lane_cap_mm=cap)
     _write_round(session, source.text, at, plan)
     return plan
 

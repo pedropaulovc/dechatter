@@ -6,6 +6,16 @@ What changed for people who use the dechatter widget and command line. The forma
 
 ## [Unreleased]
 
+### Added
+
+- **Lanes**: `lanes` in `[stock]` (Lanes along X in the wizard's Stock step, under Advanced)
+  splits a long block into lanes along X. When a lane's face runs out of width, the next
+  round moves on to the next lane, a fresh face at Y0 at the same height above the vise
+  jaws, without remounting or re-zeroing. Each pass cuts one lane and stops just short of
+  the next; a lane is never cut back further than the one before it. The widget, the
+  program, `dechatter plan` and the report say which lane a round cuts. With the default of
+  one lane nothing changes.
+
 ## [0.3.0] - 2026-11-12
 
 ### Changed

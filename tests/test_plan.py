@@ -226,3 +226,120 @@ def test_the_widget_runs_the_program_as_blocks_with_targets_in_mm(setup, write_s
     assert [b.rpm for b in asks] == sorted({p.rpm for p in round1(manual).passes})
     assert all(b.lines == () and b.target is None for b in asks)
     assert not [line for b in manual_blocks for line in b.lines if line.startswith(("M0", "M3"))]
+
+
+LANES = {"l": ("width_mm = 30.0", "width_mm = 30.0\nlanes = 2")}
+
+
+def lane_setup(write_setup, **more):
+    return load_setup(write_setup(**LANES, **more))
+
+
+def sweeps(plan, setup):
+    """(y of the cutter centre, x where the plunge is, x where the feed move ends) per pass."""
+    found = []
+    for block in gcode.blocks(plan, setup, MM):
+        if block.step is gcode.Step.RAPID:
+            x0, y = block.target["x"], block.target["y"]
+        if block.step is gcode.Step.CUT:
+            found.append((y, x0, block.target["x"]))
+    return found
+
+
+def removed(stock, sweeps, radius):
+    """Carve the passes out of `stock`, a set of (x, y) points of material; return, per pass,
+    the points it cut and whether its plunge point was in the air."""
+    cuts = []
+    for y_c, x_from, x_to in sweeps:
+        lo, hi = sorted((x_from, x_to))
+        plunge_clear = not any((x - x_from) ** 2 + (y - y_c) ** 2 < radius**2 for x, y in stock)
+        cut = {
+            (x, y)
+            for x, y in stock
+            if abs(y - y_c) < radius
+            and lo - (radius**2 - (y - y_c) ** 2) ** 0.5
+            < x
+            < hi + (radius**2 - (y - y_c) ** 2) ** 0.5
+        }
+        stock -= cut
+        cuts.append((cut, plunge_clear))
+    return cuts
+
+
+def grid(length, width, step=0.25, y_step=0.1):
+    """Points of material, at the middle of each cell so a narrow pass still finds some."""
+    return {
+        ((i + 0.5) * step, (j + 0.5) * y_step)
+        for i in range(int(length / step))
+        for j in range(int(width / y_step))
+    }
+
+
+@pytest.mark.parametrize("direction", ["conventional", "climb"])
+def test_a_lane_is_cut_without_touching_the_lanes_on_either_side(write_setup, direction):
+    turn = {"d": ('direction = "conventional"', f'direction = "{direction}"')}
+    setup = lane_setup(write_setup, **turn)
+    env = envelope(setup)
+    radius = setup.tool.diameter_mm / 2
+    length = setup.stock.length_mm
+    half = length / 2
+    stock = grid(length, setup.stock.width_mm)
+
+    def first_lane(x):  # the lane the cutter meets first: left in conventional milling
+        return x < half if direction == "conventional" else x > half
+
+    one = round1(setup)
+    assert one.lane == 1 and one.lanes == 2
+    for cut, plunge_clear in removed(stock, sweeps(one, setup), radius):
+        assert plunge_clear
+        assert cut and all(first_lane(x) or x == half for x, _ in cut)
+    face = one.face_y_start_mm + one.consumed_mm
+    two = assemble(
+        setup, env, 2, PlannerKind.GRID, 0.0, 0.0, grid_tests(setup, env), lane=2, lane_cap_mm=face
+    )
+    assert two.face_y_start_mm + two.consumed_mm <= face + 1e-9
+    for cut, plunge_clear in removed(stock, sweeps(two, setup), radius):
+        assert plunge_clear
+        # The second lane's cuts may only clear the corner the first lane's passes left
+        # where they stopped, within a cutter radius of the lane boundary.
+        assert all(not first_lane(x) or abs(x - half) <= radius for x, _ in cut)
+    # The last lane runs out past the end of the stock.
+    end = sweeps(two, setup)[-1][2]
+    assert (end > length) if direction == "conventional" else (end < 0)
+    assert "lane 2 of 2" in gcode.render(two, setup, MM)
+
+
+def test_lanes_count_the_cut_and_lead_in_of_the_lane_alone(write_setup, setup):
+    lanes = lane_setup(write_setup)
+    whole, first = round1(setup).passes[0], round1(lanes).passes[0]
+    assert first.expected_cut_s < whole.expected_cut_s / 2 + 1.0
+    assert first.lead_in_s == whole.lead_in_s
+
+
+def test_a_later_lane_is_cut_back_no_further_than_the_one_before_it(write_setup):
+    setup = lane_setup(write_setup)
+    env = envelope(setup)
+    plan = assemble(
+        setup, env, 2, PlannerKind.GRID, 0.0, 0.0, grid_tests(setup, env), lane=2, lane_cap_mm=3.0
+    )
+    assert plan.consumed_mm <= 3.0 and plan.lane_cap_mm == 3.0
+    with pytest.raises(PlanError, match="in lane 2 of 2"):
+        assemble(
+            setup,
+            env,
+            2,
+            PlannerKind.GRID,
+            0.0,
+            0.0,
+            grid_tests(setup, env),
+            lane=2,
+            lane_cap_mm=0.1,
+        )
+
+
+@pytest.mark.parametrize(
+    ("lanes", "message"), [("0", "whole number"), ("1.5", "whole number"), ("4", "twice the tool")]
+)
+def test_lanes_must_be_whole_and_long_enough(write_setup, lanes, message):
+    with pytest.raises(ConfigError, match=message):
+        load_setup(write_setup(l=("width_mm = 30.0", f"width_mm = 30.0\nlanes = {lanes}")))

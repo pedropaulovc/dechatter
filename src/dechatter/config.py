@@ -83,6 +83,9 @@ class Cut:
 class Stock:
     length_mm: float
     width_mm: float
+    # Equal lengths along X the test uses one after another, left to right in the direction
+    # of feed: each a fresh face at Y0, cut at the same height above the vise jaws.
+    lanes: int = 1
 
 
 @dataclass(frozen=True)
@@ -271,6 +274,15 @@ def _validate(setup: Setup) -> None:
         raise ConfigError("[tool] diameter_mm and flutes must be positive")
     if cut.width_max_mm is not None and not 0 < cut.width_max_mm <= tool.diameter_mm:
         raise ConfigError("[cut] width_max_mm must be within (0, tool diameter]")
+    stock = setup.stock
+    if type(stock.lanes) is not int or stock.lanes < 1:
+        raise ConfigError("[stock] lanes must be a whole number, at least 1")
+    if stock.lanes > 1 and stock.length_mm / stock.lanes < 2 * tool.diameter_mm:
+        raise ConfigError(
+            "[stock] each lane must be at least twice the tool diameter long: "
+            f"{stock.length_mm:g} mm in {stock.lanes} lanes is "
+            f"{stock.length_mm / stock.lanes:.1f} mm each"
+        )
     if machine.min_rpm >= machine.max_rpm:
         raise ConfigError("[machine] min_rpm must be below max_rpm")
     depths = cut.other_depths_mm
