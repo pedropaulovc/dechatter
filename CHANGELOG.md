@@ -6,6 +6,8 @@ What changed for people who use the dechatter widget and command line. The forma
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-23
+
 ### Added
 
 - **Lanes**: a long block is split into lanes along X. When a lane's face runs out of
@@ -178,7 +180,8 @@ What changed for people who use the dechatter widget and command line. The forma
   Sessions export to a zip the command line reads, and import in another browser.
 - Published on npm as `dechatter`, with third-party notices for the bundled Pyodide.
 
-[Unreleased]: https://github.com/pedropaulovc/dechatter/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/pedropaulovc/dechatter/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/pedropaulovc/dechatter/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/pedropaulovc/dechatter/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/pedropaulovc/dechatter/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/pedropaulovc/dechatter/compare/v0.1.0...v0.1.1
