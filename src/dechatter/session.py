@@ -25,6 +25,7 @@ from .plan import (
     PlannerKind,
     SchemaError,
     assemble,
+    auto_lanes,
     fitting,
     grid_tests,
     mrr_mm3_min,
@@ -547,6 +548,9 @@ def _place(
     that lane has room for more of its tests than the face it would otherwise cut.
     """
     face, remnant, lane, cap = 0.0, 0.0, 1, None
+    # The lanes are settled by the session's first round: an automatic count must not move
+    # with a speed limit changed since.
+    lanes = rounds[-1].plan.lanes if rounds else auto_lanes(source.setup, env)
     if rounds and stock is Stock.SAME:
         last = rounds[-1].plan
         face, remnant = face_after(rounds[-1])
@@ -559,11 +563,13 @@ def _place(
             f"only flat down to {shallowest:g} mm. Mount fresh stock and plan with new stock."
         )
     at = at_depth(source.setup, depth_mm)
-    if lane < at.stock.lanes and face > 0:
+    if lane < lanes and face > 0:
         here = fitting(at, env, face, remnant, tests, cap)
         if fitting(at, env, 0.0, 0.0, tests, face) > here:
             face, remnant, lane, cap = 0.0, 0.0, lane + 1, face
-    plan = assemble(at, env, number, planner, face, remnant, tests, lane=lane, lane_cap_mm=cap)
+    plan = assemble(
+        at, env, number, planner, face, remnant, tests, lane=lane, lanes=lanes, lane_cap_mm=cap
+    )
     _write_round(session, source.text, at, plan)
     return plan
 

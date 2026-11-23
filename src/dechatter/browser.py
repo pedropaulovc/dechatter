@@ -31,7 +31,7 @@ from .config import (
     setup_values,
 )
 from .detect import Thresholds, Verdict
-from .plan import PlanError, envelope
+from .plan import PlanError, auto_lanes, envelope
 from .session import SessionError, Stock
 
 log = logging.getLogger(__name__)
@@ -142,14 +142,16 @@ class Sessions:
 
     def setup_preview(self, values_json: str) -> dict:
         """What the planner makes of entries left empty in a setup the wizard is editing."""
-        env = envelope(parse_setup(dump_setup(json.loads(values_json)), "the setup"))
+        setup = parse_setup(dump_setup(json.loads(values_json)), "the setup")
+        env = envelope(setup)
         return {
             "cut": {
                 "width_max_mm": round(env.width_max_mm, 3),
                 "chip_load_mm": env.chip_load_mm,
                 "speed_min_rpm": env.speed_min_rpm,
                 "speed_max_rpm": env.speed_max_rpm,
-            }
+            },
+            "stock": {"lanes": auto_lanes(setup, env)},
         }
 
     def save_setup(self, name: str, values_json: str) -> dict:

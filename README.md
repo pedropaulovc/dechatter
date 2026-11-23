@@ -279,17 +279,21 @@ the "fresh block, face at Y0").
 
 ### Lanes: fresh faces without remounting
 
-A long block can be split into lanes along X (`lanes` in `[stock]`, or Lanes along X in the
-wizard's Stock step). The lanes are used one after another, starting at the end the cutter
-meets first (the left end in conventional milling, the right in climb). When a lane's face
+A long block is split into lanes along X. By default there are as many as leave every cut
+at least 6 s long at the fastest test speed, where cuts are shortest (`min_cut_s` in
+`[planner]`, the wizard's Shortest cut to listen to), so a short block keeps a single lane;
+the wizard shows the number it works out. `lanes` in `[stock]` (Lanes along X, under
+Advanced in the wizard's Stock step) sets it by hand. The session's first round settles it:
+it stays fixed even if a later change to the speed limits would allow more. The lanes are
+used one after another, starting at the end the cutter meets first (the left end in
+conventional milling, the right in climb). When a lane's face
 has room for fewer of a round's cuts than a fresh lane would, the round moves to the next
 lane: a new face at `Y0`, at the same height above the vise jaws as the first, with the same
 work zero. Each pass then cuts one lane: it starts a cutter diameter clear of the lane
 before, which is already cut back, and stops just short of the next lane, still untouched,
 then backs off the face (the last lane runs out past the end of the stock as usual). A
 lane is never cut further back than the one before it, since the cutter crosses that one
-on its way in, and each lane must be at least twice the cutter diameter long. Shorter
-lanes mean shorter cuts to listen to: a few long lanes beat many short ones. A deeper
+on its way in, and each lane must be at least twice the cutter diameter long. A deeper
 depth still needs fresh stock, since the cutter would cross the earlier lanes below where
 they were cut. The number of lanes cannot change once a round was cut.
 

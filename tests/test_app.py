@@ -657,6 +657,10 @@ def test_setup_form_gives_the_defaults_and_what_empty_entries_become(engine):
     # What the wizard holds so far, not what is saved: a wider cutter, a wider limit.
     values["tool"]["diameter_mm"] = 12.7
     assert engine.call("setup_preview", json.dumps(values))["cut"]["width_max_mm"] == 6.35
+    # Lanes left empty are worked out from the stock length; a longer block holds more.
+    assert engine.call("setup_preview", json.dumps(values))["stock"]["lanes"] == 1
+    values["stock"]["length_mm"] = 1000.0
+    assert engine.call("setup_preview", json.dumps(values))["stock"]["lanes"] > 1
     values["cut"]["material"] = "unobtainium"
     with pytest.raises(RuntimeError, match="unknown material"):
         engine.call("setup_preview", json.dumps(values))
@@ -1198,3 +1202,21 @@ def test_a_round_moves_on_to_the_next_lane_when_its_face_runs_out(engine):
     form["stock"]["lanes"] = 3
     with pytest.raises(RuntimeError, match="stock.lanes"):
         engine.call("save_setup", NAME, json.dumps(form))
+
+
+def test_automatic_lanes_are_settled_by_the_first_round(engine):
+    form = engine.call("setup_form", NAME)["values"]
+    form["stock"]["lanes"] = None
+    form["stock"]["length_mm"] = 300.0
+    form["stock"]["width_mm"] = 20.0
+    engine.call("save_setup", NAME, json.dumps(form))
+    lanes = engine.call("setup_preview", json.dumps(form))["stock"]["lanes"]
+    assert lanes > 1
+    state = engine.call("plan", NAME, "same")
+    assert state["rounds"][-1]["lanes"] == lanes
+    engine.run_round(state["rounds"][-1]["round"])
+    # A lower top speed would now leave room for more lanes, but the block is laid out.
+    form["cut"]["speed_max_rpm"] = 1500
+    engine.call("save_setup", NAME, json.dumps(form))
+    assert engine.call("setup_preview", json.dumps(form))["stock"]["lanes"] > lanes
+    assert engine.call("plan", NAME, "same")["rounds"][-1]["lanes"] == lanes

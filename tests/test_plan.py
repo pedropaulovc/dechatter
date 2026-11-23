@@ -343,3 +343,28 @@ def test_a_later_lane_is_cut_back_no_further_than_the_one_before_it(write_setup)
 def test_lanes_must_be_whole_and_long_enough(write_setup, lanes, message):
     with pytest.raises(ConfigError, match=message):
         load_setup(write_setup(l=("width_mm = 30.0", f"width_mm = 30.0\nlanes = {lanes}")))
+
+
+def test_automatic_lanes_keep_every_cut_long_enough_to_hear(write_setup):
+    from dechatter.plan import auto_lanes
+
+    plate = load_setup(
+        write_setup(
+            m=('material = "aluminum-6061"', 'material = "steel-1018"'),
+            d=("diameter_mm = 9.525", "diameter_mm = 12.7"),
+            c=("# chip_load_mm = 0.05", "chip_load_mm = 0.071"),
+            s=("# speed_max_rpm = 5000", "speed_max_rpm = 2800"),
+            l=("length_mm = 60.0", "length_mm = 126.0"),
+        )
+    )
+    env = envelope(plate)
+    # 0.071 mm x 3 flutes x 2800 rpm is about 10 mm/s: 6 s of cut is about 60 mm a lane.
+    assert auto_lanes(plate, env) == 2
+    plan = round1(plate)
+    assert plan.lanes == 2
+    fastest = min(p.expected_cut_s for p in plan.passes)
+    assert fastest >= plate.planner.min_cut_s - 0.5
+    shorter = load_setup(write_setup(l=("length_mm = 60.0", "length_mm = 30.0")))
+    assert auto_lanes(shorter, envelope(shorter)) == 1
+    pinned = load_setup(write_setup(**LANES))
+    assert auto_lanes(pinned, envelope(pinned)) == 2

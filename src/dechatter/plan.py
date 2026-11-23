@@ -215,6 +215,17 @@ def travel(setup: Setup, lane: int, lanes: int, face_mm: float, width_mm: float)
     return Travel(start, contact, stop, stop)
 
 
+def auto_lanes(setup: Setup, env: Envelope) -> int:
+    """The setup's lanes, or when it leaves them empty, as many as the stock length holds
+    with every cut at least `planner.min_cut_s` long at the fastest test speed (where cuts
+    are shortest) and every lane at least twice the cutter diameter long."""
+    if setup.stock.lanes is not None:
+        return setup.stock.lanes
+    feed_mm_s = env.chip_load_mm * setup.tool.flutes * env.speed_max_rpm / 60
+    shortest = max(2 * setup.tool.diameter_mm, feed_mm_s * setup.planner.min_cut_s)
+    return max(1, int(setup.stock.length_mm / shortest + 1e-9))
+
+
 def lane_x_mm(setup: Setup, lane: int, lanes: int) -> tuple[float, float]:
     """Where a lane lies along X, left end first; climb milling uses the lanes from the right."""
     length = setup.stock.length_mm / lanes
@@ -308,15 +319,16 @@ def assemble(
     tests: list[tuple],
     *,
     lane: int = 1,
+    lanes: int | None = None,
     lane_cap_mm: float | None = None,
 ) -> Plan:
     """Order tests by increasing width (gradual ramp), prepend face preparation, fit the stock.
 
     A test is (rpm, width, P(stable)), or in a chip-load sweep (rpm, width, None, chip load),
     already lightest first: equal widths keep their order. The round cuts lane `lane` of the
-    setup's lanes, whose face stands at `face_y_mm`.
+    setup's lanes (unless `lanes` says otherwise), whose face stands at `face_y_mm`.
     """
-    lanes = setup.stock.lanes
+    lanes = lanes or auto_lanes(setup, env)
     prep, kept = _fit(setup, env, face_y_mm, remnant_mm, lane_cap_mm, tests)
     if not kept:
         room = lane_budget_mm(setup, lane_cap_mm)

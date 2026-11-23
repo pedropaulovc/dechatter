@@ -39,7 +39,8 @@ const INFO = {
   'cut.speed_max_rpm': `The fastest test speed. Default: the machine's top speed or the material's surface-speed limit for this cutter, whichever is lower. ${FREE}`,
   'stock.length_mm': `Along X. Every pass cuts the full length, or its lane's. Work zero X is the left end. ${FIXED}`,
   'stock.width_mm': `Along Y: how much the test may cut back from the front face. Work zero Y is the front face as first mounted. ${FREE}`,
-  'stock.lanes': `Splits the stock length into equal lanes along X, used one after another from the end the cutter meets first. When a lane's face runs out of width, the next round moves to the next lane: a fresh face at Y0 at the same height above the vise jaws, with no remounting or re-zeroing. Each pass then cuts one lane and stops just short of the next. A later lane may only be cut back as far as the one before it, and each lane must be at least twice the cutter diameter long. Default: 1, the whole length. ${FIXED}`,
+  'stock.lanes': `Splits the stock length into equal lanes along X, used one after another from the end the cutter meets first. When a lane's face runs out of width, the next round moves to the next lane: a fresh face at Y0 at the same height above the vise jaws, with no remounting or re-zeroing. Each pass then cuts one lane and stops just short of the next. A later lane may only be cut back as far as the one before it, and each lane must be at least twice the cutter diameter long. Default: as many lanes as leave every cut at least the shortest cut to listen to (Planner step) at the fastest test speed; 1 on a short block. The session's first round settles the number. ${FIXED}`,
+  'planner.min_cut_s': 'Bounds the automatic number of lanes: each cut at the fastest test speed lasts at least this long. Longer cuts give steadier verdicts; shorter ones let more lanes fit. Default: 6 s.',
   'program.coolant': `Coolant noise makes chatter harder to hear: none is best for detection. ${FIXED}`,
   'program.dwell_s': `Before each cut the spindle runs in the air beside the stock, already at depth. That lets it reach speed and records the quiet sound each cut is compared with. Do not shorten it much. With a manual spindle, the time at each M0 stop comes on top. ${FIXED}`,
   'program.clearance_mm': `The cutter plunges in the air this far beyond the end of the stock, and backs off this far from the face after each cut. The plunge must never touch the stock. ${FREE}`,
@@ -111,7 +112,7 @@ export const STEPS = [
     fields: [
       { at: 'stock.length_mm', label: 'Stock length (X)', type: 'length', note: 'Every pass cuts the full length.' },
       { at: 'stock.width_mm', label: 'Stock width to use (Y)', type: 'length', note: 'Material the test may consume from the front face.' },
-      { at: 'stock.lanes', section: 'advanced', label: 'Lanes along X', type: 'int', note: 'A fresh face without remounting, at the same height above the jaws.' },
+      { at: 'stock.lanes', section: 'advanced', label: 'Lanes along X', type: 'int', optional: true, placeholder: 'automatic', note: 'A fresh face without remounting, at the same height above the jaws.' },
       { at: 'program.coolant', section: 'advanced', label: 'Coolant', type: 'choice', options: [['none', 'none'], ['flood', 'flood'], ['mist', 'mist']], note: 'Coolant noise makes chatter harder to hear.' },
       { at: 'program.dwell_s', section: 'advanced', label: 'Pause at speed before each pass', type: 'number', unit: 's' },
       { at: 'program.clearance_mm', section: 'advanced', label: 'Clearance around the stock', type: 'length' },
@@ -132,6 +133,7 @@ export const STEPS = [
       { at: 'planner.stop_improvement', section: 'advanced', label: 'Stop when a cut would add less than', type: 'number', note: 'As a fraction of the best removal rate so far.' },
       { at: 'planner.chip_load_sweep_low', section: 'advanced', label: 'Chip-load sweep from', type: 'number', unit: '×', note: 'Times the session\'s chip load.' },
       { at: 'planner.chip_load_sweep_high', section: 'advanced', label: 'Chip-load sweep up to', type: 'number', unit: '×' },
+      { at: 'planner.min_cut_s', section: 'advanced', label: 'Shortest cut to listen to', type: 'number', unit: 's', note: 'Sets how many lanes the stock is split into, when that is left empty.' },
     ],
   },
 ];

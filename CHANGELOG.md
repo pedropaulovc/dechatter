@@ -8,13 +8,21 @@ What changed for people who use the dechatter widget and command line. The forma
 
 ### Added
 
-- **Lanes**: `lanes` in `[stock]` (Lanes along X in the wizard's Stock step, under Advanced)
-  splits a long block into lanes along X. When a lane's face runs out of width, the next
-  round moves on to the next lane, a fresh face at Y0 at the same height above the vise
-  jaws, without remounting or re-zeroing. Each pass cuts one lane and stops just short of
-  the next; a lane is never cut back further than the one before it. The widget, the
-  program, `dechatter plan` and the report say which lane a round cuts. With the default of
-  one lane nothing changes.
+- **Lanes**: a long block is split into lanes along X. When a lane's face runs out of
+  width, the next round moves on to the next lane, a fresh face at Y0 at the same height
+  above the vise jaws, without remounting or re-zeroing. Each pass cuts one lane and stops
+  just short of the next; a lane is never cut back further than the one before it. By
+  default the number of lanes is worked out from the stock length: as many as leave every
+  cut at least 6 s long at the fastest test speed (`min_cut_s` in `[planner]`, the
+  wizard's Shortest cut to listen to), and 1 on a short block, as before. The wizard shows
+  the number; `lanes` in `[stock]` (Lanes along X, under Advanced) sets it by hand. The
+  session's first round settles it. The widget, the program, `dechatter plan` and the
+  report say which lane a round cuts.
+
+### Changed
+
+- Sessions planned by this version cannot be opened by dechatter 0.3.0, whose plans lack the
+  lane. Sessions from 0.2.0 and 0.3.0 load as they are and keep cutting the whole length.
 
 ## [0.3.0] - 2026-11-12
 
