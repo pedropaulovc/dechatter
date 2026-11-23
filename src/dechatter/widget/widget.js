@@ -805,6 +805,7 @@ const STEP_TEXT = {
   plunge: 'Plunging beside the stock',
   dwell: 'Spindle at speed in the air',
   cut: 'Cutting',
+  face: 'Facing the top down',
   retract: 'Backing off',
   end: 'Finishing',
 };
@@ -967,9 +968,11 @@ function renderStep() {
   step.append(
     el('p', {}, `Round ${round.round}: ${tests} test cuts ${length(round.depth_mm, units(), { mmToo: true })} deep, about ${minutes(round.run_time_s)} plus rapids.${laneText(round)} The front face ends at Y ${length(round.face_y_end_mm, units(), { mmToo: true })}.`),
     el('ol', {},
-      el('li', {}, round.lane > 1 && round.face_y_start_mm === 0
-        ? 'A fresh lane: keep the zero the first lane was cut with (X at the left end of the stock, Y on its front face as first mounted, Z on top).'
-        : 'Zero X at the left end of the stock, Y on its front face, Z on top.'),
+      el('li', {}, round.reface_mm > 0
+        ? `First the program faces the top down ${length(round.reface_mm, units(), { mmToo: true })}, to Z ${length(-round.top_mm, units(), { mmToo: true })}, and starts again at the first lane. Keep the zero the block was first cut with (X at the left end, Y on the front face as first mounted, Z on the top as first mounted). The facing is not analysed.`
+        : round.top_mm > 0 || (round.lane > 1 && round.face_y_start_mm === 0)
+          ? 'Keep the zero the block was first cut with (X at the left end of the stock, Y on its front face as first mounted, Z on its top as first mounted).'
+          : 'Zero X at the left end of the stock, Y on its front face, Z on top.'),
       el('li', {}, start, ' runs the round from here, one move at a time, and records it. Keep this tab open.', ...(unknownUnits ? [' cncjs has not reported G20 or G21 yet; the machine is in ', declare] : [])),
       ...(state.spindle === 'manual' ? [el('li', {}, `Before each of its ${speedChanges(round)} spindle speeds the round stops; set the speed shown here and press Continue.`)] : []),
     ),
@@ -1002,12 +1005,14 @@ function verdictCell(round, pass) {
     return el('td', { className: 'muted' }, 'not run');
   }
   const select = el('select', { disabled: busy() },
-    ...(pass.verdict ? [] : [el('option', { value: '' }, pass.status === 'likely not run' ? 'likely not run' : 'not heard')]),
+    ...(pass.verdict ? [] : [el('option', { value: '' }, pass.status === 'likely not run' || pass.status === 'no cut heard' ? pass.status : 'not heard')]),
     el('option', { value: 'stable' }, pass.status === 'aborted' ? 'stable (aborted)' : 'stable'),
     el('option', { value: 'unstable' }, pass.status === 'aborted' ? 'chatter (aborted)' : 'chatter'),
   );
   select.value = pass.verdict ?? '';
-  select.title = pass.chatter_hz ? `peak ${Math.round(pass.chatter_hz)} Hz, ${pass.prominence_db} dB over the floor` : '';
+  select.title = pass.status === 'no cut heard'
+    ? `No louder than the spindle in the air (${pass.over_air_db} dB over it): it may have cut nothing. Was the face where the plan put it?`
+    : pass.chatter_hz ? `peak ${Math.round(pass.chatter_hz)} Hz, ${pass.prominence_db} dB over the floor` : '';
   select.onchange = () => act('set_verdict', round.round, pass.id, select.value);
   // The spindle speed heard sits at the edge of the search around this pass's: the sound
   // may be another pass's. Worth a listen before trusting the verdict.
@@ -1118,7 +1123,7 @@ function renderBest() {
   const where = `at ${sweep.rpm} rpm, ${length(sweep.width_mm, u)} wide and ${length(sweep.depth_mm, u)} deep`;
   $('sweep-result').textContent = sweep.chip_load_mm === null
     ? `Chip-load sweep: ${where}, even its lightest pass chattered. Keep the session's ${chipLoad(sweep.session_chip_load_mm, u, { mmToo: true })} per tooth.`
-    : `Chip-load sweep: ${where}, the cut stayed stable up to ${chipLoad(sweep.chip_load_mm, u, { mmToo: true })} per tooth (the session used ${chipLoad(sweep.session_chip_load_mm, u)}): feed ${feed(sweep.feed_mm_min, u, { mmToo: true })}, ${rate(sweep.mrr_cm3_min, u, { mmToo: true })}.`;
+    : `Chip-load sweep: ${where}, the cut stayed stable ${sweep.untopped ? 'at every chip load tried, up to' : 'up to'} ${chipLoad(sweep.chip_load_mm, u, { mmToo: true })} per tooth (the session used ${chipLoad(sweep.session_chip_load_mm, u)}): feed ${feed(sweep.feed_mm_min, u, { mmToo: true })}, ${rate(sweep.mrr_cm3_min, u, { mmToo: true })}.${sweep.untopped ? ' None chattered, so its limit lies higher.' : ''}`;
 }
 
 function render() {

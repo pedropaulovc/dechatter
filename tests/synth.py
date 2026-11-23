@@ -91,6 +91,7 @@ def record(
     rapid_s: float = 2.0,
     speed_change_s: float = 0.0,
     air_s: Sequence[float] | None = None,
+    in_air: frozenset[int] = frozenset(),
 ) -> np.ndarray:
     """The recording of running `plan`: silence, then per pass rapid, dwell, lead-in, cut.
 
@@ -98,7 +99,8 @@ def record(
     operator knocks the machine reaching for the dial, then the spindle idles at the new speed.
     `air_s` gives the seconds of spindle-only sound before each pass's cut, for a recording
     that has to line up with a real program run; the default guesses 2 s of rapids. With
-    `air_s` there is no leading silence: the spindle is heard from the first sample.
+    `air_s` there is no leading silence: the spindle is heard from the first sample. The
+    passes in `in_air` (indices) move as planned but cut nothing: no stock was where they ran.
     """
     rng = np.random.default_rng(seed)
     parts = [0.0005 * rng.standard_normal(0 if air_s is not None else 3 * RATE)]
@@ -113,7 +115,10 @@ def record(
         parts.append(_air(air, spindle_hz, machine, rng))
         seconds = p.expected_cut_s * (0.4 if index == abort_in_pass else 1.0)
         chatter = machine.chatters(p.rpm, p.width_mm, plan.flutes, plan.axial_depth_mm)
-        parts.append(_cut(seconds, spindle_hz, plan.flutes, p.width_mm, chatter, machine, rng))
+        if index in in_air:
+            parts.append(_air(seconds, spindle_hz, machine, rng))
+        else:
+            parts.append(_cut(seconds, spindle_hz, plan.flutes, p.width_mm, chatter, machine, rng))
         if index == abort_in_pass:
             break
     parts.append(0.0005 * rng.standard_normal(2 * RATE))

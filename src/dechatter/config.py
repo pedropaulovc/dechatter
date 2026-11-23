@@ -87,6 +87,13 @@ class Stock:
     # first: each a fresh face at Y0, cut at the same height above the vise jaws. None: as
     # many as leave every cut at least planner.min_cut_s long (see plan.auto_lanes).
     lanes: int | None = None
+    # How far the top, as first mounted (Z0), stands above anything the cutter must not
+    # reach: vise jaws, parallels, clamps. Given, dechatter faces the top down itself once
+    # every lane is used, and goes on cutting below it. None: never faced.
+    height_mm: float | None = None
+    # The stock's full size along Y, front face to back, which facing covers. None: only the
+    # width the test may use, leaving the rest standing behind it.
+    thickness_mm: float | None = None
 
 
 @dataclass(frozen=True)
@@ -97,6 +104,10 @@ class Program:
     plunge_feed_mm_min: float = 150.0
     truing_width_mm: float = 0.2
     coolant: Coolant = Coolant.NONE
+    # Facing the top down (see stock.height_mm): the deepest level each pass takes, and how
+    # far each pass steps along Y (None: a quarter of the cutter diameter).
+    face_depth_mm: float = 1.0
+    face_width_mm: float | None = None
 
 
 @dataclass(frozen=True)
@@ -279,6 +290,18 @@ def _validate(setup: Setup) -> None:
     if cut.width_max_mm is not None and not 0 < cut.width_max_mm <= tool.diameter_mm:
         raise ConfigError("[cut] width_max_mm must be within (0, tool diameter]")
     stock = setup.stock
+    if stock.height_mm is not None and stock.height_mm <= cut.axial_depth_mm:
+        raise ConfigError("[stock] height_mm must stand above the deepest cut, axial_depth_mm")
+    if stock.thickness_mm is not None and stock.thickness_mm < stock.width_mm:
+        raise ConfigError("[stock] thickness_mm cannot be less than width_mm, the width used")
+    face_width = setup.program.face_width_mm
+    if setup.program.face_depth_mm <= 0 or (
+        face_width is not None and not 0 < face_width <= tool.diameter_mm / 2
+    ):
+        raise ConfigError(
+            "[program] face_depth_mm must be positive and face_width_mm within "
+            "(0, half the tool diameter]"
+        )
     if stock.lanes is not None and (type(stock.lanes) is not int or stock.lanes < 1):
         raise ConfigError("[stock] lanes must be a whole number, at least 1")
     if (

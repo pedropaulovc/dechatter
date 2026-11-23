@@ -40,6 +40,10 @@ const INFO = {
   'stock.length_mm': `Along X. Every pass cuts the full length, or its lane's. Work zero X is the left end. ${FIXED}`,
   'stock.width_mm': `Along Y: how much the test may cut back from the front face. Work zero Y is the front face as first mounted. ${FREE}`,
   'stock.lanes': `Splits the stock length into equal lanes along X, used one after another from the end the cutter meets first. When a lane's face runs out of width, the next round moves to the next lane: a fresh face at Y0 at the same height above the vise jaws, with no remounting or re-zeroing. Each pass then cuts one lane and stops just short of the next. A later lane may only be cut back as far as the one before it, and each lane must be at least twice the cutter diameter long. Default: as many lanes as leave every cut at least the shortest cut to listen to (Planner step) at the fastest test speed; 1 on a short block. The session's first round settles the number. ${FIXED}`,
+  'stock.height_mm': `How far the top of the stock, where Z0 is set, stands above anything the cutter must not reach: vise jaws, parallels, clamps. Given, dechatter faces the top down itself once every lane is used, below the deepest cut made on it, and starts again at the first lane with the same zero, for as long as the next cut's bottom stays the clearance above that height. Empty: it asks for fresh stock instead. ${FREE}`,
+  'stock.thickness_mm': `The stock's full size along Y, from the front face to the back, which facing covers. Empty: only the width the test may use is faced, and the rest stands behind it as a taller ledge. ${FREE}`,
+  'program.face_depth_mm': `The deepest level each facing pass takes when dechatter faces the top down. Default: 1 mm. ${FREE}`,
+  'program.face_width_mm': `How far each facing pass steps back from the front face. Default: a quarter of the cutter diameter. ${FREE}`,
   'planner.min_cut_s': 'Bounds the automatic number of lanes: each cut at the fastest test speed lasts at least this long. Longer cuts give steadier verdicts; shorter ones let more lanes fit. Default: 6 s.',
   'program.coolant': `Coolant noise makes chatter harder to hear: none is best for detection. ${FIXED}`,
   'program.dwell_s': `Before each cut the spindle runs in the air beside the stock, already at depth. That lets it reach speed and records the quiet sound each cut is compared with. Do not shorten it much. With a manual spindle, the time at each M0 stop comes on top. ${FIXED}`,
@@ -112,6 +116,8 @@ export const STEPS = [
     fields: [
       { at: 'stock.length_mm', label: 'Stock length (X)', type: 'length', note: 'Every pass cuts the full length.' },
       { at: 'stock.width_mm', label: 'Stock width to use (Y)', type: 'length', note: 'Material the test may consume from the front face.' },
+      { at: 'stock.height_mm', label: 'Height above the jaws (Z)', type: 'length', optional: true, placeholder: 'not given: never faced', note: 'Lets dechatter face the top down itself when the lanes run out.' },
+      { at: 'stock.thickness_mm', section: 'advanced', label: 'Stock thickness (Y)', type: 'length', optional: true, placeholder: 'the width to use', note: 'Front face to back: what facing covers.' },
       { at: 'stock.lanes', section: 'advanced', label: 'Lanes along X', type: 'int', optional: true, placeholder: 'automatic', note: 'A fresh face without remounting, at the same height above the jaws.' },
       { at: 'program.coolant', section: 'advanced', label: 'Coolant', type: 'choice', options: [['none', 'none'], ['flood', 'flood'], ['mist', 'mist']], note: 'Coolant noise makes chatter harder to hear.' },
       { at: 'program.dwell_s', section: 'advanced', label: 'Pause at speed before each pass', type: 'number', unit: 's' },
@@ -119,6 +125,8 @@ export const STEPS = [
       { at: 'program.safe_z_mm', label: 'Safe height (Z)', type: 'length' },
       { at: 'program.plunge_feed_mm_min', section: 'advanced', label: 'Plunge feed', type: 'feed' },
       { at: 'program.truing_width_mm', section: 'advanced', label: 'Truing pass width', type: 'length' },
+      { at: 'program.face_depth_mm', section: 'advanced', label: 'Facing depth per level', type: 'length' },
+      { at: 'program.face_width_mm', section: 'advanced', label: 'Facing step', type: 'length', optional: true, placeholder: 'a quarter of the diameter' },
     ],
   },
   {

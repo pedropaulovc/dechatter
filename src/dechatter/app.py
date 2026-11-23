@@ -149,6 +149,7 @@ class App:
                     "verdict": result.verdict if result else None,
                     "chatter_hz": result.chatter_hz if result else None,
                     "prominence_db": result.prominence_db if result else None,
+                    "over_air_db": result.over_air_db if result else None,
                     "spindle_fit": session.spindle_fit(result) if result else None,
                 }
             )
@@ -163,6 +164,8 @@ class App:
             "lane": r.plan.lane,
             "lanes": r.plan.lanes,
             "lane_x_mm": list(lane_x_mm(self.setup, r.plan.lane, r.plan.lanes)),
+            "top_mm": r.plan.top_mm,
+            "reface_mm": r.plan.reface_mm,
             "analysed": r.results is not None,
             "has_recording": (r.path / RECORDING_FILE).exists(),
             "passes": passes,
@@ -176,6 +179,7 @@ class App:
             "depth_mm": sweep.depth_mm,
             "session_chip_load_mm": sweep.session_chip_load_mm,
             "chip_load_mm": sweep.stable_chip_load_mm,
+            "untopped": sweep.untopped,
             "feed_mm_min": None if sweep.feed_mm_min is None else round(sweep.feed_mm_min),
             "mrr_cm3_min": None
             if sweep.mrr_mm3_min is None

@@ -137,6 +137,15 @@ def envelope_db(samples: np.ndarray, rate: int) -> np.ndarray:
     return 10 * np.log10(mean + 1e-14)
 
 
+def level_db(samples: np.ndarray, rate: int) -> float:
+    """The mean level of a stretch of recording, in dB, above the rumble band, as
+    `envelope_db` measures it."""
+    if len(samples) == 0:
+        return -140.0
+    sos = signal.butter(4, HIGH_PASS_HZ, "highpass", fs=rate, output="sos")
+    return float(10 * np.log10(np.mean(signal.sosfilt(sos, samples) ** 2) + 1e-14))
+
+
 def pass_cycle_s(plan: Plan) -> float:
     """The longest pass, from its dwell to the end of its lead-out."""
     return max(p.expected_cut_s + 2 * p.lead_in_s for p in plan.passes) + plan.dwell_s
