@@ -72,8 +72,9 @@ def _print_sweep(sweep: session.Sweep) -> None:
     if found is None:
         print(f"chip-load sweep (round {sweep.round}) at {where}: its lightest pass chattered")
         return
+    bound = "stable at every chip load tried, up to" if sweep.untopped else "stable up to"
     print(
-        f"chip-load sweep (round {sweep.round}) at {where}: stable up to {found:g} mm/tooth"
+        f"chip-load sweep (round {sweep.round}) at {where}: {bound} {found:g} mm/tooth"
         f" ({found / sweep.session_chip_load_mm:.2f}x the session's),"
         f" F{sweep.feed_mm_min:.0f} mm/min"
     )
@@ -109,6 +110,11 @@ def _print_round(session_dir: Path, plan: Plan) -> None:
         f"about {plan.run_time_s / 60:.0f} min, "
         f"uses {plan.consumed_mm:.1f} mm of stock width"
     )
+    if plan.reface_mm > 0:
+        print(
+            f"  faces the top down {plan.reface_mm:g} mm first, to Z{-plan.top_mm:g}"
+            " (keep the zero; start recording at the M0 after it)"
+        )
     if plan.lanes > 1:
         first, last = lane_x_mm(
             load_setup(session.round_dir(session_dir, plan.round) / session.SETUP_FILE),

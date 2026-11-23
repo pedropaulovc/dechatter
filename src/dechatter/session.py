@@ -18,6 +18,7 @@ from .bayes import Observation
 from .config import Setup, SetupFile, SetupSource, load_setup, setup_source
 from .detect import Thresholds, Verdict
 from .plan import (
+    REFACE_EXTRA_MM,
     Envelope,
     PassKind,
     Plan,
@@ -45,6 +46,10 @@ TRIM_FRACTION = 0.15
 AIR_GUARD_S = 0.3
 MIN_AIR_S = 1.0
 MIN_ABORTED_S = 1.0
+# A cut no louder than this over the spindle in the air just before it, and heard as
+# stable, may have cut nothing: a face planned where none was (fresh stock not mounted),
+# or a cut too light to hear. Real cuts measured 1-15 dB over it (tests/fixtures/v8).
+QUIET_DB = 1.0
 EDGE_FRACTION = 0.9  # of the spindle-speed search window: a fit this far out is suspect
 TIMELINE_FILE = "timeline.json"  # the widget's record of the run, beside its recording
 
@@ -61,6 +66,9 @@ class PassStatus(StrEnum):
     # have run unheard, so a verdict may still be set by hand.
     LIKELY_NOT_RUN = "likely not run"
     NOT_RUN = "not run"  # the widget's run never reached it (or never touched the stock)
+    # Run, but its cut was no louder than the spindle in the air and sounded stable: it may
+    # have cut nothing. Its face still moved, so it counts as cut; a verdict may be set by hand.
+    QUIET = "no cut heard"
 
 
 # Passes without a cut heard in them.
@@ -82,6 +90,7 @@ class PassResult:
     start_s: float | None = None
     end_s: float | None = None
     detected: Verdict | None = None  # the detector's own verdict; `verdict` may be overruled
+    over_air_db: float | None = None  # the cut's level over the spindle in the air before it
 
 
 class VerdictSource(StrEnum):
@@ -302,16 +311,6 @@ def next_stage(setup: Setup, env: Envelope, rounds: list[Round], found: list[Sta
     return stage
 
 
-def _shallowest_on_block(rounds: list[Round]) -> float:
-    """The shallowest depth cut since the block now mounted was fresh, over all its lanes."""
-    shallowest = float("inf")
-    for r in reversed(rounds):
-        shallowest = min(shallowest, r.plan.axial_depth_mm)
-        if r.plan.face_y_start_mm == 0 and r.plan.lane == 1:
-            break
-    return shallowest
-
-
 def face_after(last: Round) -> tuple[float, float]:
     """(front face Y, width of the step an aborted pass left on it) after a round was run."""
     if last.results is None:
@@ -488,13 +487,25 @@ def analyze(
             short = PassStatus.ABORTED if place.status is PassStatus.ABORTED else PassStatus.MISSING
             results.append(dataclasses.replace(base, status=short))
             continue
+        over_air = None
+        if air_end - air_start >= MIN_AIR_S:
+            over_air = audio.level_db(cut, rate) - audio.level_db(air, rate)
+        quiet = (
+            over_air is not None
+            and over_air < QUIET_DB
+            and reading.verdict is Verdict.STABLE
+            and place.status is PassStatus.ANALYSED
+        )
+        if quiet:
+            log.warning("pass %d: no louder than the spindle in the air: no cut heard", p.id)
+            reading = dataclasses.replace(reading, verdict=None)
         results.append(
             PassResult(
                 p.id,
                 p.kind,
                 p.rpm,
                 p.width_mm,
-                place.status,
+                PassStatus.QUIET if quiet else place.status,
                 verdict=reading.verdict,
                 chatter_hz=round(reading.chatter_hz, 1),
                 spindle_hz=round(reading.spindle_hz, 3),
@@ -503,6 +514,7 @@ def analyze(
                 start_s=round(segment.start_s, 2),
                 end_s=round(segment.end_s, 2),
                 detected=reading.verdict,
+                over_air_db=None if over_air is None else round(over_air, 1),
             )
         )
     return Results(plan.round, recording, thresholds, tuple(results))
@@ -532,6 +544,28 @@ def _rounds_to_plan_after(session: Path, source: SetupFile) -> list[Round]:
     return rounds
 
 
+@dataclass(frozen=True)
+class _Face:
+    """Where a round could cut: a lane's face as it stands, and the top it is cut from."""
+
+    face: float
+    remnant: float
+    lane: int
+    cap: float | None
+    top: float = 0.0
+    reface: float = 0.0
+
+
+def _since_top(rounds: list[Round]) -> list[Round]:
+    """The rounds cut on the top as it stands: since the block was mounted or last faced."""
+    since = []
+    for r in reversed(rounds):
+        since.append(r)
+        if r.plan.face_y_start_mm == 0 and r.plan.lane == 1:
+            break
+    return since
+
+
 def _place(
     session: Path,
     source: SetupFile,
@@ -544,31 +578,81 @@ def _place(
 ) -> Plan:
     """Lay the tests out on the face as it stands, and write the round.
 
-    With the stock in lanes, a round moves on to the next lane, a fresh face at Y0, once
-    that lane has room for more of its tests than the face it would otherwise cut.
+    The round may cut, cheapest first: the lane it is on, the next lane (a fresh face at
+    Y0 once the stock is in lanes), or, with stock.height_mm given, a fresh top: the round
+    first faces the top down below every cut made on it, and starts again at the first
+    lane. It takes the first that has room for all its tests, else the one with room for
+    most. A chip-load sweep must fit whole: cut short, its heaviest chip loads would go
+    untried and the lightest read as a limit.
     """
-    face, remnant, lane, cap = 0.0, 0.0, 1, None
+    setup = source.setup
+    number = rounds[-1].plan.round + 1 if rounds else 1
     # The lanes are settled by the session's first round: an automatic count must not move
     # with a speed limit changed since.
-    lanes = rounds[-1].plan.lanes if rounds else auto_lanes(source.setup, env)
-    if rounds and stock is Stock.SAME:
+    lanes = rounds[-1].plan.lanes if rounds else auto_lanes(setup, env)
+    at = at_depth(setup, depth_mm)
+    if not rounds or stock is Stock.FRESH:
+        options = [_Face(0.0, 0.0, 1, None)]
+        refused = ""
+    else:
         last = rounds[-1].plan
         face, remnant = face_after(rounds[-1])
-        lane, cap = last.lane, last.lane_cap_mm
-    number = rounds[-1].plan.round + 1 if rounds else 1
-    shallowest = _shallowest_on_block(rounds)
-    if (face > 0 or lane > 1) and depth_mm > shallowest + DEPTH_TOLERANCE_MM:
-        raise PlanError(
-            f"round {number} would cut {depth_mm:g} mm deep, but this block's face is "
-            f"only flat down to {shallowest:g} mm. Mount fresh stock and plan with new stock."
+        cut = _since_top(rounds)
+        shallowest = min(r.plan.axial_depth_mm for r in cut)
+        options = []
+        refused = ""
+        if (face > 0 or last.lane > 1) and depth_mm > shallowest + DEPTH_TOLERANCE_MM:
+            refused = (
+                f"round {number} would cut {depth_mm:g} mm deep, but this block's face is "
+                f"only flat down to {shallowest:g} mm"
+            )
+        else:
+            options.append(_Face(face, remnant, last.lane, last.lane_cap_mm, last.top_mm))
+            if last.lane < lanes and face > 0:
+                options.append(_Face(0.0, 0.0, last.lane + 1, face, last.top_mm))
+        if face > 0 or last.lane > 1:
+            reface = max(r.plan.axial_depth_mm for r in cut) + REFACE_EXTRA_MM
+            top = last.top_mm + reface
+            height = setup.stock.height_mm
+            if height is not None and top + depth_mm + setup.program.clearance_mm <= height:
+                options.append(_Face(0.0, 0.0, 1, None, top, reface))
+    room = [fitting(at, env, o.face, o.remnant, tests, o.cap) for o in options]
+    whole = [o for o, n in zip(options, room, strict=True) if n == len(tests)]
+    if whole:
+        chosen = whole[0]
+    elif planner is PlannerKind.SWEEP or not room or max(room) == 0:
+        chosen = None
+    else:
+        chosen = options[room.index(max(room))]
+    if chosen is None:
+        if setup.stock.height_mm is None:
+            hint = (
+                "Mount fresh stock and plan with new stock, or give the stock's height above "
+                "the vise jaws ([stock] height_mm) so dechatter can face the top down itself"
+            )
+        else:
+            hint = "The top cannot come down further: mount fresh stock and plan with new stock"
+        if refused:
+            raise PlanError(f"{refused}. {hint}.")
+        what = (
+            f"the chip-load sweep needs room for all its {len(tests)} cuts"
+            if planner is PlannerKind.SWEEP and room and max(room) > 0
+            else "stock exhausted"
         )
-    at = at_depth(source.setup, depth_mm)
-    if lane < lanes and face > 0:
-        here = fitting(at, env, face, remnant, tests, cap)
-        if fitting(at, env, 0.0, 0.0, tests, face) > here:
-            face, remnant, lane, cap = 0.0, 0.0, lane + 1, face
+        raise PlanError(f"{what}: no face left has room for them. {hint}.")
     plan = assemble(
-        at, env, number, planner, face, remnant, tests, lane=lane, lanes=lanes, lane_cap_mm=cap
+        at,
+        env,
+        number,
+        planner,
+        chosen.face,
+        chosen.remnant,
+        tests,
+        lane=chosen.lane,
+        lanes=lanes,
+        lane_cap_mm=chosen.cap,
+        top_mm=chosen.top,
+        reface_mm=chosen.reface,
     )
     _write_round(session, source.text, at, plan)
     return plan
@@ -638,6 +722,8 @@ class Sweep:
     stable_chip_load_mm: float | None
     feed_mm_min: float | None
     mrr_mm3_min: float | None
+    # Every chip load tried stayed stable: the limit lies above them, not at the last one.
+    untopped: bool = False
 
 
 def sweeps(rounds: list[Round], env: Envelope) -> list[Sweep]:
@@ -675,6 +761,7 @@ def sweeps(rounds: list[Round], env: Envelope) -> list[Sweep]:
                 None if stable is None else stable.chip_load_mm,
                 None if stable is None else stable.feed_mm_min,
                 None if stable is None else depth * stable.width_mm * stable.feed_mm_min,
+                untopped=stable is not None and stable is tests[-1],
             )
         )
     return found
@@ -717,6 +804,10 @@ FREE_AFTER_CUT = frozenset(
         "program.plunge_feed_mm_min",
         "program.truing_width_mm",
         "stock.width_mm",
+        "stock.height_mm",
+        "stock.thickness_mm",
+        "program.face_depth_mm",
+        "program.face_width_mm",
     }
 )
 # Fields that are in neither a plan nor its program: an unrun round survives their change.

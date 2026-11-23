@@ -374,3 +374,25 @@ def test_a_run_that_ended_before_its_first_cut_leaves_the_round_to_run_again(end
     recording = synth.record(plan, seed=3)[: synth.RATE * 3]
     with pytest.raises(audio.AudioError, match="ended before its first cut"):
         session.analyze(plan, recording, synth.RATE, "r.wav", Thresholds(), timeline=timeline)
+
+
+def test_a_cut_no_louder_than_the_spindle_in_the_air_is_not_called_stable(setup):
+    """A face planned where there was none (fresh stock picked, none mounted) cuts air,
+    and the air sounds stable. Those passes say no cut was heard instead."""
+    from test_plan import round1
+
+    plan = round1(setup)
+    timeline, _ = schedule(plan)
+    lost = frozenset({3, 4})
+    recording = synth.record(plan, in_air=lost)
+    results = session.analyze(plan, recording, synth.RATE, "r.wav", Thresholds(), timeline=timeline)
+    for p in results.passes:
+        if p.id in lost:
+            assert p.status is PassStatus.QUIET and p.verdict is None, p
+            assert p.over_air_db < session.QUIET_DB
+        else:
+            assert p.status is PassStatus.ANALYSED and p.verdict is not None, p
+            assert p.over_air_db > session.QUIET_DB
+    # The face still moved through them: the next round starts behind them.
+    face, _ = session.face_after(session.Round(Path("r"), plan, results))
+    assert face == pytest.approx(plan.face_y_start_mm + plan.consumed_mm)

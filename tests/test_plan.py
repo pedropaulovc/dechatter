@@ -368,3 +368,39 @@ def test_automatic_lanes_keep_every_cut_long_enough_to_hear(write_setup):
     assert auto_lanes(shorter, envelope(shorter)) == 1
     pinned = load_setup(write_setup(**LANES))
     assert auto_lanes(pinned, envelope(pinned)) == 2
+
+
+def test_facing_takes_the_top_down_in_levels_and_rows_over_the_whole_stock(write_setup):
+    from dechatter.plan import facing_rows
+
+    setup = load_setup(
+        write_setup(l=("width_mm = 30.0", "width_mm = 30.0\nheight_mm = 40.0\nthickness_mm = 35.0"))
+    )
+    radius = setup.tool.diameter_mm / 2
+    step = setup.tool.diameter_mm / 4
+    rows = facing_rows(setup, top_mm=7.4, reface_mm=5.2)
+    levels = sorted({r.z_mm for r in rows})
+    # 5.2 mm in levels of at most 1 mm, ending on the new top.
+    assert len(levels) == 6 and levels[-1] == pytest.approx(7.4)
+    assert levels[0] == pytest.approx(7.4 - 5.2 + 5.2 / 6, abs=1e-3)
+    for level in levels:
+        edges = sorted(r.y_mm + radius for r in rows if r.z_mm == level)
+        # Each row takes at most a step off the front, and the last reaches the back.
+        assert edges[0] <= step + 1e-9
+        assert all(b - a <= step + 1e-9 for a, b in zip(edges, edges[1:], strict=False))
+        assert edges[-1] == pytest.approx(35.0, abs=1e-3)
+    # Every row starts and ends beside the stock, in the air.
+    assert all(r.start < -radius and r.end > setup.stock.length_mm + radius for r in rows)
+    assert facing_rows(setup, top_mm=0.0, reface_mm=0.0) == []
+
+    env = envelope(setup)
+    plan = assemble(
+        setup, env, 3, PlannerKind.GRID, 0.0, 0.0, grid_tests(setup, env), top_mm=7.4, reface_mm=5.2
+    )
+    found = gcode.blocks(plan, setup, MM)
+    steps = [b.step for b in found]
+    assert steps.count(gcode.Step.FACE) == len(rows)
+    assert steps.index(gcode.Step.FACE) < steps.index(gcode.Step.RAPID)
+    assert plan.face_s > 0 and plan.run_time_s > round1(setup).run_time_s
+    plunge = next(b for b in found if b.step is gcode.Step.PLUNGE)
+    assert plunge.target["z"] == pytest.approx(-(7.4 + setup.cut.axial_depth_mm))

@@ -16,7 +16,7 @@ import synth
 from scipy import signal
 
 import dechatter
-from dechatter import browser, cli, session
+from dechatter import browser, cli, plan, session
 from dechatter.app import TIMELINE_FILE, App
 from dechatter.config import load_setup
 from dechatter.plan import Plan, envelope
@@ -1020,12 +1020,14 @@ def test_a_chip_load_sweep_follows_convergence_and_stays_off_the_map(engine, set
     assert len(state["observations"]) == cuts and state["best"][0] == best
     found = state["sweep"]
     assert found["chip_load_mm"] == loads[-1], "the simulated machine ignores chip load"
+    assert found["untopped"], "every chip load tried was stable: no limit found"
     assert found["feed_mm_min"] == round(loads[-1] * setup.tool.flutes * best["rpm"])
 
     # Chatter at the third chip load: the result is the one before it.
     third = tests[2]["id"]
     state = engine.call("set_verdict", NAME, sweep["round"], third, "unstable")
     assert state["sweep"]["chip_load_mm"] == loads[1]
+    assert not state["sweep"]["untopped"]
     page = engine.call("report_html", NAME, "mm")
     assert "Chip-load sweep, round" in page and "chip-load sweep, planned" in page
 
@@ -1220,3 +1222,99 @@ def test_automatic_lanes_are_settled_by_the_first_round(engine):
     engine.call("save_setup", NAME, json.dumps(form))
     assert engine.call("setup_preview", json.dumps(form))["stock"]["lanes"] > lanes
     assert engine.call("plan", NAME, "same")["rounds"][-1]["lanes"] == lanes
+
+
+def run_rounds_until_faced(engine, form) -> tuple[dict, dict]:
+    """Save `form`, then plan and run rounds on the same block until one faces the top down;
+    answer the last round before it and that one."""
+    engine.call("save_setup", NAME, json.dumps(form))
+    before = None
+    for _ in range(8):
+        state = engine.call("plan", NAME, "same")
+        latest = state["rounds"][-1]
+        if latest["reface_mm"] > 0:
+            return before, latest
+        before = latest
+        engine.run_round(latest["round"])
+    pytest.fail("never faced the top")
+
+
+def test_with_its_height_given_the_top_is_faced_down_once_the_lanes_are_used(engine):
+    form = engine.call("setup_form", NAME)["values"]
+    form["stock"].update(lanes=2, width_mm=8.0, height_mm=40.0, thickness_mm=12.0)
+    depth = form["cut"]["axial_depth_mm"]
+    before, faced = run_rounds_until_faced(engine, form)
+    # Only once the last lane had no room left, the top comes down below every cut, and
+    # the round starts again at the first lane, at Y0, under the same zero.
+    assert before["lane"] == 2
+    assert faced["reface_mm"] == pytest.approx(depth + plan.REFACE_EXTRA_MM)
+    assert faced["top_mm"] == pytest.approx(faced["reface_mm"])
+    assert (faced["lane"], faced["face_y_start_mm"]) == (1, 0.0)
+    program = engine.call("program", NAME, faced["round"], "mm")
+    lines = program.splitlines()
+    assert any(line.startswith("(FACING FIRST") for line in lines)
+    stop = lines.index("M0 (top faced: start the recording now, then resume)")
+    assert stop < min(i for i, line in enumerate(lines) if line.startswith("(pass "))
+    bottom = -(faced["top_mm"] + depth)
+    assert f"G1 Z{bottom:g} F{form['program']['plunge_feed_mm_min']:g}" in program
+    state = engine.run_round(faced["round"])
+    assert state["rounds"][-1]["analysed"]
+
+
+def test_without_room_to_face_the_top_down_fresh_stock_is_asked_for(engine):
+    form = engine.call("setup_form", NAME)["values"]
+    form["stock"].update(lanes=1, width_mm=8.0)
+    engine.call("save_setup", NAME, json.dumps(form))
+    engine.run_round(engine.call("plan", NAME, "same")["rounds"][-1]["round"])
+    with pytest.raises(RuntimeError, match=r"height_mm\) so dechatter can face the top down"):
+        engine.call("plan", NAME, "same")
+    # A height too low to take another depth below the cuts made: no facing either.
+    depth = form["cut"]["axial_depth_mm"]
+    form["stock"]["height_mm"] = 2 * depth + 1.0
+    engine.call("save_setup", NAME, json.dumps(form))
+    with pytest.raises(RuntimeError, match="cannot come down further"):
+        engine.call("plan", NAME, "same")
+    form["stock"]["height_mm"] = 3 * depth
+    engine.call("save_setup", NAME, json.dumps(form))
+    assert engine.call("plan", NAME, "same")["rounds"][-1]["reface_mm"] > 0
+
+
+def test_a_deeper_depth_faces_the_top_down_instead_of_asking_for_fresh_stock(engine):
+    form = engine.call("setup_form", NAME)["values"]
+    form["cut"]["other_depths_mm"] = [4.0]
+    form["stock"]["height_mm"] = 40.0
+    engine.call("save_setup", NAME, json.dumps(form))
+    machine = synth.Machine(reference_depth_mm=5.0)
+    state = engine.call("state", NAME)
+    while state["next_depth_mm"] == 5.0:
+        state = engine.call("plan", NAME, "fresh")
+        state = engine.run_round(state["rounds"][-1]["round"], machine=machine)
+    state = engine.call("plan", NAME, "fresh")
+    state = engine.run_round(state["rounds"][-1]["round"], machine=machine)
+    flips = [
+        (r["round"], p["id"])
+        for r in state["rounds"]
+        if r["depth_mm"] == 5.0
+        for p in sorted(r["passes"], key=lambda p: -p["width_mm"])
+        if p["verdict"] == "unstable"
+    ]
+    for number, pass_id in flips:
+        state = engine.call("set_verdict", NAME, number, pass_id, "stable")
+        if state["next_depth_mm"] == 5.0:
+            break
+    assert state["next_depth_mm"] == 5.0
+    # The face is flat only down to 4 mm: the top comes down below that first.
+    faced = engine.call("plan", NAME, "same")["rounds"][-1]
+    assert faced["depth_mm"] == 5.0
+    assert faced["reface_mm"] == pytest.approx(4.0 + plan.REFACE_EXTRA_MM)
+
+
+def test_a_sweep_that_does_not_fit_whole_is_never_cut_short(engine, setup):
+    converge(engine, setup)
+    form = engine.call("setup_form", NAME)["values"]
+    best = engine.call("state", NAME)["best"][0]
+    # Room on a fresh block for only two of the sweep's cuts.
+    form["stock"]["width_mm"] = 0.2 + 2.5 * best["width_mm"]
+    engine.call("save_setup", NAME, json.dumps(form))
+    with pytest.raises(RuntimeError, match="needs room for all its"):
+        engine.call("plan_sweep", NAME, "fresh")

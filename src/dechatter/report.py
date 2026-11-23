@@ -219,11 +219,20 @@ def render(session_dir: Path, units: Units) -> str:
                 f"{_e(_length(sweep.session_chip_load_mm, units, 3))} per tooth.</p>"
             )
             continue
+        untopped = (
+            "<p>Every chip load tried stayed stable: the cut's limit lies above the heaviest "
+            "one, which is no limit itself.</p>"
+            if sweep.untopped
+            else ""
+        )
         recommended.append(
             f"<h3>{_e(where)}</h3>"
+            + untopped
             + _table(
                 [
-                    "Stable up to (per tooth)",
+                    "Stable at least up to (per tooth)"
+                    if sweep.untopped
+                    else "Stable up to (per tooth)",
                     "Of the session's",
                     "Feed",
                     "Removal rate",
@@ -290,6 +299,11 @@ def render(session_dir: Path, units: Units) -> str:
             f"<h3>Round {r.plan.round}: {_e(_length(r.plan.axial_depth_mm, units))} deep, "
             f"{_e(PLANNER_NAMES[r.plan.planner])}, planned {_e(r.plan.planned_on)}"
             + (f", lane {r.plan.lane} of {r.plan.lanes}" if r.plan.lanes > 1 else "")
+            + (
+                f", top faced down {_e(_length(r.plan.reface_mm, units))} first"
+                if r.plan.reface_mm > 0
+                else ""
+            )
             + f", {state}</h3>"
             + _table(
                 [

@@ -6,6 +6,34 @@ What changed for people who use the dechatter widget and command line. The forma
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-23
+
+### Added
+
+- **Facing the top down**: given the stock's height above the vise jaws (`height_mm` in
+  `[stock]`, the wizard's Height above the jaws), dechatter faces the top down itself once
+  every lane is used, or before a deeper depth on a face cut only shallower, and starts again
+  at the first lane with the same zero. The round's program takes the top down below the
+  deepest cut first, over the stock's thickness (`thickness_mm`, or the width used), in
+  levels and rows set by `face_depth_mm` and `face_width_mm` in `[program]`, then stops for
+  the recording. The widget, the program, `dechatter plan` and the report say so. Without a
+  height, nothing changes: fresh stock is asked for.
+- A pass that sounds no louder than the spindle in the air before it (under 1 dB over it)
+  and would be called stable now says "no cut heard", with no verdict: it may have cut
+  nothing, as when fresh stock is picked without mounting any. A verdict can be set by hand.
+
+### Changed
+
+- Sessions planned by this version cannot be opened by dechatter 0.4.0, whose plans lack the
+  faced top. Sessions from 0.2.0 to 0.4.0 load as they are.
+
+### Fixed
+
+- A chip-load sweep is planned only where all its cuts fit. One cut short by the stock left
+  its heaviest chip loads untried and reported the last one tried, below the session's own
+  chip load, as the limit. A sweep whose every chip load stayed stable now says the limit lies
+  above them ("stable at every chip load tried, up to"), sessions already cut included.
+
 ## [0.4.0] - 2026-11-23
 
 ### Added
@@ -180,7 +208,8 @@ What changed for people who use the dechatter widget and command line. The forma
   Sessions export to a zip the command line reads, and import in another browser.
 - Published on npm as `dechatter`, with third-party notices for the bundled Pyodide.
 
-[Unreleased]: https://github.com/pedropaulovc/dechatter/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/pedropaulovc/dechatter/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/pedropaulovc/dechatter/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/pedropaulovc/dechatter/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/pedropaulovc/dechatter/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/pedropaulovc/dechatter/compare/v0.1.1...v0.2.0

@@ -199,6 +199,12 @@ remaining spectrum and at least 10 dB above the same frequency in the dwell just
 pass, when the spindle was turning in air. The second test rejects tones the machine makes
 without cutting, such as drive whine.
 
+A pass whose cut is less than 1 dB louder than that dwell, and which would be called stable,
+says "no cut heard" instead, with no verdict. The cuts of real sessions sounded 1 to 15 dB
+over the spindle in air; a pass that cut nothing, on a face that was not where the plan put
+it, sounds like the air and would otherwise pass for stable. The face still counts as moved
+on, and a verdict can be set by hand.
+
 When the widget ran the round, it recorded where every cut and every dwell is, and those
 windows are used as they are: the cut from where the cutter meets the stock to where it
 leaves it, without any time the machine was held, and the dwell before it as the air
@@ -296,6 +302,25 @@ lane is never cut further back than the one before it, since the cutter crosses 
 on its way in, and each lane must be at least twice the cutter diameter long. A deeper
 depth still needs fresh stock, since the cutter would cross the earlier lanes below where
 they were cut. The number of lanes cannot change once a round was cut.
+
+### Facing the top down
+
+Given how far the top of the stock (where Z0 is set) stands above anything the cutter must
+not reach (`height_mm` in `[stock]`, the wizard's Height above the jaws), dechatter faces the
+top down itself once every lane is used, or when a deeper depth comes after a shallower one.
+The round's program starts by taking the top down below the deepest cut made on it (plus
+0.2 mm), in levels of at most `face_depth_mm` (1 mm) and rows `face_width_mm` (a quarter of
+the cutter) apart, from the front face to the back (`thickness_mm`, or the width used) and
+past both ends, at the round's first speed. Then it stops (`M0`) and the round starts again
+at the first lane, below the new top, with the same zero: no remounting, no re-zeroing. It
+does so as long as the next cut's bottom stays the clearance above that height; then it
+asks for fresh stock. The widget does not analyse the facing; from the command line, start
+recording at that stop.
+
+A chip-load sweep is planned only where all its cuts fit, on a lane, a fresh lane or a faced
+top: cut short by the stock, its heaviest chip loads would go untried and the last one tried
+would read as a limit. A sweep whose every chip load stayed stable says so: its limit lies
+above them.
 
 ## Development
 

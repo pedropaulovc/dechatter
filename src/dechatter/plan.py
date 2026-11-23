@@ -75,6 +75,11 @@ class Plan:
     lane: int = 1
     lanes: int = 1
     lane_cap_mm: float | None = None
+    # How far below Z0 the stock's top stands for this round, and how much of it the round
+    # faces off first to get there (0: none); facing's feed moves take `face_s`.
+    top_mm: float = 0.0
+    reface_mm: float = 0.0
+    face_s: float = 0.0
     schema: int = SCHEMA
 
     @property
@@ -85,7 +90,8 @@ class Plan:
     def run_time_s(self) -> float:
         """Feed moves and dwells. Rapids come on top and depend on the machine."""
         per_pass = self.dwell_s + self.plunge_s
-        return sum(per_pass + p.lead_in_s + p.expected_cut_s for p in self.passes)
+        cuts = sum(per_pass + p.lead_in_s + p.expected_cut_s for p in self.passes)
+        return self.face_s + cuts
 
     def save(self, path: Path) -> None:
         path.write_text(json.dumps(asdict(self), indent=2) + "\n", encoding="utf-8")
@@ -271,6 +277,49 @@ def preparation_passes(setup: Setup, env: Envelope, remnant_mm: float) -> list[t
     return [*cleanup, (rpm, setup.program.truing_width_mm)]
 
 
+REFACE_EXTRA_MM = 0.2  # faced off below the deepest cut, so the new top is whole
+
+
+@dataclass(frozen=True)
+class FacingRow:
+    z_mm: float  # the level, from Z0
+    y_mm: float  # the cutter's centre
+    start: float  # along the feed, as Travel
+    end: float
+
+
+def facing_rows(setup: Setup, top_mm: float, reface_mm: float) -> list[FacingRow]:
+    """The passes that take the top from `top_mm - reface_mm` down to `top_mm` below Z0:
+    levels no deeper than program.face_depth_mm, each in rows along the feed that step back
+    from the front face by program.face_width_mm, over the whole length and from Y0 to the
+    stock's thickness. Each row starts and ends a cutter radius and the clearance beyond the
+    stock's ends, in the air, and cuts on its +Y side only, as the test passes do."""
+    if reface_mm <= 0:
+        return []
+    radius, clearance = setup.tool.diameter_mm / 2, setup.program.clearance_mm
+    step = setup.program.face_width_mm or setup.tool.diameter_mm / 4
+    depth = setup.stock.thickness_mm or setup.stock.width_mm
+    rows = max(1, math.ceil(depth / step - 1e-9))
+    levels = max(1, math.ceil(reface_mm / setup.program.face_depth_mm - 1e-9))
+    start, end = -radius - clearance, setup.stock.length_mm + radius + clearance
+    return [
+        FacingRow(
+            round(top_mm - reface_mm * (levels - 1 - level) / levels, 3),
+            round(depth * (row + 1) / rows - radius, 3),
+            start,
+            end,
+        )
+        for level in range(levels)
+        for row in range(rows)
+    ]
+
+
+def facing_s(setup: Setup, rows: list[FacingRow], feed_mm_min: float) -> float:
+    """The feed moves of facing: each row's plunge in the air and its cut."""
+    plunge = setup.program.clearance_mm / setup.program.plunge_feed_mm_min * 60
+    return sum(plunge + (r.end - r.start) / feed_mm_min * 60 for r in rows)
+
+
 def lane_budget_mm(setup: Setup, lane_cap_mm: float | None) -> float:
     """How far back from Y0 the lane's face may go: the stock width to use, and in a lane
     after the first, no further than the lane before it was cut back (the cutter crosses it)."""
@@ -321,6 +370,8 @@ def assemble(
     lane: int = 1,
     lanes: int | None = None,
     lane_cap_mm: float | None = None,
+    top_mm: float = 0.0,
+    reface_mm: float = 0.0,
 ) -> Plan:
     """Order tests by increasing width (gradual ramp), prepend face preparation, fit the stock.
 
@@ -375,6 +426,16 @@ def assemble(
         lane=lane,
         lanes=lanes,
         lane_cap_mm=None if lane_cap_mm is None else round(lane_cap_mm, 3),
+        top_mm=round(top_mm, 3),
+        reface_mm=round(reface_mm, 3),
+        face_s=round(
+            facing_s(
+                setup,
+                facing_rows(setup, top_mm, reface_mm),
+                env.chip_load_mm * setup.tool.flutes * passes[0].rpm,
+            ),
+            2,
+        ),
     )
 
 
