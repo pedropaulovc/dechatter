@@ -22,6 +22,11 @@ What changed for people who use the dechatter widget and command line. The forma
   and would be called stable now says "no cut heard", with no verdict: it may have cut
   nothing, as when fresh stock is picked without mounting any. A verdict can be set by hand.
 
+### Changed
+
+- Sessions planned by this version cannot be opened by dechatter 0.4.0, whose plans lack the
+  faced top. Sessions from 0.2.0 to 0.4.0 load as they are.
+
 ### Fixed
 
 - A chip-load sweep is planned only where all its cuts fit. One cut short by the stock left
