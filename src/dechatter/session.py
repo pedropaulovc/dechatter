@@ -197,23 +197,22 @@ class Round:
 
     def __post_init__(self):
         # However the results were set (analysis, or "facing" edited in results.json), a
-        # facing cut short or never run leaves nothing cut after it.
+        # facing cut short or never run leaves nothing cut after it. Only on read: the file
+        # keeps what was heard, should the facing be corrected to done.
         if self.results is not None:
             object.__setattr__(self, "results", after_facing(self.plan, self.results))
 
 
 def after_facing(plan: Plan, results: Results) -> Results:
-    """`results` with every pass from the leg after a mid-round facing on counted as not
-    run, when the facing was cut short or never ran: a pass heard there was something else
-    (the facing's own rows, perhaps), and its verdict is no evidence."""
+    """`results` with every pass from the leg after a mid-round facing on not run, when the
+    facing was cut short or never ran: a pass heard there was something else (the facing's
+    own rows, perhaps), and its verdict is no evidence, nor can one be set."""
     faced = plan.mid_facing
     if faced is None or results.facing not in (Facing.CUT_SHORT, Facing.NOT_RUN):
         return results
     start = plan.first_index(faced)
-    if all(p.status is PassStatus.LIKELY_NOT_RUN for p in results.passes[start:]):
-        return results
     dropped = tuple(
-        PassResult(p.id, p.kind, p.rpm, p.width_mm, PassStatus.LIKELY_NOT_RUN)
+        PassResult(p.id, p.kind, p.rpm, p.width_mm, PassStatus.NOT_RUN)
         for p in results.passes[start:]
     )
     return dataclasses.replace(results, passes=results.passes[:start] + dropped)
@@ -567,8 +566,8 @@ def analyze(
     where every cut is; otherwise the cuts are found by their sound. Where the run got to
     facing the top down mid-round (see facing_asked), the widget's record says what the
     facing did, else `facing`: the operator's word, without which the next round cannot be
-    planned. Cut short or not run, it leaves nothing cut after it: whatever was heard there
-    (the facing's own rows, perhaps) is dropped."""
+    planned. Cut short or not run, it leaves nothing cut after it: what was heard there (the
+    facing's own rows, perhaps) is kept here, and counted as not run on read (after_facing)."""
     placed = (
         None if manual is not None or timeline is None else placements_from_timeline(plan, timeline)
     )
@@ -672,7 +671,7 @@ def analyze(
         went_on = _final(passes) >= plan.first_index(faced)
         recorded = Facing.DONE if went_on else facing_in_timeline(timeline)
         return Results(plan.round, recording, thresholds, passes, recorded)
-    return after_facing(plan, Results(plan.round, recording, thresholds, passes, facing))
+    return Results(plan.round, recording, thresholds, passes, facing)
 
 
 def facing_in_timeline(timeline: list) -> Facing:
@@ -1169,7 +1168,8 @@ def analyze_recording(
     manual: list[audio.Segment] | None = None,
     facing: Facing | None = None,
 ) -> Results:
-    """Classify a round's passes from its recording and save the results beside the plan."""
+    """Classify a round's passes from its recording and save the results beside the plan;
+    returned as they are read (see after_facing)."""
     samples, rate = audio.load(recording)
     timeline_path = target.path / TIMELINE_FILE
     timeline = (
@@ -1186,4 +1186,4 @@ def analyze_recording(
         len(samples) / rate,
         rate,
     )
-    return results
+    return after_facing(target.plan, results)

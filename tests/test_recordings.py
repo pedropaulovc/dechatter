@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -11,6 +12,7 @@ import pytest
 import synth
 
 from dechatter import audio, session
+from dechatter.app import App
 from dechatter.config import load_setup
 from dechatter.detect import Thresholds, Verdict
 from dechatter.plan import (
@@ -591,8 +593,9 @@ def test_a_facing_stopped_after_a_few_rows_is_never_taken_for_cuts(write_setup, 
     said = session.analyze(
         plan, recording, synth.RATE, "r.wav", Thresholds(), facing=session.Facing.CUT_SHORT
     )
-    assert {p.status for p in said.passes[start:]} == {PassStatus.LIKELY_NOT_RUN}
-    face = session.face_after(session.Round(Path("round-02"), plan, said))
+    r = session.Round(Path("round-02"), plan, said)
+    assert {p.status for p in r.results.passes[start:]} == {PassStatus.NOT_RUN}
+    face = session.face_after(r)
     assert (face.top, face.top_mm) == (Top.PART_FACED, 0.0)
 
     env = envelope(setup)
@@ -623,7 +626,7 @@ def test_a_facing_set_by_hand_drops_what_was_heard_after_it(write_setup, tmp_pat
     edited = json.loads((folder / session.RESULTS_FILE).read_text())
     (folder / session.RESULTS_FILE).write_text(json.dumps({**edited, "facing": facing.value}))
     r = session.Round(folder, plan, session.Results.load(folder / session.RESULTS_FILE))
-    assert {p.status for p in r.results.passes[start:]} == {PassStatus.LIKELY_NOT_RUN}
+    assert {p.status for p in r.results.passes[start:]} == {PassStatus.NOT_RUN}
     # The next round starts before the facing, on the old top; the passes after it are no
     # evidence.
     face = session.face_after(r)
@@ -634,6 +637,22 @@ def test_a_facing_set_by_hand_drops_what_was_heard_after_it(write_setup, tmp_pat
     heard_before = [p for p in r.results.passes[:start] if p.kind is PassKind.TEST and p.verdict]
     assert len(observed) == len(heard_before) > 0
     assert [(o.rpm, o.width_mm) for o in observed] == [(p.rpm, p.width_mm) for p in heard_before]
+
+    # In the widget: a dropped pass takes no verdict, and a verdict set elsewhere keeps what
+    # was heard after the facing in the file, should the facing be corrected to done.
+    shutil.copy(tmp_path / "setup.toml", folder / session.SETUP_FILE)
+    plan.save(folder / session.PLAN_FILE)
+    app = App(tmp_path, Thresholds())
+    dropped = next(p.id for p in plan.passes[start:] if p.kind is PassKind.TEST)
+    with pytest.raises(session.SessionError, match="was never run"):
+        app.set_verdict(plan.round, dropped, Verdict.STABLE)
+    app.set_verdict(plan.round, heard_before[0].id, Verdict.UNSTABLE)
+    corrected = json.loads((folder / session.RESULTS_FILE).read_text())
+    (folder / session.RESULTS_FILE).write_text(json.dumps({**corrected, "facing": "done"}))
+    (r,) = session.load_rounds(tmp_path)
+    assert r.results.passes[heard_before[0].id].verdict is Verdict.UNSTABLE
+    heard_after = r.results.passes[start : start + 2]
+    assert {(p.status, p.verdict) for p in heard_after} == {(PassStatus.ANALYSED, Verdict.UNSTABLE)}
 
 
 @pytest.mark.parametrize(

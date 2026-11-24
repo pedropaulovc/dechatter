@@ -253,20 +253,23 @@ class App:
         session.analyze_recording(target, recording, self.thresholds)
 
     def set_verdict(self, number: int, pass_id: int, verdict: Verdict) -> None:
-        """The operator's ears overrule the detector."""
+        """The operator's ears overrule the detector. The verdict goes into the results as
+        saved, not as read: a pass a facing cut short drops is kept in the file, should the
+        facing be corrected to done."""
         target = self._round(number)
         if target.results is None:
             raise SessionError(f"round {number} is not analysed")
+        read = {p.id: p for p in target.results.passes}
+        if pass_id in read and read[pass_id].status is PassStatus.NOT_RUN:
+            raise SessionError(f"pass {pass_id} of round {number} was never run")
+        saved = session.Results.load(target.path / session.RESULTS_FILE)
         passes = []
-        for p in target.results.passes:
+        for p in saved.passes:
             if p.id == pass_id:
-                if p.status is PassStatus.NOT_RUN:
-                    raise SessionError(f"pass {pass_id} of round {number} was never run")
                 status = PassStatus.ANALYSED if p.status in session.UNHEARD else p.status
                 p = session.PassResult(**{**asdict(p), "verdict": verdict, "status": status})
             passes.append(p)
         if all(p.id != pass_id or p.kind is not PassKind.TEST for p in passes):
             raise SessionError(f"round {number} has no test pass {pass_id}")
-        updated = replace(target.results, passes=tuple(passes))
-        updated.save(target.path / session.RESULTS_FILE)
+        replace(saved, passes=tuple(passes)).save(target.path / session.RESULTS_FILE)
         log.info("round %d pass %d set to %s by the operator", number, pass_id, verdict)

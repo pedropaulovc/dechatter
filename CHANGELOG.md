@@ -33,10 +33,11 @@ What changed for people who use the dechatter widget and command line. The forma
   stopped after a few rows sounds like cuts), so whenever it shows the run got to the facing
   `dechatter analyze` asks for `--facing done` (a round run to its end), `cut-short` or
   `not-run` (or `"facing"` in the round's `results.json`), and `dechatter plan` waits for
-  it; `cut-short` and `not-run` drop what was heard after the facing, set in
-  `results.json` by hand as well. `dechatter plan` and the program's header say so up
-  front. Sound after the last cut before the facing is no longer taken for the next pass
-  stopped early.
+  it; `cut-short` and `not-run` count what was heard after the facing as not run (no
+  verdict can be set on it), set in `results.json` by hand as well. `results.json` keeps
+  what was heard, so correcting `"facing"` to `done` brings it back. `dechatter plan` and
+  the program's header say so up front. Sound after the last cut before the facing is no
+  longer taken for the next pass stopped early.
 - Sessions planned by this version cannot be opened by dechatter 0.5.0, whose plans hold a
   round on a single lane. Sessions from 0.2.0 to 0.5.0 load as they are.
 
