@@ -16,7 +16,7 @@ import numpy as np
 
 from . import audio, bayes, detect, gcode
 from .bayes import Observation
-from .config import Setup, SetupFile, SetupSource, load_setup, setup_source
+from .config import Setup, SetupFile, SetupSource, Vary, load_setup, setup_source
 from .detect import Thresholds, Verdict
 from .plan import (
     DEPTH_TOLERANCE_MM,
@@ -24,14 +24,19 @@ from .plan import (
     Envelope,
     Face,
     Leg,
+    Made,
+    Milling,
     PassKind,
     Plan,
     PlanError,
     PlannerKind,
+    Reach,
     SchemaError,
     Top,
     assemble,
     auto_lanes,
+    cut_size,
+    fixed_mm,
     grid_tests,
     mrr_mm3_min,
     sweep_tests,
@@ -254,70 +259,84 @@ def load_rounds(session: Path) -> list[Round]:
 
 
 def _tests(rounds: list[Round], wanted) -> list[Observation]:
-    """Classified test cuts of the rounds whose depth `wanted` accepts, as they were made.
+    """Classified test cuts of the rounds whose level `wanted` accepts, as they were made.
 
-    A chip-load sweep is left out: its cuts are not at the session's chip load.
+    A round's level is what its test cuts share: the depth, or where the session steps the
+    depth, the width. A chip-load sweep is left out: its cuts are not at the session's chip
+    load.
     """
-    return [
-        Observation(p.rpm, p.width_mm, p.verdict, p.chatter_hz)
-        for r in rounds
-        if r.results is not None
-        and r.plan.planner is not PlannerKind.SWEEP
-        and wanted(r.plan.axial_depth_mm)
-        for p in r.results.passes
-        if p.kind is PassKind.TEST and p.verdict is not None
-    ]
+    found = []
+    for r in rounds:
+        if r.results is None or r.plan.planner is PlannerKind.SWEEP:
+            continue
+        if not wanted(r.plan.fixed_mm):
+            continue
+        sizes = {p.id: r.plan.engagement_mm(p) for p in r.plan.passes}
+        found += [
+            Observation(p.rpm, sizes[p.id], p.verdict, p.chatter_hz)
+            for p in r.results.passes
+            if p.kind is PassKind.TEST and p.verdict is not None
+        ]
+    return found
 
 
-def _at(depth_mm: float):
-    return lambda depth: abs(depth - depth_mm) <= DEPTH_TOLERANCE_MM
+def _at(level_mm: float):
+    return lambda level: abs(level - level_mm) <= DEPTH_TOLERANCE_MM
 
 
 def _cuts(rounds: list[Round], env: Envelope, wanted) -> list[Observation]:
     """What the cuts tell the map searched now; its bounds may have narrowed since.
 
-    A cut at a speed outside the search, or chatter wider than the widest width searched,
-    says nothing about the cells searched. A stable cut that wide proves every narrower
-    width stable, so it counts as stable at the widest width. The cuts stay in their rounds.
+    A cut at a speed outside the search, or chatter beyond the largest engagement searched,
+    says nothing about the cells searched. A stable cut that large proves every smaller one
+    stable, so it counts as stable at the largest engagement. The cuts stay in their rounds.
     """
     found = []
     for o in _tests(rounds, wanted):
-        if env.contains(o.rpm, o.width_mm):
+        if env.contains(o.rpm, o.engagement_mm):
             found.append(o)
             continue
         if env.holds_speed(o.rpm) and o.verdict is Verdict.STABLE:
-            found.append(Observation(o.rpm, env.width_top_mm, o.verdict, o.chatter_hz))
+            found.append(Observation(o.rpm, env.engagement_top_mm, o.verdict, o.chatter_hz))
     return found
 
 
-def observations(rounds: list[Round], depth_mm: float, env: Envelope) -> list[Observation]:
-    """The test cuts made at one depth, as the map searched now sees them."""
-    return _cuts(rounds, env, _at(depth_mm))
+def observations(rounds: list[Round], level_mm: float, env: Envelope) -> list[Observation]:
+    """The test cuts made at one level, as the map searched now sees them."""
+    return _cuts(rounds, env, _at(level_mm))
 
 
-def evidence(rounds: list[Round], depth_mm: float, env: Envelope) -> list[Observation]:
-    """What is known at one depth: the cuts made there, and the stable cuts made deeper.
+def evidence(rounds: list[Round], level_mm: float, env: Envelope) -> list[Observation]:
+    """What is known at one level: the cuts made there, and the stable cuts made above it.
 
-    A width that was stable in a deeper cut is stable in a shallower one. Chatter in a
-    deeper cut says nothing here, so those cuts are left out.
+    A width that was stable in a deeper cut is stable in a shallower one, and a depth that
+    was stable in a wider cut is stable in a narrower one. Chatter in a deeper or wider cut
+    says nothing here, so those cuts are left out.
     """
-    deeper = _cuts(rounds, env, lambda depth: depth > depth_mm + DEPTH_TOLERANCE_MM)
+    above = _cuts(rounds, env, lambda level: level > level_mm + DEPTH_TOLERANCE_MM)
     carried = [
-        Observation(o.rpm, o.width_mm, o.verdict) for o in deeper if o.verdict is Verdict.STABLE
+        Observation(o.rpm, o.engagement_mm, o.verdict) for o in above if o.verdict is Verdict.STABLE
     ]
-    return [*observations(rounds, depth_mm, env), *carried]
+    return [*observations(rounds, level_mm, env), *carried]
 
 
-def depths(setup: Setup) -> list[float]:
-    """The depths a session works through: the setup's own, then the others, deepest first.
+def levels(setup: Setup) -> list[float]:
+    """The levels a session works through: the setup's own depth, then the others, deepest
+    first; or where it steps the depth, its width, then the others, widest first.
 
-    Deepest first, because a shallower cut leaves the face flat only above its own depth.
+    Deepest first, because a shallower cut leaves the face flat only above its own depth;
+    widest first, to match. Either way, what is stable at one level carries over to the next.
     """
-    return [setup.cut.axial_depth_mm, *sorted(set(setup.cut.other_depths_mm), reverse=True)]
+    others = setup.cut.other_depths_mm
+    if setup.cut.vary is Vary.DEPTH:
+        others = setup.cut.other_widths_mm
+    return [fixed_mm(setup), *sorted(set(others), reverse=True)]
 
 
-def at_depth(setup: Setup, depth_mm: float) -> Setup:
-    return dataclasses.replace(setup, cut=dataclasses.replace(setup.cut, axial_depth_mm=depth_mm))
+def at_level(setup: Setup, level_mm: float) -> Setup:
+    """The setup with its depth, or where it steps the depth its width, at `level_mm`."""
+    held = "radial_width_mm" if setup.cut.vary is Vary.DEPTH else "axial_depth_mm"
+    return dataclasses.replace(setup, cut=dataclasses.replace(setup.cut, **{held: level_mm}))
 
 
 @dataclass(frozen=True)
@@ -328,46 +347,53 @@ class StableCut:
     width_mm: float
 
 
+def level_of(setup: Setup, cut: StableCut) -> float:
+    """A cut's size in the dimension the session holds per round: the depth, or its width."""
+    return cut.width_mm if setup.cut.vary is Vary.DEPTH else cut.depth_mm
+
+
+def engagement_of(setup: Setup, cut: StableCut) -> float:
+    """A cut's size in the dimension the session steps."""
+    return cut.depth_mm if setup.cut.vary is Vary.DEPTH else cut.width_mm
+
+
 def best_cuts(setup: Setup, env: Envelope, rounds: list[Round]) -> list[StableCut]:
     """Every stable test cut of the session inside the search now, power cap included, at
-    whatever depth, highest removal rate first."""
-    cut_depths = sorted({r.plan.axial_depth_mm for r in rounds}, reverse=True)
-    made = [
-        StableCut(
-            float(mrr_mm3_min(at_depth(setup, depth), env, o.rpm, o.width_mm)),
-            depth,
-            o.rpm,
-            o.width_mm,
-        )
-        for depth in cut_depths
-        for o in _tests(rounds, _at(depth))
-        if o.verdict is Verdict.STABLE and env.contains(o.rpm, o.width_mm)
-    ]
+    whatever level, highest removal rate first."""
+    made = []
+    for level in sorted({r.plan.fixed_mm for r in rounds}, reverse=True):
+        at = at_level(setup, level)
+        for o in _tests(rounds, _at(level)):
+            if o.verdict is not Verdict.STABLE or not env.contains(o.rpm, o.engagement_mm):
+                continue
+            width, depth = cut_size(at, o.engagement_mm)
+            rate = float(mrr_mm3_min(at, env, o.rpm, o.engagement_mm))
+            made.append(StableCut(rate, depth, o.rpm, width))
     found = [cut for cut in made if cut.mrr_mm3_min <= env.mrr_limit_mm3_min * (1 + 1e-9)]
     return sorted(found, key=lambda cut: -cut.mrr_mm3_min)
 
 
 @dataclass(frozen=True)
 class Stage:
-    """The depth to cut at next and the test cuts wanted there; no tests: nothing is left."""
+    """The level to cut at next and the test cuts wanted there; no tests: nothing is left."""
 
-    depth_mm: float
+    level_mm: float
     planner: PlannerKind
     tests: list
     expected_improvement: float
 
 
 def next_stage(setup: Setup, env: Envelope, rounds: list[Round], found: list[StableCut]) -> Stage:
-    """The first depth, in session order, that still has a cut worth making; `found` is
+    """The first level, in session order, that still has a cut worth making; `found` is
     the session's best cuts, which set the removal rate to beat."""
-    base = setup.cut.axial_depth_mm
+    base = fixed_mm(setup)
     if not rounds:
         return Stage(base, PlannerKind.GRID, grid_tests(setup, env), 0.0)
     target = found[0].mrr_mm3_min if found else 0.0
     stage = Stage(base, PlannerKind.BAYES, [], 0.0)
-    for depth in depths(setup):
-        proposal = bayes.propose(at_depth(setup, depth), env, evidence(rounds, depth, env), target)
-        stage = Stage(depth, PlannerKind.BAYES, proposal.tests, proposal.expected_improvement)
+    for level in levels(setup):
+        proposal = bayes.propose(at_level(setup, level), env, evidence(rounds, level, env), target)
+        stage = Stage(level, PlannerKind.BAYES, proposal.tests, proposal.expected_improvement)
         if stage.tests:
             return stage
     return stage
@@ -417,9 +443,10 @@ def _facing_unknown(r: Round, faced: int) -> str:
 
 
 def face_after(last: Round) -> Face:
-    """Where the stock stands after a round was run: on the lane of the last pass heard, its
-    face and the step an aborted pass left on it, with the top that leg was cut from. With
-    no pass heard, where the round started (after the facing it starts with, if any). Where
+    """Where the stock stands after a round was run: on the lane of the last pass heard, how
+    far from Y0 it was used and the step an aborted pass left on its face, with the top that
+    leg was cut from. With no pass heard, where the round started (after the facing it starts
+    with, if any). A slot stopped part-way leaves no step to clear: its row is used. Where
     the run got to facing the top down mid-round (see facing_asked), what the facing did
     says: done, the new top; cut short, the end of the leg before it on the old top, faced
     in part, to face again before any cut; not run, the last pass heard before it."""
@@ -443,11 +470,11 @@ def face_after(last: Round) -> Face:
         return Face(start.lane, start.face_y_start_mm, 0.0, start.lane_cap_mm, start.top_mm)
     number, place = plan.leg_of(final)
     leg = plan.legs[number]
-    widths = [p.width_mm for p in leg.passes]
-    y = leg.face_y_start_mm + sum(widths[:place])
-    if passes[final].status is PassStatus.ABORTED:
-        return Face(leg.lane, y, widths[place], leg.lane_cap_mm, leg.top_mm)
-    return Face(leg.lane, y + widths[place], 0.0, leg.lane_cap_mm, leg.top_mm)
+    steps = [p.width_mm + leg.wall_mm for p in leg.passes]
+    y = leg.face_y_start_mm + sum(steps[:place])
+    if passes[final].status is PassStatus.ABORTED and plan.milling is Milling.SIDE:
+        return Face(leg.lane, y, steps[place], leg.lane_cap_mm, leg.top_mm)
+    return Face(leg.lane, y + steps[place], 0.0, leg.lane_cap_mm, leg.top_mm)
 
 
 @dataclass(frozen=True)
@@ -725,18 +752,31 @@ def _faced_at_stop(r: Round) -> bool:
     return final is None or final < r.plan.first_index(faced)
 
 
-def _cut_since_top(rounds: list[Round]) -> tuple[float, ...]:
-    """The depths cut into the top as it stands: since the block was mounted or last faced,
-    the depth of every leg a run got to."""
-    cut = []
+def _made_since_top(rounds: list[Round]) -> tuple[Made, ...]:
+    """The passes cut into the top as it stands: since the block was mounted or last faced,
+    every pass a run got to (every pass of a leg none was heard in, or of a round never
+    analysed), with how far from Y0 it reached, how deep it went, and whether it was stopped
+    part-way."""
+    made = []
     for r in reversed(rounds):
         if _faced_at_stop(r):
-            return tuple(cut)
-        for leg in reversed(_reached(r)):
-            cut.append(r.plan.axial_depth_mm)
+            return tuple(made)
+        final = None if r.results is None else _last_heard(r)
+        results = () if r.results is None else r.results.passes
+        stopped = {p.id for p in results if p.status is PassStatus.ABORTED}
+        reached = _reached(r)
+        for number, leg in reversed(list(enumerate(reached))):
+            passes = leg.passes
+            if final is not None and number == len(reached) - 1:
+                passes = passes[: r.plan.leg_of(final)[1] + 1]
+            y = leg.face_y_start_mm
+            for p in passes:
+                y += p.width_mm + leg.wall_mm
+                reach = Reach.PART if p.id in stopped else Reach.END
+                made.append(Made(leg.lane, y, p.depth_mm, r.plan.milling, reach))
             if leg.face_y_start_mm == 0 and leg.lane == 1:
-                return tuple(cut)
-    return tuple(cut)
+                return tuple(made)
+    return tuple(made)
 
 
 def _place(
@@ -745,7 +785,7 @@ def _place(
     env: Envelope,
     rounds: list[Round],
     stock: Stock,
-    depth_mm: float,
+    level_mm: float,
     planner: PlannerKind,
     tests: list,
 ) -> Plan:
@@ -760,14 +800,14 @@ def _place(
     # The lanes are settled by the session's first round: an automatic count must not move
     # with a speed limit changed since.
     lanes = rounds[-1].plan.lanes if rounds else auto_lanes(setup, env)
-    face, cut = FRESH, ()
+    face, made = FRESH, ()
     if rounds and stock is Stock.SAME:
         face = face_after(rounds[-1])
         # A top whose first lane is still whole at Y0 was not cut into.
         if face.y_mm > 0 or face.lane > 1:
-            cut = _cut_since_top(rounds)
-    at = at_depth(setup, depth_mm)
-    plan = assemble(at, env, number, planner, tests, face=face, cut_mm=cut, lanes=lanes)
+            made = _made_since_top(rounds)
+    at = at_level(setup, level_mm)
+    plan = assemble(at, env, number, planner, tests, face=face, made=made, lanes=lanes)
     _write_round(session, source.text, at, plan)
     return plan
 
@@ -783,15 +823,15 @@ def plan_next(session: Path, source: SetupFile, env: Envelope, stock: Stock) -> 
     stage = next_stage(source.setup, env, rounds, best_cuts(source.setup, env, rounds))
     if not stage.tests:
         return Planned(None, stage.expected_improvement)
-    plan = _place(session, source, env, rounds, stock, stage.depth_mm, stage.planner, stage.tests)
+    plan = _place(session, source, env, rounds, stock, stage.level_mm, stage.planner, stage.tests)
     return Planned(plan, stage.expected_improvement)
 
 
 def plan_sweep(session: Path, source: SetupFile, env: Envelope, stock: Stock) -> Plan:
     """Once the map has converged: the best stable cut at rising chip loads, lightest first.
 
-    Its cuts are kept apart from the speed x width map, which stays at the session's chip
-    load. The chip load is not a setup change here: the sweep is the one place it varies.
+    Its cuts are kept apart from the stability map, which stays at the session's chip load.
+    The chip load is not a setup change here: the sweep is the one place it varies.
     """
     rounds = _rounds_to_plan_after(session, source)
     if rounds:
@@ -805,11 +845,13 @@ def plan_sweep(session: Path, source: SetupFile, env: Envelope, stock: Stock) ->
     tests = _sweep_of(source.setup, env, best)
     if not tests:
         raise PlanError("the power cap leaves no chip load to sweep at the best cut")
-    return _place(session, source, env, rounds, stock, best.depth_mm, PlannerKind.SWEEP, tests)
+    level = level_of(source.setup, best)
+    return _place(session, source, env, rounds, stock, level, PlannerKind.SWEEP, tests)
 
 
 def _sweep_of(setup: Setup, env: Envelope, best: StableCut) -> list:
-    return sweep_tests(at_depth(setup, best.depth_mm), env, best.rpm, best.width_mm)
+    at = at_level(setup, level_of(setup, best))
+    return sweep_tests(at, env, best.rpm, engagement_of(setup, best))
 
 
 def to_sweep(
@@ -853,12 +895,11 @@ def sweeps(rounds: list[Round], env: Envelope) -> list[Sweep]:
             continue
         verdicts = {p.id: p.verdict for p in r.results.passes}
         tests = [p for p in r.plan.passes if p.kind is PassKind.TEST]
-        depth = r.plan.axial_depth_mm
         stable, capped = None, False
         for p in tests:
             if verdicts.get(p.id) is not Verdict.STABLE:
                 break
-            if depth * p.width_mm * p.feed_mm_min > env.mrr_limit_mm3_min:
+            if p.depth_mm * p.width_mm * p.feed_mm_min > env.mrr_limit_mm3_min:
                 capped = True
                 break
             stable = p
@@ -870,11 +911,11 @@ def sweeps(rounds: list[Round], env: Envelope) -> list[Sweep]:
                 r.plan.round,
                 first.rpm,
                 first.width_mm,
-                depth,
+                first.depth_mm,
                 r.plan.chip_load_mm,
                 None if stable is None else stable.chip_load_mm,
                 None if stable is None else stable.feed_mm_min,
-                None if stable is None else depth * stable.width_mm * stable.feed_mm_min,
+                None if stable is None else stable.depth_mm * stable.width_mm * stable.feed_mm_min,
                 untopped=stable is not None and stable is tests[-1],
             )
         )
@@ -910,9 +951,11 @@ FREE_AFTER_CUT = frozenset(
         "machine.max_rpm",
         "machine.spindle_power_hp",
         "cut.width_max_mm",
+        "cut.depth_max_mm",
         "cut.speed_min_rpm",
         "cut.speed_max_rpm",
         "cut.other_depths_mm",
+        "cut.other_widths_mm",
         "program.safe_z_mm",
         "program.clearance_mm",
         "program.plunge_feed_mm_min",

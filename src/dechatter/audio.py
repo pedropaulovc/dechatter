@@ -293,9 +293,9 @@ def align(plan: Plan, segments: list[Segment]) -> Alignment:
     """Order-preserving match of detected cuts to planned passes by cut duration.
 
     A pass may be skipped (not run, or too quiet to detect) and a segment may be dropped
-    (a noise that is not a cut, costing 1). Skipping a pass costs more the wider it is: a
-    narrow cut is the one likeliest to go unheard, and at one speed the cuts run narrowest
-    first, so passes of equal length are told apart by which ones are loud enough to hear.
+    (a noise that is not a cut, costing 1). Skipping a pass costs more the heavier it is (its
+    width times its depth): a light cut is the one likeliest to go unheard, so passes of equal
+    length are told apart by which ones are loud enough to hear.
     Passes skipped after the last cut cost a quarter: a run stopped early is likelier than
     one whose passes went unheard.
 
@@ -305,8 +305,12 @@ def align(plan: Plan, segments: list[Segment]) -> Alignment:
     dropped after it, as long as a row of it can be, may be a row (see FACING_ROW_DROP).
     """
     passes = plan.passes
-    widest = max(p.width_mm for p in passes)
-    skip = [0.3 + 0.7 * p.width_mm / widest if p.kind is PassKind.TEST else 0.3 for p in passes]
+    loads = [p.width_mm * p.depth_mm for p in passes]
+    heaviest = max(loads)
+    skip = [
+        0.3 + 0.7 * load / heaviest if p.kind is PassKind.TEST else 0.3
+        for p, load in zip(passes, loads, strict=True)
+    ]
     steps = _steps(plan)
     n, m = len(steps), len(segments)
     # Step counts from which on the facing partway is behind: its rows may come next. (One

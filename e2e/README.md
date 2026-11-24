@@ -20,4 +20,8 @@ To drive the widget:
 2. Open `http://localhost:8000/` in a Playwright-driven Chrome with `fake_mic.js` added as an init script. It swaps the widget's microphone for a stream the test can play a WAV into. Enable the Custom widget with URL `/dechatter/` and open the simulator port.
 3. Per round: plan, press Export, run `uv run python e2e/round_audio.py <export.zip> <dir>/e2e/round.wav` to get the sound of the simulated machine (`tests/synth.py`) cutting that plan, press Start in the widget, and call `window.fakeMicPlay('/dechatter/e2e/round.wav')` in the widget's frame.
 
+A session that steps the depth (slots, or side milling at a set width) hears `synth.DEPTH_MACHINE`, whose chatter limit also falls with depth: a 12.7 mm slot chatters from about 0.25 mm deep, 0.5 mm at its sweet spots. `round_audio.py` picks it from the plan.
+
 Round 1 takes about five minutes. Without the init script the widget records the PC's real microphone, which is enough to check capture but hears no cuts.
+
+On a desktop with no audio output device (a remote session, for one) Chrome's audio clock stands still: the widget's level reads "no signal" and its recording stays at 0 s. Launch Chrome with `--disable-audio-output`, which gives it a clock without a device.

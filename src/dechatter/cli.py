@@ -11,11 +11,11 @@ import numpy as np
 
 from . import audio, bayes, materials, report, session
 from .audio import AudioError
-from .config import TEMPLATE, ConfigError, Setup, load_setup, read_setup
+from .config import TEMPLATE, ConfigError, Setup, Vary, load_setup, read_setup
 from .detect import Thresholds, Verdict
 from .export import ExportError, export
 from .gcode import Units
-from .plan import Envelope, PassKind, Plan, PlanError, envelope, lane_x_mm
+from .plan import Envelope, Milling, Order, PassKind, Plan, PlanError, envelope, lane_x_mm
 from .session import PassStatus, SessionError, Stock
 
 TOP_RESULTS = 5
@@ -43,14 +43,20 @@ def cmd_materials(_: argparse.Namespace) -> int:
     return 0
 
 
+def _stepped(vary: Vary) -> str:
+    """The name of the dimension a session steps."""
+    return "depth" if vary is Vary.DEPTH else "width"
+
+
 def _print_known(setup: Setup, env: Envelope, rounds: list[session.Round]) -> None:
-    """The stability map of each depth that was cut, then the best cuts of them all."""
-    for depth in sorted({r.plan.axial_depth_mm for r in rounds}, reverse=True):
+    """The stability map of each depth (or width) that was cut, then the best cuts of them all."""
+    held = "width" if setup.cut.vary is Vary.DEPTH else "depth"
+    for level in sorted({r.plan.fixed_mm for r in rounds}, reverse=True):
         stability = bayes.build_map(
-            session.at_depth(setup, depth), env, session.evidence(rounds, depth, env)
+            session.at_level(setup, level), env, session.evidence(rounds, level, env)
         )
-        print(f"depth {depth:g} mm:")
-        _print_map(stability, session.observations(rounds, depth, env))
+        print(f"{held} {level:g} mm:")
+        _print_map(stability, session.observations(rounds, level, env), setup.cut.vary)
     ranked = session.best_cuts(setup, env, rounds)
     if not ranked:
         print("no stable cut measured yet")
@@ -80,11 +86,13 @@ def _print_sweep(sweep: session.Sweep) -> None:
     )
 
 
-def _print_map(stability: bayes.StabilityMap, observations: list[bayes.Observation]) -> None:
+def _print_map(
+    stability: bayes.StabilityMap, observations: list[bayes.Observation], vary: Vary
+) -> None:
     """Probability of stability in tenths (9 = at least 90%); S/U mark measured cuts."""
     p = stability.p_stable()
     columns = np.unique(np.linspace(0, len(stability.speeds) - 1, MAP_COLUMNS).round().astype(int))
-    rows = np.unique(np.linspace(0, len(stability.widths) - 1, MAP_ROWS).round().astype(int))
+    rows = np.unique(np.linspace(0, len(stability.engagements) - 1, MAP_ROWS).round().astype(int))
     cells = {
         (r, c): str(min(int(p[columns[c], rows[r]] * 10), 9))
         for r in range(len(rows))
@@ -92,23 +100,28 @@ def _print_map(stability: bayes.StabilityMap, observations: list[bayes.Observati
     }
     for obs in observations:
         c = int(np.argmin(np.abs(stability.speeds[columns] - obs.rpm)))
-        r = int(np.argmin(np.abs(stability.widths[rows] - obs.width_mm)))
+        r = int(np.argmin(np.abs(stability.engagements[rows] - obs.engagement_mm)))
         unstable = obs.verdict is Verdict.UNSTABLE
         if unstable or cells[(r, c)] != "U":
             cells[(r, c)] = "U" if unstable else "S"
-    print("stability map (width mm down, rpm across):")
+    print(f"stability map ({_stepped(vary)} mm down, rpm across):")
     for r in reversed(range(len(rows))):
         line = "    ".join(cells[(r, c)] for c in range(len(columns)))
-        print(f"  {stability.widths[rows[r]]:5.2f} | {line}")
+        print(f"  {stability.engagements[rows[r]]:5.2f} | {line}")
     print("        | " + " ".join(f"{stability.speeds[c]:<4.0f}" for c in columns))
 
 
 def _print_round(session_dir: Path, plan: Plan) -> None:
     tests = [p for p in plan.passes if p.kind is PassKind.TEST]
+    slots = plan.milling is Milling.SLOT
+    held = f"{plan.fixed_mm:g} mm deep"
+    if plan.vary is Vary.DEPTH:
+        held = f"{plan.fixed_mm:g} mm wide ({'full-width slots' if slots else 'side milling'})"
     print(
-        f"round {plan.round}, {plan.axial_depth_mm:g} mm deep: {len(tests)} test cuts, "
-        f"about {plan.run_time_s / 60:.0f} min"
+        f"round {plan.round}, {held}: {len(tests)} test cuts, about {plan.run_time_s / 60:.0f} min"
     )
+    if plan.order is Order.DEEPEST_FIRST:
+        print("  the deepest cuts come first: the stock behind a shallower cut is not clear")
     setup = load_setup(session.round_dir(session_dir, plan.round) / session.SETUP_FILE)
     for number, leg in enumerate(plan.legs):
         if leg.reface_mm > 0 and number == 0:
@@ -121,12 +134,18 @@ def _print_round(session_dir: Path, plan: Plan) -> None:
                 f"  then faces the top down {leg.reface_mm:g} mm, to Z{-leg.top_mm:g} (keep the "
                 "zero; pause the recording at the M0 before it, resume it at the M0 after it)"
             )
-        where = "front face" if plan.lanes == 1 else f"lane {leg.lane} of {plan.lanes}"
+        where = (
+            ("the top" if slots else "front face")
+            if plan.lanes == 1
+            else f"lane {leg.lane} of {plan.lanes}"
+        )
         if plan.lanes > 1:
             first, last = lane_x_mm(setup, leg.lane, plan.lanes)
             where += f", X{first:g} to X{last:g}"
         fresh = leg.face_y_start_mm == 0 and (leg.lane > 1 or leg.top_mm > 0)
-        fresh = " (a fresh face: keep the same zero)" if fresh else ""
+        fresh = " (a fresh face: keep the same zero)" if fresh and not slots else ""
+        if slots:
+            where += ", slots"
         print(
             f"  {where}: Y{leg.face_y_start_mm:g} to Y{leg.face_y_end_mm:.2f}, passes "
             f"{leg.passes[0].id}-{leg.passes[-1].id}{fresh}"
@@ -134,10 +153,8 @@ def _print_round(session_dir: Path, plan: Plan) -> None:
     for p in tests:
         chance = "" if p.p_stable is None else f"  P(stable) {p.p_stable:.2f}"
         chip = "" if p.chip_load_mm is None else f"  {p.chip_load_mm:g} mm/tooth"
-        print(
-            f"  pass {p.id:2d}: S{p.rpm} width {p.width_mm:.2f} mm F{p.feed_mm_min:.0f}"
-            f"{chance}{chip}"
-        )
+        size = f"{_stepped(plan.vary)} {plan.engagement_mm(p):.2f} mm"
+        print(f"  pass {p.id:2d}: S{p.rpm} {size} F{p.feed_mm_min:.0f}{chance}{chip}")
     print(f"wrote {session.round_dir(session_dir, plan.round) / session.PROGRAM_FILE}")
     print(f"run it while recording, then: dechatter analyze {session_dir} <recording>")
     if plan.mid_facing is not None:
@@ -196,15 +213,17 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
     print(f"round {number}: {args.recording.name}")
 
-    print(" pass kind       rpm  width  status    verdict   peak Hz  prom  vs air")
+    sizes = {p.id: target.plan.engagement_mm(p) for p in target.plan.passes}
+    column = _stepped(target.plan.vary)
+    print(f" pass kind       rpm  {column}  status    verdict   peak Hz  prom  vs air")
     for p in results.passes:
         if p.status in session.UNHEARD or p.chatter_hz is None:
-            print(f"  {p.id:3d} {p.kind:<8} {p.rpm:5d} {p.width_mm:6.2f}  {p.status}")
+            print(f"  {p.id:3d} {p.kind:<8} {p.rpm:5d} {sizes[p.id]:6.2f}  {p.status}")
             continue
         air = "     -" if p.excess_db is None else f"{p.excess_db:6.1f}"
         edge = session.spindle_fit(p) is session.SpindleFit.EDGE
         print(
-            f"  {p.id:3d} {p.kind:<8} {p.rpm:5d} {p.width_mm:6.2f}  {p.status:<9} "
+            f"  {p.id:3d} {p.kind:<8} {p.rpm:5d} {sizes[p.id]:6.2f}  {p.status:<9} "
             f"{p.verdict or '-':<8} "
             f"{p.chatter_hz:8.1f} {p.prominence_db:5.1f} {air}"
             f"{'  spindle speed at the edge: check this pass' if edge else ''}"
@@ -274,8 +293,8 @@ def cmd_report(args: argparse.Namespace) -> int:
     env = envelope(setup)
     rounds = session.load_rounds(args.session)
     print(
-        f"envelope: {env.speed_min_rpm}..{env.speed_max_rpm} rpm, width up to "
-        f"{env.width_max_mm:.2f} mm, {env.chip_load_mm} mm/tooth, "
+        f"envelope: {env.speed_min_rpm}..{env.speed_max_rpm} rpm, {_stepped(setup.cut.vary)} up to "
+        f"{env.engagement_max_mm:.2f} mm, {env.chip_load_mm} mm/tooth, "
         f"power cap {env.mrr_limit_mm3_min / 1000:.1f} cm3/min"
     )
     _print_known(setup, env, rounds)

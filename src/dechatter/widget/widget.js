@@ -5,7 +5,7 @@
 import { Mic } from './mic.js';
 import { PHASE, Stepper } from './stepper.js';
 import { chipLoad, feed, length, rate } from './units.js';
-import { STEPS, draw, placehold, read, reveal } from './wizard.js';
+import { STEPS, applicable, draw, placehold, read, reveal } from './wizard.js';
 
 const params = new URLSearchParams(location.search);
 const token = params.get('token') ?? '';
@@ -195,7 +195,7 @@ async function preview(wizard) {
   const asked = wizard.asked;
   let computed = null;
   try {
-    computed = await engine('setup_preview', JSON.stringify(wizard.values));
+    computed = await engine('setup_preview', JSON.stringify(applicable(wizard.values)));
   } catch {
     computed = null;
   }
@@ -250,7 +250,7 @@ async function nextStep() {
     return;
   }
   const wizard = editing;
-  await act('save_setup', JSON.stringify(wizard.values));
+  await act('save_setup', JSON.stringify(applicable(wizard.values)));
   if (editing !== wizard) {
     return; // cancelled, or another session opened, while the save was in flight
   }
@@ -757,9 +757,16 @@ function renderSessions() {
 }
 
 // The session's tool and cut in one line, lengths in the machine's units.
-function summary({ summary: s, spindle }) {
-  const depths = s.depths_mm.map((depth) => length(depth, units())).join(', ');
-  return `Ø ${length(s.diameter_mm, units())}, ${s.flutes} flutes, ${s.material}, depth ${depths}, ${chipLoad(s.chip_load_mm, units())} per tooth${spindle === 'manual' ? ', manual spindle' : ''}`;
+function summary({ summary: s, spindle, vary }) {
+  const levels = s.levels_mm.map((level) => length(level, units())).join(', ');
+  const cut = vary === 'depth' ? `width ${levels}, depth stepped` : `depth ${levels}`;
+  return `Ø ${length(s.diameter_mm, units())}, ${s.flutes} flutes, ${s.material}, ${cut}, ${chipLoad(s.chip_load_mm, units())} per tooth${spindle === 'manual' ? ', manual spindle' : ''}`;
+}
+
+// A round's level, as the dimension its cuts share: "5 mm deep", or where the session steps
+// the depth, "12.7 mm wide".
+function held(level, options) {
+  return `${length(level, units(), options)} ${state.vary === 'depth' ? 'wide' : 'deep'}`;
 }
 
 function minutes(seconds) {
@@ -938,15 +945,17 @@ function renderStep() {
   if (state.next === 'plan') {
     const first = state.rounds.length === 0;
     const stock = stockSelect();
-    const shallower = !first && state.next_depth_mm !== state.depth_mm;
-    const label = `Plan round ${state.rounds.length + 1}${shallower ? ` at ${length(state.next_depth_mm, units())} depth` : ''}`;
+    const deep = state.vary === 'depth';
+    const moved = !first && state.next_level_mm !== state.level_mm;
+    const label = `Plan round ${state.rounds.length + 1}${moved ? ` at ${length(state.next_level_mm, units())} ${deep ? 'width' : 'depth'}` : ''}`;
     const plan = button(label, async () => {
       await act('plan', first ? 'same' : stockChoice);
       stockChoice = 'same';
     }, { className: 'primary' });
-    const next = shallower
-      ? `${length(state.depth_mm, units(), { mmToo: true })} depth is settled. Next come cuts ${length(state.next_depth_mm, units(), { mmToo: true })} deep, starting from the widths that were stable.`
-      : 'Plan the next cuts from what was measured.';
+    const settled = deep
+      ? `${length(state.level_mm, units(), { mmToo: true })} width is settled. Next come cuts ${held(state.next_level_mm, { mmToo: true })}, starting from the depths that were stable.`
+      : `${length(state.level_mm, units(), { mmToo: true })} depth is settled. Next come cuts ${held(state.next_level_mm, { mmToo: true })}, starting from the widths that were stable.`;
+    const next = moved ? settled : 'Plan the next cuts from what was measured.';
     step.append(el('p', {}, first ? 'Plan a coarse grid of test cuts.' : next));
     step.append(el('p', {}, plan, ...(first ? [] : [' on the ', stock])));
     return;
@@ -968,7 +977,7 @@ function renderStep() {
   const [first, ...later] = round.legs;
   const midFacings = later.filter((leg) => leg.reface_mm > 0);
   step.append(
-    el('p', {}, `Round ${round.round}: ${tests} test cuts ${length(round.depth_mm, units(), { mmToo: true })} deep, about ${minutes(round.run_time_s)} plus rapids. ${legsText(round)}`),
+    el('p', {}, `Round ${round.round}: ${tests} test cuts ${held(round.level_mm, { mmToo: true })}${round.milling === 'slot' ? ', each a full-width slot' : ''}, about ${minutes(round.run_time_s)} plus rapids. ${legsText(round)}`),
     el('ol', {},
       el('li', {}, first.reface_mm > 0
         ? `First the program faces the top down ${length(first.reface_mm, units(), { mmToo: true })}, to Z ${length(-first.top_mm, units(), { mmToo: true })}, and starts again at the first lane. Keep the zero the block was first cut with (X at the left end, Y on the front face as first mounted, Z on the top as first mounted). The facing is not analysed.`
@@ -976,7 +985,8 @@ function renderStep() {
           ? 'Keep the zero the block was first cut with (X at the left end of the stock, Y on its front face as first mounted, Z on its top as first mounted).'
           : 'Zero X at the left end of the stock, Y on its front face, Z on top.'),
       el('li', {}, start, ' runs the round from here, one move at a time, and records it. Keep this tab open.', ...(unknownUnits ? [' cncjs has not reported G20 or G21 yet; the machine is in ', declare] : [])),
-      ...midFacings.map((leg) => el('li', {}, `Before pass ${leg.first_pass}, as ${round.lanes > 1 ? 'the lanes left have' : 'the face has'} no room for the next cut, the program faces the top down ${length(leg.reface_mm, units(), { mmToo: true })}, to Z ${length(-leg.top_mm, units(), { mmToo: true })}, and goes on at the first lane with the same zero${state.spindle === 'manual' ? '' : ', without stopping'}. The recording runs on; the facing is not analysed.`)),
+      ...midFacings.map((leg) => el('li', {}, `Before pass ${leg.first_pass}, as ${round.lanes > 1 ? 'the lanes left have' : round.milling === 'slot' ? 'the top has' : 'the face has'} no room for the next cut, the program faces the top down ${length(leg.reface_mm, units(), { mmToo: true })}, to Z ${length(-leg.top_mm, units(), { mmToo: true })}, and goes on at the first lane with the same zero${state.spindle === 'manual' ? '' : ', without stopping'}. The recording runs on; the facing is not analysed.`)),
+      ...(round.order === 'deepest-first' ? [el('li', {}, 'The deepest cuts come first: stock is only clear down to the shallowest cut made in front of it. The first pass is the heaviest, so be ready to stop it.')] : []),
       ...(state.spindle === 'manual' ? [el('li', {}, `Before each of its ${speedChanges(round)} spindle speeds the round stops; set the speed shown here and press Continue.`)] : []),
     ),
   );
@@ -990,11 +1000,12 @@ function renderStep() {
 
 // Where on the stock a leg of a round cuts: its lane, when the stock is in lanes.
 function legPlace(round, leg) {
+  const slots = round.milling === 'slot' ? 'slots in ' : '';
   if (round.lanes === 1) {
-    return 'the front face';
+    return slots ? `${slots}the top` : 'the front face';
   }
   const [x0, x1] = leg.lane_x_mm;
-  return `lane ${leg.lane} of ${round.lanes} (X ${length(x0, units())} to ${length(x1, units())})`;
+  return `${slots}lane ${leg.lane} of ${round.lanes} (X ${length(x0, units())} to ${length(x1, units())})`;
 }
 
 // Where along the stock a round cuts, leg by leg, and where it faces the top down.
@@ -1061,7 +1072,9 @@ function renderRound() {
   const lanes = round.legs.map((leg) => leg.lane);
   const where = round.lanes > 1 ? `, ${lanes.length > 1 ? 'lanes' : 'lane'} ${lanes.join(', ')} of ${round.lanes}` : '';
   const faced = round.legs.slice(1).some((leg) => leg.reface_mm > 0) ? ', top faced midway' : '';
-  $('round-title').textContent = `Round ${round.round}${kind}${round.analysed ? ' results' : ''}, ${length(round.depth_mm, units(), { mmToo: true })} deep${where}${faced}`;
+  $('round-title').textContent = `Round ${round.round}${kind}${round.analysed ? ' results' : ''}, ${held(round.level_mm, { mmToo: true })}${where}${faced}`;
+  const deep = state.vary === 'depth';
+  $('passes-size').textContent = deep ? 'depth' : 'width';
   const starts = new Map(round.legs.length > 1 ? round.legs.map((leg) => [leg.first_pass, leg]) : []);
   $('passes').replaceChildren(
     ...round.passes.flatMap((p) => [
@@ -1069,7 +1082,7 @@ function renderRound() {
       el('tr', { className: p.kind === 'test' ? '' : 'prep' },
         el('td', {}, String(p.id)),
         el('td', {}, String(p.rpm)),
-        el('td', {}, length(p.width_mm, units())),
+        el('td', {}, length(deep ? p.depth_mm : p.width_mm, units())),
         el('td', {}, feed(p.feed_mm_min, units())),
         el('td', {}, p.p_stable === null ? '' : p.p_stable.toFixed(2)),
         verdictCell(round, p),
@@ -1079,13 +1092,16 @@ function renderRound() {
 }
 
 function renderMap() {
-  // A depth that has no cuts of its own yet still has a map: what deeper cuts showed stable.
+  // A level that has no cuts of its own yet still has a map: what deeper (or wider) cuts
+  // showed stable. Its rows are the dimension the session steps.
   $('map-section').hidden = editing !== null || !state || !state.rounds.some((r) => r.analysed);
   if ($('map-section').hidden) {
     return;
   }
-  $('map-title').textContent = `Stability map at ${length(state.depth_mm, units(), { mmToo: true })} depth`;
-  const { speeds, widths, p } = state.map;
+  $('map-title').textContent = state.vary === 'depth'
+    ? `Stability map at ${length(state.level_mm, units(), { mmToo: true })} width: depth against speed`
+    : `Stability map at ${length(state.level_mm, units(), { mmToo: true })} depth`;
+  const { speeds, engagements, p } = state.map;
   const canvas = $('map');
   const ctx = canvas.getContext('2d');
   const pad = { left: units() === 'in' ? 56 : 40, bottom: 16, top: 4, right: 4 };
@@ -1094,20 +1110,20 @@ function renderMap() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
   const cellW = w / speeds.length;
-  const cellH = h / widths.length;
+  const cellH = h / engagements.length;
   speeds.forEach((_, s) => {
-    widths.forEach((_, i) => {
+    engagements.forEach((_, i) => {
       ctx.fillStyle = `hsl(${Math.round(120 * p[s][i])} 65% 60%)`;
       ctx.fillRect(pad.left + s * cellW, pad.top + h - (i + 1) * cellH, cellW + 0.5, cellH + 0.5);
     });
   });
 
   const x = (rpm) => pad.left + ((rpm - speeds[0]) / (speeds.at(-1) - speeds[0])) * (w - cellW) + cellW / 2;
-  const y = (width) => pad.top + h - ((width - widths[0]) / (widths.at(-1) - widths[0])) * (h - cellH) - cellH / 2;
+  const y = (size) => pad.top + h - ((size - engagements[0]) / (engagements.at(-1) - engagements[0])) * (h - cellH) - cellH / 2;
   ctx.lineWidth = 1.5;
   ctx.strokeStyle = '#000';
   for (const o of state.observations) {
-    const [cx, cy] = [x(o.rpm), y(o.width_mm)];
+    const [cx, cy] = [x(o.rpm), y(o.engagement_mm)];
     ctx.beginPath();
     if (o.verdict === 'stable') {
       ctx.fillStyle = '#fff';
@@ -1129,9 +1145,9 @@ function renderMap() {
   ctx.fillText(`${speeds[0]} rpm`, pad.left, pad.top + h + 3);
   ctx.textAlign = 'right';
   ctx.fillText(String(speeds.at(-1)), pad.left + w, pad.top + h + 3);
-  ctx.fillText(length(widths.at(-1), units()).split(' ')[0], pad.left - 3, pad.top);
+  ctx.fillText(length(engagements.at(-1), units()).split(' ')[0], pad.left - 3, pad.top);
   ctx.textBaseline = 'bottom';
-  ctx.fillText(length(widths[0], units()), pad.left - 3, pad.top + h);
+  ctx.fillText(length(engagements[0], units()), pad.left - 3, pad.top + h);
 }
 
 function renderBest() {

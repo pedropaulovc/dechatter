@@ -3,7 +3,7 @@
 dechatter finds the fastest chatter-free cut for one tool on one milling machine. It writes a
 G-code program of test cuts, listens while the machine runs it, and decides from the sound
 which cuts chattered. From that it either plans a finer round of cuts or reports the best
-stable speeds and widths.
+stable speeds, widths and depths.
 
 It runs as a widget inside [cncjs](https://cnc.js.org), entirely in the browser and recording
 with that computer's microphone, or from the command line with a recording made on a phone.
@@ -18,9 +18,12 @@ Machine weight, spindle power and material cannot predict it. They only bound th
 the speed range, the power cap and the starting chip load. The cuts are the measurement, and
 a result applies to that one tool assembly. Change the stickout and you start a new session.
 
-Each round holds chip load and axial depth constant and varies spindle speed and radial width,
-one pass per combination, cutting along the front face of a block held in the vise. Feed
-follows speed so the chip load stays put.
+Each round holds the chip load and one dimension of the cut constant and varies the spindle
+speed and the other, one pass per combination. By default it holds the axial depth and steps
+the radial width, cutting along the front face of a block held in the vise. It can hold the
+radial width and step the axial depth instead, which is how a full-width slot is measured (see
+[Stepping the depth](#stepping-the-depth-slots-and-set-widths)). Feed follows speed so the
+chip load stays put.
 
 ### Comparing depths
 
@@ -34,8 +37,75 @@ one found keeps a fair chance of being stable. The results list the best cuts of
 together.
 
 The depths run deepest first because a shallower cut leaves the face flat only above its own
-depth. A deeper cut is never planned on such a block's cut lanes: it needs fresh stock, or
-the top faced down (see [Facing the top down](#facing-the-top-down)).
+depth. A deeper cut is never planned on such a face. It needs a fresh lane where the lane
+before it was cut at least as deep, fresh stock, or the top faced down (see
+[Facing the top down](#facing-the-top-down)).
+
+### Stepping the depth: slots and set widths
+
+Some cuts have their width fixed. A full-width slot is as wide as the cutter, and the open
+question is how deep it can go. Choose "the axial depth, at a set width" in the wizard's Cut
+step (`vary = "depth"` in `[cut]`), give the width (`radial_width_mm`) and the deepest cut
+to try (`depth_max_mm`), and the session holds that width and steps the spindle speed and
+the depth. The choice is part of what a session measures, so it cannot change once a round
+was cut. The map, the results and the report then show depth against speed. Removal rate is
+still width × depth × feed, the power cap applies as before, and the chip load is the
+session's at every width: dechatter does not thin the chip for the width. Round 1 cuts each
+speed at `round1_depth_fractions` of the deepest cut (20%, 40% and 60%), and the search moves
+in steps of `depth_step_mm`, both in `[planner]`. Left out, the step is a round number that
+gives at least 50 depths up to the deepest (0.01 mm for 0.75 mm, 0.1 mm for 6 mm): the
+planner only steps up where the next depth is likely stable given the one below, and with
+few, coarse steps the deepest ones would each be too big a step to take. No depth searched
+is deeper than `depth_max_mm`, which a step that does not divide it stops short of. Given
+`height_mm`, it must leave the clearance (`clearance_mm`) below `depth_max_mm`, and on a top
+that was faced down no cut is planned whose bottom would come within that clearance of it:
+such a cut waits for fresh stock.
+
+A width equal to the cutter diameter cuts **slots into the top**. Each slot runs along X
+from the air beyond the end of the stock, where the cutter plunges and the spindle is heard
+before the cut, and has a row along Y to itself. `slot_wall_mm` of stock (in `[program]`, the
+wizard's Wall beside each slot, a quarter of the cutter diameter by default) stands before
+the first slot, between slots and behind the last, so every slot is cut from solid stock at
+the cutter's full width. The rows go across the stock's thickness (`thickness_mm`, or
+`width_mm` without it), which must hold at least one slot and its two walls. No face is
+trued. With lanes, a slot in a later lane starts inside the earlier lane's slot in its row,
+so it may be no deeper than that one, and that one must have run its lane's length: a slot
+stopped part-way leaves its row closed to the lanes after it. The wall sets the rows, so it
+cannot change once a round was cut. Once the rows are used in every lane, the top is faced
+down below the deepest slot (given `height_mm`), or fresh stock is asked for, as in side
+milling.
+
+A narrower width **mills the front face**, as a session that steps the width does: every
+test cut takes the set width at a depth of its own, and each face is trued as deep as its
+deepest test.
+
+Stock is clear only as deep as it was cut: a face only above the shallowest cut made on it,
+and a lane only as deep as the lane before it was cut that far back, since the cutter comes
+in through that lane. A shallower cut can follow a deeper one there, never the reverse. So a
+round that steps the depth runs **deepest first**, on each face and from lane to lane. Cuts
+no deeper than the face the round starts on come first, to use it up; deeper ones go to the
+next lane where it is clear for them, else to a faced top or fresh stock. This costs the
+ramp. In a session that steps the width, every cut is a small step up from a lighter one
+that ran before it, and you can stop when chatter turns violent with the heaviest cuts still
+ahead. Deepest first, the round's heaviest cut is its first, made on the planner's odds
+alone (at least 50% likely stable on what was measured; nothing was measured before round
+1), and the cuts after it are lighter. Be ready to feed-hold from the first pass, and start
+with a modest `depth_max_mm` or cautious `round1_depth_fractions`. With a manual spindle
+the speeds no longer come grouped: the round stops wherever the speed changes. The other
+way to keep the ramp, facing the top before every deeper cut, would spend most of a round
+facing. Only slots in a single lane (`lanes = 1`) keep it, since each is cut into stock of
+its own: they run shallowest first, and a deeper slot can follow in the next row of the
+same top. When a deepest-first round has more cuts than the stock it can reach, the
+heaviest ones wait for the next round, as they do at the end of a ramp.
+
+`other_widths_mm` (the wizard's Narrower widths to compare) is to widths what
+`other_depths_mm` is to depths. Once the widest width is settled the session goes on with
+the narrower ones, widest first. A depth that was stable in a wider cut is taken as stable
+in a narrower one at that speed, so each width starts from those depths and only looks for
+how much deeper it can go. A width is left once no cut within the power cap that would beat
+the best one found keeps a fair chance of being stable, and the results rank the best cuts
+of all widths together. Going from slots to a narrower width, the front face would be milled
+under a top that holds slots: the top is faced down first, or fresh stock asked for.
 
 ## Use in cncjs
 
@@ -179,16 +249,21 @@ dechatter report al-10mm --html al-10mm.html --units in   # printable report
 Repeat until `plan` reports convergence. WAV, FLAC, OGG and MP3 load directly. Phone formats
 such as M4A need `ffmpeg` on the path.
 
-Round 1 is a coarse grid of speeds and widths. Later rounds are chosen from what was measured.
-Every program orders its passes from the narrowest cut to the widest, starts with a light
-truing pass, and tells you where the front face will end up.
+Round 1 is a coarse grid of speeds and widths (or depths, in a session that steps the
+depth). Later rounds are chosen from what was measured. A program that steps the width
+orders its passes from the narrowest cut to the widest; one that steps the depth runs
+deepest first, except slots in a single lane. A program that mills the front face starts
+each face with a light truing pass, and every program tells you where the face will end up.
 
 ## Safety
 
 The program looks for chatter on purpose, so later passes are heavier than earlier ones and
-some of them will chatter. Feed-hold and abort when a cut gets violent. Analyze the recording
-anyway: the passes that ran still count, the aborted one is marked as such, and the next
-round starts by clearing the step it left on the face.
+some of them will chatter. A round that steps the depth on a face or across lanes runs the
+other way, deepest first: its first pass is its heaviest (see
+[Stepping the depth](#stepping-the-depth-slots-and-set-widths)). Feed-hold and abort when a
+cut gets violent. Analyze the recording anyway: the passes that ran still count, the aborted
+one is marked as such, and the next round starts by clearing the step it left on the face
+(an aborted slot just leaves its row used).
 
 Every planned cut stays under a power cap (60% of rated spindle power by default) and inside
 the material's surface-speed limit. The built-in cutting data (`dechatter materials`) is a
@@ -273,7 +348,9 @@ through closed-loop control and Bayesian machine learning"
 stability over the speed and width grid, starting from "wider is less likely to be stable".
 A stable cut raises the probability of everything narrower near that speed, and an unstable
 cut lowers everything wider. The next cuts are the ones with the highest expected improvement
-in removal rate, and the session has converged when no cut promises 5% more.
+in removal rate, and the session has converged when no cut promises 5% more. In a session
+that steps the depth the grid is speed and depth, and everything said here of wider and
+narrower holds for deeper and shallower.
 
 Three things differ from the paper, which tests one cut at a time under closed-loop control:
 
@@ -310,9 +387,10 @@ truing pass. Each pass cuts one lane: it starts a cutter diameter clear of the l
 which is already cut back, and stops just short of the next lane, still untouched, then
 backs off the face (the last lane runs out past the end of the stock as usual). A lane is
 never cut further back than the one before it, since the cutter crosses that one on its
-way in, and each lane must be at least twice the cutter diameter long. A deeper depth
-still needs fresh stock (or the top faced down), since the cutter would cross the earlier
-lanes below where they were cut. The number of lanes cannot change once a round was cut.
+way in, and each lane must be at least twice the cutter diameter long. For the same reason
+a cut in a later lane goes no deeper than the lane before it was cut that far back from
+Y0; one deeper than that needs fresh stock (or the top faced down). The number of lanes
+cannot change once a round was cut.
 The program says in a comment where it changes lane; `dechatter plan`, the widget's round
 and the report list the lanes a round cuts and the pass each starts at. The next round
 starts where the last pass heard left the stock, in whichever lane that was.

@@ -18,6 +18,7 @@ from dechatter.detect import Thresholds, Verdict
 from dechatter.plan import (
     REFACE_EXTRA_MM,
     Face,
+    Made,
     PassKind,
     Plan,
     PlannerKind,
@@ -142,7 +143,7 @@ def test_windows_the_widget_recorded_say_where_each_cut_is(setup):
     results = session.analyze(plan, recording, synth.RATE, "r.wav", Thresholds(), timeline=timeline)
     for p, result in zip(plan.passes, results.passes, strict=True):
         assert result.status is PassStatus.ANALYSED
-        truth = synth.DEFAULT_MACHINE.chatters(p.rpm, p.width_mm, plan.flutes, plan.axial_depth_mm)
+        truth = synth.DEFAULT_MACHINE.chatters(p.rpm, p.width_mm, plan.flutes, p.depth_mm)
         assert (result.verdict is Verdict.UNSTABLE) == truth, p.id
 
     # The run stopped in pass 5: a cut cut short, a held cut analysed over its longest
@@ -460,7 +461,7 @@ def test_a_recording_that_ends_before_the_last_pass_still_moves_the_face(ending,
 def assert_heard_right(plan: Plan, results, contact: list[tuple[float, float]] | None = None):
     for index, (p, result) in enumerate(zip(plan.passes, results.passes, strict=True)):
         assert result.status is PassStatus.ANALYSED, p.id
-        truth = synth.DEFAULT_MACHINE.chatters(p.rpm, p.width_mm, plan.flutes, plan.axial_depth_mm)
+        truth = synth.DEFAULT_MACHINE.chatters(p.rpm, p.width_mm, plan.flutes, p.depth_mm)
         assert (result.verdict is Verdict.UNSTABLE) == truth, p.id
         if contact is not None:
             assert result.start_s == pytest.approx(contact[index][0], abs=0.01), p.id
@@ -564,7 +565,8 @@ def rows_setup(write_setup, lanes: int):
     env = envelope(setup)
     depth = setup.cut.axial_depth_mm
     tests = grid_tests(setup, env)
-    plan = assemble(setup, env, 2, PlannerKind.GRID, tests, face=Face(y_mm=1.0), cut_mm=(depth,))
+    made = (Made(1, 1.0, depth),)
+    plan = assemble(setup, env, 2, PlannerKind.GRID, tests, face=Face(y_mm=1.0), made=made)
     faced = plan.mid_facing
     leg = plan.legs[faced]
     feed = feed_mm_min(setup, env, leg.passes[0].rpm)
@@ -601,7 +603,8 @@ def test_a_facing_stopped_after_a_few_rows_is_never_taken_for_cuts(write_setup, 
     env = envelope(setup)
     depth = setup.cut.axial_depth_mm
     tests = grid_tests(setup, env)
-    nxt = assemble(setup, env, 3, PlannerKind.GRID, tests, face=face, cut_mm=(depth,))
+    made = (Made(face.lane, face.y_mm, depth),)
+    nxt = assemble(setup, env, 3, PlannerKind.GRID, tests, face=face, made=made)
     first = nxt.legs[0]
     assert (first.lane, first.face_y_start_mm, first.top_mm) == (1, 0.0, first.reface_mm)
     assert first.reface_mm == pytest.approx(depth + REFACE_EXTRA_MM)
@@ -636,7 +639,9 @@ def test_a_facing_set_by_hand_drops_what_was_heard_after_it(write_setup, tmp_pat
     observed = session._tests([r], lambda depth: True)
     heard_before = [p for p in r.results.passes[:start] if p.kind is PassKind.TEST and p.verdict]
     assert len(observed) == len(heard_before) > 0
-    assert [(o.rpm, o.width_mm) for o in observed] == [(p.rpm, p.width_mm) for p in heard_before]
+    assert [(o.rpm, o.engagement_mm) for o in observed] == [
+        (p.rpm, p.width_mm) for p in heard_before
+    ]
 
     # In the widget: a dropped pass takes no verdict, and a verdict set elsewhere keeps what
     # was heard after the facing in the file, should the facing be corrected to done.

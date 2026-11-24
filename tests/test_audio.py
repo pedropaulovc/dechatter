@@ -19,7 +19,7 @@ def cut(
     rng = np.random.default_rng(RNG_SEED)
     spindle_hz = rpm * (1 + machine.rpm_error) / 60
     return (
-        synth._cut(6.0, spindle_hz, 3, 1.5, chatter, machine, rng),
+        synth._cut(6.0, spindle_hz, 3, machine.load(1.5, 3.0), chatter, machine, rng),
         synth._air(3.0, spindle_hz, machine, rng),
     )
 

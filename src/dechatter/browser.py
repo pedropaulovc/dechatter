@@ -25,10 +25,12 @@ from .audio import AudioError
 from .config import (
     TEMPLATE,
     ConfigError,
+    Vary,
     dump_setup,
     parse_setup,
     setup_defaults,
     setup_values,
+    slot_wall_mm,
 )
 from .detect import Thresholds, Verdict
 from .plan import PlanError, auto_lanes, envelope
@@ -144,14 +146,17 @@ class Sessions:
         """What the planner makes of entries left empty in a setup the wizard is editing."""
         setup = parse_setup(dump_setup(json.loads(values_json)), "the setup")
         env = envelope(setup)
+        cut = {
+            "chip_load_mm": env.chip_load_mm,
+            "speed_min_rpm": env.speed_min_rpm,
+            "speed_max_rpm": env.speed_max_rpm,
+        }
+        if setup.cut.vary is Vary.WIDTH:
+            cut["width_max_mm"] = round(env.engagement_max_mm, 3)
         return {
-            "cut": {
-                "width_max_mm": round(env.width_max_mm, 3),
-                "chip_load_mm": env.chip_load_mm,
-                "speed_min_rpm": env.speed_min_rpm,
-                "speed_max_rpm": env.speed_max_rpm,
-            },
+            "cut": cut,
             "stock": {"lanes": auto_lanes(setup, env)},
+            "program": {"slot_wall_mm": round(slot_wall_mm(setup), 3)},
         }
 
     def save_setup(self, name: str, values_json: str) -> dict:

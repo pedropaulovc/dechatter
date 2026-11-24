@@ -5,8 +5,17 @@ from __future__ import annotations
 import enum
 from dataclasses import dataclass
 
-from .config import Coolant, Direction, Setup, SpindleControl
-from .plan import PassKind, Plan, facing_rows, lane_x_mm, travel
+from .config import Coolant, Direction, Setup, SpindleControl, Vary
+from .plan import (
+    Milling,
+    Order,
+    Pass,
+    PassKind,
+    Plan,
+    facing_rows,
+    lane_x_mm,
+    travel,
+)
 
 
 class Units(enum.StrEnum):
@@ -128,12 +137,18 @@ def blocks(plan: Plan, setup: Setup, units: Units) -> list[Block]:
                     )
                 )
 
+        slot = plan.milling is Milling.SLOT
         face = leg.face_y_start_mm
-        bottom = -(leg.top_mm + plan.axial_depth_mm)
         for p in leg.passes:
-            face += p.width_mm
+            # Side milling: the cutter's far side on the face the pass leaves. A slot: on its
+            # far wall, the leg's wall of stock left standing before it.
+            face += p.width_mm + leg.wall_mm
             y_cut = face - radius
+            bottom = -(leg.top_mm + p.depth_mm)
             path = travel(setup, leg.lane, plan.lanes, face, p.width_mm)
+            # Off the face it cut, then up; a slot has stock on both sides: straight up.
+            y_clear = y_cut if slot else y_cut - clearance
+            back_off = () if slot else (f"G0 Y{n(y_clear)}",)
             x_start, x_end = x_at(path.start), x_at(path.end)
             found.append(
                 Block(
@@ -173,10 +188,10 @@ def blocks(plan: Plan, setup: Setup, units: Units) -> list[Block]:
                 ),
                 Block(
                     Step.RETRACT,
-                    (f"G0 Y{n(y_cut - clearance)}", f"G0 Z{n(safe_z)}"),
+                    (*back_off, f"G0 Z{n(safe_z)}"),
                     p.id,
                     p.rpm,
-                    target=move(y=y_cut - clearance, z=safe_z),
+                    target=move(y=y_clear, z=safe_z),
                     leg=number,
                 ),
             ]
@@ -217,6 +232,8 @@ def _leg_lines(plan: Plan, setup: Setup) -> list[str]:
         if leg.reface_mm == 0 and number == 0 and leg.top_mm > 0:
             lines.append(f"(the top stands at Z{_n(-leg.top_mm)}, faced down by earlier rounds)")
         faces = f"front face from Y{_n(leg.face_y_start_mm)} to Y{_n(leg.face_y_end_mm)}"
+        if plan.milling is Milling.SLOT:
+            faces = f"slots in the top from Y{_n(leg.face_y_start_mm)} to Y{_n(leg.face_y_end_mm)}"
         if plan.lanes == 1:
             lines.append(f"({then}{faces})")
             continue
@@ -239,7 +256,12 @@ def _record_line(plan: Plan) -> str:
 def _leg_start(plan: Plan, setup: Setup, number: int) -> list[str]:
     """What the program says where a leg after the first begins."""
     leg = plan.legs[number]
-    where = "the front face" if plan.lanes == 1 else _lane(plan, setup, leg.lane)
+    slot = plan.milling is Milling.SLOT
+    where = (
+        ("the top" if slot else "the front face")
+        if plan.lanes == 1
+        else _lane(plan, setup, leg.lane)
+    )
     if leg.reface_mm > 0:
         return [
             f"(FACING THE TOP DOWN from here: {_n(leg.reface_mm)} mm, to Z{_n(-leg.top_mm)}; "
@@ -247,7 +269,31 @@ def _leg_start(plan: Plan, setup: Setup, number: int) -> list[str]:
             # A recording searched for its cuts by sound must not hold the facing's.
             "M0 (the top is faced next: pause the recording now, then resume)",
         ]
-    return [f"(LANE CHANGE: {where} from here, a fresh face at Y0; keep the zero)"]
+    fresh = "slots from Y0 again" if slot else "a fresh face at Y0"
+    return [f"(LANE CHANGE: {where} from here, {fresh}; keep the zero)"]
+
+
+def _held(plan: Plan) -> str:
+    """The dimension every test cut of the round shares, for the header."""
+    if plan.vary is Vary.WIDTH:
+        return f"depth {_n(plan.fixed_mm)} mm"
+    slots = ", full-width slots" if plan.milling is Milling.SLOT else ""
+    return f"width {_n(plan.fixed_mm)} mm{slots}, the depth stepped"
+
+
+def _size(plan: Plan, p: Pass) -> str:
+    if plan.vary is Vary.WIDTH:
+        return f"width {_n(p.width_mm)} mm"
+    return f"width {_n(p.width_mm)} mm depth {_n(p.depth_mm)} mm"
+
+
+def _stop_rule(plan: Plan) -> str:
+    if plan.order is Order.DEEPEST_FIRST:
+        return (
+            "(STOP RULE: on violent chatter feed-hold and abort. The deepest passes come "
+            "first; later ones are lighter.)"
+        )
+    return "(STOP RULE: on violent chatter feed-hold and abort. Later passes are heavier.)"
 
 
 def render(plan: Plan, setup: Setup, units: Units) -> str:
@@ -259,12 +305,12 @@ def render(plan: Plan, setup: Setup, units: Units) -> str:
     manual = setup.machine.spindle is SpindleControl.MANUAL
     lines = [
         f"(dechatter round {plan.round}: {len(plan.passes)} passes, about {minutes:.0f} min)",
-        f"(tool: D{_n(plan.diameter_mm)} mm, {plan.flutes} flutes; "
-        f"depth {_n(plan.axial_depth_mm)} mm; {_n(plan.chip_load_mm)} mm per tooth)",
+        f"(tool: D{_n(plan.diameter_mm)} mm, {plan.flutes} flutes; {_held(plan)}; "
+        f"{_n(plan.chip_load_mm)} mm per tooth)",
         "(WCS zero: X = left end of stock, Y = front face as first mounted, Z = top)",
         *_leg_lines(plan, setup),
         _record_line(plan),
-        "(STOP RULE: on violent chatter feed-hold and abort. Later passes are heavier.)",
+        _stop_rule(plan),
         MANUAL_NOTE if manual else "(the program starts, sets and stops the spindle)",
         *([] if units is Units.MM else ["(lengths in inches; the comments give mm)"]),
     ]
@@ -279,9 +325,7 @@ def render(plan: Plan, setup: Setup, units: Units) -> str:
         if block.step is Step.RAPID:
             p = passes[block.pass_id]
             label = "test" if p.kind is PassKind.TEST else p.kind.value
-            lines.append(
-                f"(pass {p.id} {label}: S{p.rpm} width {_n(p.width_mm)} mm F{_n(p.feed_mm_min)})"
-            )
+            lines.append(f"(pass {p.id} {label}: S{p.rpm} {_size(plan, p)} F{_n(p.feed_mm_min)})")
         lines += _file_lines(block, plan)
         if faced.get(block.leg) == index:
             # A recording searched for its cuts by sound must not hold the facing's.

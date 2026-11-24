@@ -18,7 +18,7 @@ import numpy as np
 from . import audio, bayes, gcode, session
 from .config import Setup, SetupSource, read_setup, setup_source
 from .detect import Thresholds, Verdict
-from .plan import PassKind, envelope, feed_mm_min, lane_x_mm
+from .plan import PassKind, envelope, feed_mm_min, fixed_mm, lane_x_mm
 from .session import PassStatus, SessionError, Stock
 
 log = logging.getLogger(__name__)
@@ -69,23 +69,24 @@ class App:
 
     def state(self) -> dict:
         rounds = session.load_rounds(self.session_dir)
-        # What is shown belongs to the depth of the latest round: the one planned or just cut.
-        depth = rounds[-1].plan.axial_depth_mm if rounds else self.setup.cut.axial_depth_mm
-        observations = session.observations(rounds, depth, self.env)
+        # What is shown belongs to the level of the latest round, planned or just cut: its
+        # depth, or where the session steps the depth, its width.
+        level = rounds[-1].plan.fixed_mm if rounds else fixed_mm(self.setup)
+        observations = session.observations(rounds, level, self.env)
         stability = bayes.build_map(
-            session.at_depth(self.setup, depth), self.env, session.evidence(rounds, depth, self.env)
+            session.at_level(self.setup, level), self.env, session.evidence(rounds, level, self.env)
         )
         shown = bayes.coarse(stability)
 
         found = session.best_cuts(self.setup, self.env, rounds)
         sweep = session.swept(found, session.sweeps(rounds, self.env))
-        upcoming, next_depth = Next.PLAN, self.setup.cut.axial_depth_mm
+        upcoming, next_level = Next.PLAN, fixed_mm(self.setup)
         if rounds and rounds[-1].results is None:
-            upcoming, next_depth = Next.RUN, depth
+            upcoming, next_level = Next.RUN, level
         if rounds and rounds[-1].results is not None:
             stage = session.next_stage(self.setup, self.env, rounds, found)
             upcoming = Next.PLAN if stage.tests else Next.CONVERGED
-            next_depth = stage.depth_mm
+            next_level = stage.level_mm
         if upcoming is Next.CONVERGED and session.to_sweep(self.setup, self.env, found, sweep):
             upcoming = Next.SWEEP
         template = setup_source(self.source.text) is SetupSource.TEMPLATE
@@ -100,18 +101,22 @@ class App:
                 "diameter_mm": tool.diameter_mm,
                 "flutes": tool.flutes,
                 "material": self.setup.cut.material,
-                "depths_mm": session.depths(self.setup),
+                "levels_mm": session.levels(self.setup),
                 "chip_load_mm": self.env.chip_load_mm,
             },
             "spindle": self.setup.machine.spindle,
+            # What the session steps: "width" at each depth in `levels_mm`, or "depth" at each
+            # width in it. `level_mm` is the one the map and the observations are at.
+            "vary": self.setup.cut.vary,
             "next": upcoming,
-            "next_depth_mm": next_depth,
-            "depth_mm": depth,
+            "next_level_mm": next_level,
+            "level_mm": level,
             "recording_round": self.recording_round,
             "discarded_round": self.discarded_round,
             "rounds": [self._round_json(r) for r in rounds],
             "observations": [
-                {"rpm": o.rpm, "width_mm": o.width_mm, "verdict": o.verdict} for o in observations
+                {"rpm": o.rpm, "engagement_mm": o.engagement_mm, "verdict": o.verdict}
+                for o in observations
             ],
             "best": [
                 {
@@ -125,7 +130,7 @@ class App:
             ],
             "map": {
                 "speeds": shown.speeds.tolist(),
-                "widths": shown.widths.round(2).tolist(),
+                "engagements": shown.engagements.round(2).tolist(),
                 "p": shown.p.round(3).tolist(),
             },
             "sweep": None if sweep is None else self._sweep_json(sweep),
@@ -142,6 +147,7 @@ class App:
                     "kind": p.kind,
                     "rpm": p.rpm,
                     "width_mm": p.width_mm,
+                    "depth_mm": p.depth_mm,
                     "feed_mm_min": p.feed_mm_min,
                     "p_stable": p.p_stable,
                     "chip_load_mm": p.chip_load_mm or r.plan.chip_load_mm,
@@ -155,7 +161,9 @@ class App:
             )
         return {
             "round": r.plan.round,
-            "depth_mm": r.plan.axial_depth_mm,
+            "level_mm": r.plan.fixed_mm,
+            "milling": r.plan.milling,
+            "order": r.plan.order,
             "planner": r.plan.planner,
             "program": self.program_name(r),
             "run_time_s": round(r.plan.run_time_s),
@@ -204,7 +212,11 @@ class App:
 
     def _planned(self, number: int) -> tuple[session.Round, Setup]:
         target = self._round(number)
-        return target, session.at_depth(session.planned_with(target), target.plan.axial_depth_mm)
+        return target, self._at(target)
+
+    def _at(self, r: session.Round) -> Setup:
+        """The setup a round was planned from, at the round's own level."""
+        return session.at_level(session.planned_with(r), r.plan.fixed_mm)
 
     def program(self, number: int, units: gcode.Units) -> str:
         """The round's program in the machine's units. The file beside the plan is in mm."""

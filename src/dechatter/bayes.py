@@ -1,4 +1,8 @@
-"""Bayesian stability map over spindle speed x cut width, and the next batch of test cuts.
+"""Bayesian stability map over spindle speed x engagement, and the next batch of test cuts.
+
+The engagement is the dimension a session steps: the radial width of cut at a fixed depth,
+or the axial depth at a fixed width (cut.vary). Removal rate grows with either, and a cut
+that is stable stays stable at any smaller engagement, so one map serves both.
 
 After Karandikar et al., "Evaluation of automated stability testing in machining through
 closed-loop control and Bayesian machine learning", MSSP 181 (2022): a probability of
@@ -7,12 +11,13 @@ on the probability of stability of any test, stop when the expected improvement 
 
 Differences, because one round here is a batch run without feedback between cuts:
 - The paper omits its likelihood. Here each speed has a distribution over its stability
-  limit (the largest stable width). A stable cut says the limit is above it, an unstable one
-  below, each wrong with probability `misclassification`; evidence fades with speed distance.
-- A batch is picked greedily. Later picks assume earlier ones pass (so widths can ramp at a
-  speed) but must also clear `probability_floor` on measured data alone.
+  limit (the largest stable engagement). A stable cut says the limit is above it, an unstable
+  one below, each wrong with probability `misclassification`; evidence fades with speed
+  distance.
+- A batch is picked greedily. Later picks assume earlier ones pass (so engagements can ramp
+  at a speed) but must also clear `probability_floor` on measured data alone.
 - A chatter frequency predicts speeds where a tooth passes once per vibration cycle. Those
-  speeds get partial credit for the width that was stable where the chatter was heard.
+  speeds get partial credit for the engagement that was stable where the chatter was heard.
 """
 
 from __future__ import annotations
@@ -23,32 +28,33 @@ import numpy as np
 
 from .config import Setup
 from .detect import Verdict
-from .plan import Envelope, mrr_mm3_min
+from .plan import Envelope, engagement_step_mm, mrr_mm3_min
 
-PRIOR_AT_MAX_WIDTH = 0.05
+PRIOR_AT_MAX_ENGAGEMENT = 0.05
 EXCLUSION_SIGMAS = 2.0
 SWEET_SPOT_POCKET = 0.25  # pocket half-width as a fraction of the spacing to the next lobe
 MODE_TOLERANCE = 0.02  # chatter frequencies this close together are the same mode
-# Against a removal rate reached at another depth, a cut is worth working towards while its
-# chance of being stable is at least this share of what a test cut itself needs.
+# Against a removal rate reached at another depth (or width, where the session steps the
+# depth), a cut is worth working towards while its chance of being stable is at least this
+# share of what a test cut itself needs.
 WORTH_REACHING = 0.5
 
 
 @dataclass(frozen=True)
 class Observation:
     rpm: float
-    width_mm: float
+    engagement_mm: float
     verdict: Verdict
     chatter_hz: float | None = None
 
 
 class StabilityMap:
-    def __init__(self, speeds: np.ndarray, widths: np.ndarray, misclassification: float):
+    def __init__(self, speeds: np.ndarray, engagements: np.ndarray, misclassification: float):
         self.speeds = speeds
-        self.widths = widths
+        self.engagements = engagements
         self.misclassification = misclassification
-        survival = 1 - (1 - PRIOR_AT_MAX_WIDTH) * widths / widths[-1]
-        # limit[j]: exactly the first j width levels are stable, j = 0..len(widths)
+        survival = 1 - (1 - PRIOR_AT_MAX_ENGAGEMENT) * engagements / engagements[-1]
+        # limit[j]: exactly the first j engagement levels are stable, j = 0..len(engagements)
         limit = -np.diff(np.concatenate(([1.0], survival, [0.0])))
         self._log_limit = np.tile(np.log(np.maximum(limit, 1e-12)), (len(speeds), 1))
 
@@ -57,17 +63,22 @@ class StabilityMap:
         clone.__dict__ = {**self.__dict__, "_log_limit": self._log_limit.copy()}
         return clone
 
-    def width_index(self, width_mm: float) -> int:
-        return int(np.argmin(np.abs(self.widths - width_mm)))
+    def engagement_index(self, engagement_mm: float) -> int:
+        return int(np.argmin(np.abs(self.engagements - engagement_mm)))
 
     def speed_index(self, rpm: float) -> int:
         return int(np.argmin(np.abs(self.speeds - rpm)))
 
     def update(
-        self, rpm: float, width_mm: float, verdict: Verdict, sigma_rpm: float, weight: float = 1.0
+        self,
+        rpm: float,
+        engagement_mm: float,
+        verdict: Verdict,
+        sigma_rpm: float,
+        weight: float = 1.0,
     ) -> None:
-        levels = np.arange(len(self.widths) + 1)
-        agrees = levels > self.width_index(width_mm)
+        levels = np.arange(len(self.engagements) + 1)
+        agrees = levels > self.engagement_index(engagement_mm)
         if verdict is Verdict.UNSTABLE:
             agrees = ~agrees
         log_likelihood = np.where(agrees, 0.0, np.log(self.misclassification))
@@ -75,7 +86,7 @@ class StabilityMap:
         self._log_limit += np.outer(reach, log_likelihood)
 
     def p_stable(self) -> np.ndarray:
-        """P(stable) with shape (speeds, widths)."""
+        """P(stable) with shape (speeds, engagements)."""
         limit = np.exp(self._log_limit - self._log_limit.max(axis=1, keepdims=True))
         limit /= limit.sum(axis=1, keepdims=True)
         return np.cumsum(limit[:, ::-1], axis=1)[:, ::-1][:, 1:]
@@ -83,28 +94,28 @@ class StabilityMap:
 
 @dataclass(frozen=True)
 class Coarse:
-    """A map thinned out for display: at most `speeds` x `widths` cells, edges kept."""
+    """A map thinned out for display: at most `speeds` x `engagements` cells, edges kept."""
 
     speeds: np.ndarray
-    widths: np.ndarray
-    p: np.ndarray  # P(stable), shape (speeds, widths)
+    engagements: np.ndarray
+    p: np.ndarray  # P(stable), shape (speeds, engagements)
 
 
 DISPLAY_SPEEDS = 48
-DISPLAY_WIDTHS = 24
+DISPLAY_ENGAGEMENTS = 24
 
 
 def coarse(stability: StabilityMap) -> Coarse:
     speeds = np.unique(
         np.linspace(0, len(stability.speeds) - 1, DISPLAY_SPEEDS).round().astype(int)
     )
-    widths = np.unique(
-        np.linspace(0, len(stability.widths) - 1, DISPLAY_WIDTHS).round().astype(int)
+    engagements = np.unique(
+        np.linspace(0, len(stability.engagements) - 1, DISPLAY_ENGAGEMENTS).round().astype(int)
     )
     return Coarse(
         stability.speeds[speeds],
-        stability.widths[widths],
-        stability.p_stable()[np.ix_(speeds, widths)],
+        stability.engagements[engagements],
+        stability.p_stable()[np.ix_(speeds, engagements)],
     )
 
 
@@ -118,12 +129,16 @@ def sweet_spot_speeds(chatter_hz: float, flutes: int, low_rpm: float, high_rpm: 
 def build_map(setup: Setup, env: Envelope, observations: list[Observation]) -> StabilityMap:
     cfg = setup.planner
     stability = StabilityMap(
-        env.speeds(cfg.speed_step_rpm), env.widths(cfg.width_step_mm), cfg.misclassification
+        env.speeds(cfg.speed_step_rpm),
+        env.engagements(engagement_step_mm(setup)),
+        cfg.misclassification,
     )
     for obs in observations:
-        stability.update(obs.rpm, obs.width_mm, obs.verdict, cfg.speed_sigma_fraction * obs.rpm)
+        stability.update(
+            obs.rpm, obs.engagement_mm, obs.verdict, cfg.speed_sigma_fraction * obs.rpm
+        )
 
-    for chatter_hz, width_mm in chatter_modes(observations, cfg.speed_sigma_fraction):
+    for chatter_hz, engagement_mm in chatter_modes(observations, cfg.speed_sigma_fraction):
         spots = sweet_spot_speeds(
             chatter_hz, setup.tool.flutes, env.speed_min_rpm, env.speed_max_rpm
         )
@@ -131,7 +146,7 @@ def build_map(setup: Setup, env: Envelope, observations: list[Observation]) -> S
             pocket = SWEET_SPOT_POCKET * rpm / (lobe + 1)
             stability.update(
                 rpm,
-                width_mm,
+                engagement_mm,
                 Verdict.STABLE,
                 min(pocket, cfg.speed_sigma_fraction * rpm),
                 cfg.sweet_spot_trust,
@@ -140,7 +155,7 @@ def build_map(setup: Setup, env: Envelope, observations: list[Observation]) -> S
 
 
 def chatter_modes(observations: list[Observation], sigma_fraction: float):
-    """(chatter Hz, widest width stable just below that chatter), one per vibration mode.
+    """(chatter Hz, largest engagement stable just below that chatter), one per vibration mode.
 
     Chatter heard in many cuts at about the same frequency is one mode, hence one hint:
     counting it once per cut would let the hint outweigh measured cuts.
@@ -150,11 +165,11 @@ def chatter_modes(observations: list[Observation], sigma_fraction: float):
         if obs.verdict is not Verdict.UNSTABLE or obs.chatter_hz is None:
             continue
         below = [
-            o.width_mm
+            o.engagement_mm
             for o in observations
             if o.verdict is Verdict.STABLE
             and abs(o.rpm - obs.rpm) <= sigma_fraction * obs.rpm
-            and o.width_mm < obs.width_mm
+            and o.engagement_mm < obs.engagement_mm
         ]
         if below:
             heard.append((obs.chatter_hz, max(below)))
@@ -166,13 +181,12 @@ def chatter_modes(observations: list[Observation], sigma_fraction: float):
             continue
         modes.append([item])
     return [
-        (float(np.median([hz for hz, _ in mode])), max(width for _, width in mode))
-        for mode in modes
+        (float(np.median([hz for hz, _ in mode])), max(size for _, size in mode)) for mode in modes
     ]
 
 
 def mrr_grid(setup: Setup, env: Envelope, stability: StabilityMap) -> np.ndarray:
-    return mrr_mm3_min(setup, env, stability.speeds[:, None], stability.widths[None, :])
+    return mrr_mm3_min(setup, env, stability.speeds[:, None], stability.engagements[None, :])
 
 
 def best_stable(
@@ -180,25 +194,26 @@ def best_stable(
 ) -> list[tuple[float, Observation]]:
     """Stable observations, highest removal rate first, as (mm3/min, observation)."""
     stable = [o for o in observations if o.verdict is Verdict.STABLE]
-    rated = [(float(mrr_mm3_min(setup, env, o.rpm, o.width_mm)), o) for o in stable]
+    rated = [(float(mrr_mm3_min(setup, env, o.rpm, o.engagement_mm)), o) for o in stable]
     return sorted(rated, key=lambda pair: -pair[0])
 
 
 @dataclass(frozen=True)
 class Proposal:
-    tests: list[tuple[float, float, float]]  # rpm, width_mm, P(stable) on measured data
+    tests: list[tuple[float, float, float]]  # rpm, engagement_mm, P(stable) on measured data
     expected_improvement: float  # of the most promising cut, as a fraction of the best MRR
 
 
 def propose(
     setup: Setup, env: Envelope, observations: list[Observation], target_mm3_min: float = 0.0
 ) -> Proposal:
-    """The next batch of cuts at the setup's depth.
+    """The next batch of cuts at the setup's depth, or where it steps the depth, its width.
 
-    `target_mm3_min` is a removal rate already reached at another depth. Nothing is proposed
-    once no cut within the power cap that would beat it keeps a fair chance of being stable:
-    this depth is not going to win. Until then the search here climbs from its own best cut,
-    since the first cuts at a new depth are narrower than the ones that could win.
+    `target_mm3_min` is a removal rate already reached at another depth (or width). Nothing
+    is proposed once no cut within the power cap that would beat it keeps a fair chance of
+    being stable: this depth is not going to win. Until then the search here climbs from its
+    own best cut, since the first cuts at a new depth are lighter than the ones that could
+    win.
     """
     cfg = setup.planner
     measured = build_map(setup, env, observations)
@@ -216,7 +231,7 @@ def propose(
         return Proposal([], 0.0)
     allowed = within_power & (p_measured >= cfg.probability_floor)
     for obs in observations:
-        allowed[measured.speed_index(obs.rpm), measured.width_index(obs.width_mm)] = False
+        allowed[measured.speed_index(obs.rpm), measured.engagement_index(obs.engagement_mm)] = False
 
     tests: list[tuple[float, float, float]] = []
     headline = 0.0
@@ -224,15 +239,15 @@ def propose(
         candidates = np.where(
             allowed & (assumed.p_stable() >= cfg.min_probability), improvement, 0.0
         )
-        s, w = np.unravel_index(np.argmax(candidates), candidates.shape)
+        s, e = np.unravel_index(np.argmax(candidates), candidates.shape)
         if not tests:
-            headline = float(candidates[s, w])
-        if candidates[s, w] < cfg.stop_improvement:
+            headline = float(candidates[s, e])
+        if candidates[s, e] < cfg.stop_improvement:
             break
-        rpm, width = float(measured.speeds[s]), float(measured.widths[w])
-        tests.append((rpm, width, float(p_measured[s, w])))
+        rpm, engagement = float(measured.speeds[s]), float(measured.engagements[e])
+        tests.append((rpm, engagement, float(p_measured[s, e])))
         sigma = cfg.speed_sigma_fraction * rpm
-        assumed.update(rpm, width, Verdict.STABLE, sigma)
+        assumed.update(rpm, engagement, Verdict.STABLE, sigma)
         near = np.abs(measured.speeds - rpm) <= EXCLUSION_SIGMAS * sigma
-        allowed[np.ix_(near, np.arange(len(measured.widths)) <= w)] = False
+        allowed[np.ix_(near, np.arange(len(measured.engagements)) <= e)] = False
     return Proposal(tests, headline)

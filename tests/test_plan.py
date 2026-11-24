@@ -13,6 +13,7 @@ from dechatter.plan import (
     SCHEMA,
     SWEEP_PASSES,
     Face,
+    Made,
     PassKind,
     Plan,
     PlanError,
@@ -136,7 +137,7 @@ def test_an_inch_machine_gets_the_same_program_in_inches(setup):
         assert [x for x in inch if x.startswith(start)] == [x for x in mm if x.startswith(start)]
     plunge = next(line for line in inch if line.startswith("G1 Z"))
     depth, feed = re.fullmatch(r"G1 Z(\S+) F(\S+)", plunge).groups()
-    assert float(depth) * 25.4 == pytest.approx(-plan.axial_depth_mm, abs=0.002)
+    assert float(depth) * 25.4 == pytest.approx(-plan.fixed_mm, abs=0.002)
     assert float(feed) * 25.4 == pytest.approx(setup.program.plunge_feed_mm_min, abs=0.002)
 
 
@@ -228,7 +229,7 @@ def test_the_widget_runs_the_program_as_blocks_with_targets_in_mm(setup, write_s
         for axis, value in (mm.target or {}).items():
             assert inch.target[axis] == pytest.approx(value, abs=0.003)
     cut = next(b for b in blocks[MM] if b.step is gcode.Step.CUT)
-    assert cut.target["x"] > setup.stock.length_mm and cut.target["z"] == -plan.axial_depth_mm
+    assert cut.target["x"] > setup.stock.length_mm and cut.target["z"] == -plan.fixed_mm
 
     manual = load_setup(write_setup(**MANUAL))
     manual_blocks = gcode.blocks(round1(manual), manual, MM)
@@ -349,9 +350,8 @@ def spilled(write_setup):
     env = envelope(setup)
     depth = setup.cut.axial_depth_mm
     start = Face(y_mm=1.0)
-    plan = assemble(
-        setup, env, 2, PlannerKind.GRID, grid_tests(setup, env), face=start, cut_mm=(depth,)
-    )
+    made = (Made(1, 1.0, depth),)
+    plan = assemble(setup, env, 2, PlannerKind.GRID, grid_tests(setup, env), face=start, made=made)
     return setup, plan
 
 
@@ -414,7 +414,7 @@ def test_a_round_uses_what_every_lane_has_left_before_it_faces_the_top_down(writ
     assert any(line.startswith("(RECORD:") and "pause it" in line for line in program)
 
     # The facing's feed moves count in the run time.
-    cuts = sum(plan.dwell_s + plan.plunge_s + p.lead_in_s + p.expected_cut_s for p in plan.passes)
+    cuts = sum(plan.dwell_s + p.plunge_s + p.lead_in_s + p.expected_cut_s for p in plan.passes)
     assert legs[3].face_s > 0 and plan.run_time_s == pytest.approx(cuts + legs[3].face_s)
 
 
@@ -426,7 +426,8 @@ def test_a_round_faces_the_top_down_once_then_drops_what_its_lanes_cannot_hold(w
     step = depth + REFACE_EXTRA_MM
     # Every lane used, the top already 20 mm down: the tests need more than one new top.
     used = Face(lane=3, y_mm=5.0, cap_mm=5.0, top_mm=20.0)
-    plan = assemble(setup, env, 3, PlannerKind.GRID, tests, face=used, cut_mm=(depth,))
+    made = (Made(3, 5.0, depth),)
+    plan = assemble(setup, env, 3, PlannerKind.GRID, tests, face=used, made=made)
     # One facing, then every lane of the new top; the tests left over are dropped.
     assert [leg.reface_mm for leg in plan.legs] == pytest.approx([step, 0, 0])
     assert [leg.lane for leg in plan.legs] == [1, 2, 3]
@@ -434,11 +435,11 @@ def test_a_round_faces_the_top_down_once_then_drops_what_its_lanes_cannot_hold(w
     tests_cut = len(plan.passes) - len(plan.legs)  # one truing pass a leg
     assert 0 < tests_cut < len(tests)
     widths = [p.width_mm for p in plan.passes if p.kind is PassKind.TEST]
-    assert widths == pytest.approx([t[1] for t in cut_order(setup, tests)[:tests_cut]])
+    assert widths == pytest.approx([t[1] for t in cut_order(setup, tests, 3)[:tests_cut]])
     # A chip-load sweep the new top's lanes cannot hold whole is not planned at all.
     sweep = sweep_tests(setup, env, tests[0][0], 4.0)
     with pytest.raises(PlanError, match="needs room for all its"):
-        assemble(setup, env, 3, PlannerKind.SWEEP, sweep, face=used, cut_mm=(depth,))
+        assemble(setup, env, 3, PlannerKind.SWEEP, sweep, face=used, made=made)
 
 
 def test_a_chip_load_sweep_may_span_lanes_but_is_never_cut_short(write_setup):
@@ -452,7 +453,7 @@ def test_a_chip_load_sweep_may_span_lanes_but_is_never_cut_short(write_setup):
     # From the second lane on, three of the five fit: no sweep at all.
     rest = Face(lane=2, cap_mm=6.2)
     with pytest.raises(PlanError, match="needs room for all its 5 cuts"):
-        assemble(setup, env, 5, PlannerKind.SWEEP, tests, face=rest, cut_mm=(5.0,))
+        assemble(setup, env, 5, PlannerKind.SWEEP, tests, face=rest, made=(Made(1, 6.2, 5.0),))
 
 
 @pytest.mark.parametrize(
@@ -513,7 +514,8 @@ def test_facing_takes_the_top_down_in_levels_and_rows_over_the_whole_stock(write
     # The face has no room left: the top, cut 5 mm deep below Z2.2, comes down to Z7.4 first.
     used = Face(y_mm=30.0, top_mm=2.2)
     tests = grid_tests(setup, env)
-    plan = assemble(setup, env, 3, PlannerKind.GRID, tests, face=used, cut_mm=(5.0,), lanes=1)
+    made = (Made(1, 30.0, 5.0),)
+    plan = assemble(setup, env, 3, PlannerKind.GRID, tests, face=used, made=made, lanes=1)
     assert (plan.legs[0].top_mm, plan.legs[0].reface_mm) == (7.4, 5.2)
     found = gcode.blocks(plan, setup, MM)
     steps = [b.step for b in found]
@@ -535,7 +537,8 @@ def test_a_top_faced_only_in_part_is_faced_again_before_any_cut(write_setup):
     tests = grid_tests(setup, env)
     # A facing stopped part-way: lane 3 still has room, but its top may be gone in places.
     stopped = Face(lane=3, y_mm=1.0, cap_mm=4.2, top=Top.PART_FACED)
-    plan = assemble(setup, env, 3, PlannerKind.GRID, tests, face=stopped, cut_mm=(depth, depth))
+    made = (Made(3, 1.0, depth),)
+    plan = assemble(setup, env, 3, PlannerKind.GRID, tests, face=stopped, made=made)
     first = plan.legs[0]
     step = depth + REFACE_EXTRA_MM
     # Faced down again from the old top, as the facing cut short would have, then lane 1.
@@ -547,7 +550,19 @@ def test_a_top_faced_only_in_part_is_faced_again_before_any_cut(write_setup):
     # With no height to face it, nothing is cut on it.
     flat_only = load_setup(write_setup(l=("width_mm = 30.0", "width_mm = 5.0\nlanes = 3")))
     with pytest.raises(PlanError, match="stopped part-way through facing the top down"):
-        assemble(flat_only, env, 3, PlannerKind.GRID, tests, face=stopped, cut_mm=(depth,))
+        assemble(flat_only, env, 3, PlannerKind.GRID, tests, face=stopped, made=made)
+
+
+def test_a_faced_top_too_low_for_the_cut_is_refused(write_setup):
+    setup = load_setup(write_setup(**SPILL))
+    env = envelope(setup)
+    depth = setup.cut.axial_depth_mm
+    tests = grid_tests(setup, env)
+    # The clearance may be raised, or the height corrected, after the top was faced.
+    fits = 40.0 - depth - setup.program.clearance_mm
+    assert assemble(setup, env, 3, PlannerKind.GRID, tests, face=Face(top_mm=fits)).legs
+    with pytest.raises(PlanError, match="below a top already faced down .*height_mm"):
+        assemble(setup, env, 3, PlannerKind.GRID, tests, face=Face(top_mm=fits + 0.5))
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "v8"
@@ -566,11 +581,17 @@ def test_a_plan_of_0_5_0_or_before_loads_as_one_leg(write_setup, tmp_path):
     env = envelope(setup)
     used = Face(lane=2, y_mm=1.0, cap_mm=4.2, top_mm=5.2)
     tests = grid_tests(setup, env)[:2]
-    plan = assemble(setup, env, 4, PlannerKind.GRID, tests, face=used, cut_mm=(5.0,), lanes=3)
+    made = (Made(2, 1.0, 5.0),)
+    plan = assemble(setup, env, 4, PlannerKind.GRID, tests, face=used, made=made, lanes=3)
     assert len(plan.legs) == 1
     plan.save(tmp_path / "plan.json")
     data = json.loads((tmp_path / "plan.json").read_text())
     (single,) = data.pop("legs")
-    schema_2 = {**data, **single, "schema": 2}
+    # 0.5.0 knew one depth and one plunge a plan, side milling that steps the width.
+    assert (data.pop("vary"), data.pop("milling"), single.pop("wall_mm")) == ("width", "side", 0)
+    plunges = {(p.pop("depth_mm"), p.pop("plunge_s")) for p in single["passes"]}
+    ((depth, plunge_s),) = plunges
+    assert data.pop("fixed_mm") == depth == setup.cut.axial_depth_mm
+    schema_2 = {**data, **single, "axial_depth_mm": depth, "plunge_s": plunge_s, "schema": 2}
     (tmp_path / "old.json").write_text(json.dumps(schema_2))
     assert Plan.load(tmp_path / "old.json") == plan
