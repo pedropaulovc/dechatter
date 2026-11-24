@@ -11,8 +11,20 @@ import pytest
 import synth
 
 from dechatter import audio, session
+from dechatter.config import load_setup
 from dechatter.detect import Thresholds, Verdict
-from dechatter.plan import Face, Plan, Top
+from dechatter.plan import (
+    REFACE_EXTRA_MM,
+    Face,
+    Plan,
+    PlannerKind,
+    Top,
+    assemble,
+    envelope,
+    facing_rows,
+    feed_mm_min,
+    grid_tests,
+)
 from dechatter.session import PassResult, PassStatus, SpindleFit
 
 FIXTURES = Path(__file__).parent / "fixtures" / "v8"
@@ -468,7 +480,14 @@ def test_cuts_are_put_on_their_passes_when_the_top_is_faced_midway(write_setup):
     # From the command line, the recording paused through the facing as the program says:
     # the cuts found by their sound alone fall on the right passes, across every leg.
     paused = synth.record(plan, seed=3)
-    assert_heard_right(plan, session.analyze(plan, paused, synth.RATE, "r.wav", Thresholds()))
+    results = session.analyze(plan, paused, synth.RATE, "r.wav", Thresholds())
+    assert_heard_right(plan, results)
+    # The sound cannot say whether the facing between them ran to its end: it is asked.
+    assert session.facing_asked(plan, results.passes) == faced[0] and results.facing is None
+    done = session.analyze(
+        plan, paused, synth.RATE, "r.wav", Thresholds(), facing=session.Facing.DONE
+    )
+    assert_heard_right(plan, done)
 
     # Left running through the facing: the facing is heard as one long stretch, where the
     # plan has it, and left out; every cut still falls on its pass.
@@ -508,8 +527,8 @@ def test_a_run_stopped_at_a_facing_is_not_guessed_from_its_sound(write_setup):
     # The sound after it is no pass of the faced leg, stopped early: the facing may be it.
     assert statuses[last] is PassStatus.ANALYSED
     assert set(statuses[last + 1 :]) == {PassStatus.LIKELY_NOT_RUN}
-    assert session.facing_at_stop(plan, results.passes) == faced
-    with pytest.raises(session.SessionError, match=r"--facing done` if it finished"):
+    assert session.facing_asked(plan, results.passes) == faced
+    with pytest.raises(session.SessionError, match=r"--facing done` if it ran to its end"):
         session.face_after(session.Round(Path("round-02"), plan, results))
 
     # Once the operator says, the next round starts from what the facing did.
@@ -528,10 +547,60 @@ def test_a_run_stopped_at_a_facing_is_not_guessed_from_its_sound(write_setup):
         after = session.face_after(session.Round(Path("round-02"), plan, said))
         assert after == dataclasses.replace(face, y_mm=pytest.approx(face.y_mm))
 
-    # Said of a run that went on past the facing, or stopped elsewhere, it is refused.
-    whole = synth.record(plan, seed=3)
+    # Said of a run that stopped short of the facing, it is refused.
+    short = synth.record(plan, seed=3, abort_in_pass=before.legs[0].passes[-1].id)
     with pytest.raises(session.SessionError, match="leave it out"):
-        session.analyze(plan, whole, synth.RATE, "r.wav", Thresholds(), facing=session.Facing.DONE)
+        session.analyze(plan, short, synth.RATE, "r.wav", Thresholds(), facing=session.Facing.DONE)
+
+
+def rows_setup(write_setup, lanes: int):
+    """Review45's case: a round on a 6 mm wide block of `lanes` lanes that faces the top
+    partway, the leg it faces before, and the seconds of each row of that facing's cut."""
+    stock = f"width_mm = 6.0\nlanes = {lanes}\nheight_mm = 40.0"
+    setup = load_setup(write_setup(l=("width_mm = 30.0", stock)))
+    env = envelope(setup)
+    depth = setup.cut.axial_depth_mm
+    tests = grid_tests(setup, env)
+    plan = assemble(setup, env, 2, PlannerKind.GRID, tests, face=Face(y_mm=1.0), cut_mm=(depth,))
+    faced = plan.mid_facing
+    leg = plan.legs[faced]
+    feed = feed_mm_min(setup, env, leg.passes[0].rpm)
+    rows = facing_rows(setup, leg.top_mm, leg.reface_mm)
+    return setup, plan, faced, [(r.end - r.start) / feed * 60 for r in rows]
+
+
+@pytest.mark.parametrize(("lanes", "rows"), [(1, 2), (1, 3), (3, 2)])
+def test_a_facing_stopped_after_a_few_rows_is_never_taken_for_cuts(write_setup, lanes, rows):
+    setup, plan, faced, row_s = rows_setup(write_setup, lanes)
+    start = plan.first_index(faced)
+    # Not paused through the facing, and stopped after a few of its rows.
+    recording = synth.record(
+        plan, seed=3, facing=synth.Facing.ROWS, row_s=row_s, stop_after_rows=rows
+    )
+    results = session.analyze(plan, recording, synth.RATE, "r.wav", Thresholds())
+    # Every cut before the facing is on its pass, whatever the rows after it matched.
+    assert {p.status for p in results.passes[:start]} == {PassStatus.ANALYSED}
+    # Sound alone never says what the facing did: planning waits for the operator.
+    assert session.facing_asked(plan, results.passes) == faced and results.facing is None
+    with pytest.raises(session.SessionError, match="cannot tell what that facing did"):
+        session.face_after(session.Round(Path("round-02"), plan, results))
+
+    # Cut short: whatever was heard after it is dropped, and the next round faces the top
+    # down again from the old top before any cut.
+    said = session.analyze(
+        plan, recording, synth.RATE, "r.wav", Thresholds(), facing=session.Facing.CUT_SHORT
+    )
+    assert {p.status for p in said.passes[start:]} == {PassStatus.LIKELY_NOT_RUN}
+    face = session.face_after(session.Round(Path("round-02"), plan, said))
+    assert (face.top, face.top_mm) == (Top.PART_FACED, 0.0)
+
+    env = envelope(setup)
+    depth = setup.cut.axial_depth_mm
+    tests = grid_tests(setup, env)
+    nxt = assemble(setup, env, 3, PlannerKind.GRID, tests, face=face, cut_mm=(depth,))
+    first = nxt.legs[0]
+    assert (first.lane, first.face_y_start_mm, first.top_mm) == (1, 0.0, first.reface_mm)
+    assert first.reface_mm == pytest.approx(depth + REFACE_EXTRA_MM)
 
 
 @pytest.mark.parametrize(

@@ -112,6 +112,16 @@ class Plan:
             index -= len(leg.passes)
         raise IndexError(index)
 
+    def first_index(self, leg: int) -> int:
+        """The index in `passes` of the leg's first pass."""
+        return sum(len(earlier.passes) for earlier in self.legs[:leg])
+
+    @property
+    def mid_facing(self) -> int | None:
+        """The leg the top is faced down before partway through the round (at most one; see
+        _lay_out), if any; facing before the first leg comes before the recording starts."""
+        return next((n for n, leg in enumerate(self.legs) if n > 0 and leg.reface_mm > 0), None)
+
     def facing_before(self, index: int) -> int | None:
         """The leg whose facing of the top comes right before the pass at `index`, if any."""
         if index >= len(self.passes):

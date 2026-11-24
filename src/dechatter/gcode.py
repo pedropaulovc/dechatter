@@ -226,10 +226,12 @@ def _leg_lines(plan: Plan, setup: Setup) -> list[str]:
 
 def _record_line(plan: Plan) -> str:
     start = "at the stop after the facing" if plan.legs[0].reface_mm > 0 else "before cycle start"
-    if any(leg.reface_mm > 0 for leg in plan.legs[1:]):
+    if plan.mid_facing is not None:
         return (
             f"(RECORD: start one continuous recording {start}; pause it while the top is "
-            "faced mid-round, between the stops before and after; stop it after M30)"
+            "faced mid-round, between the stops before and after; stop it after M30. The "
+            "recording cannot tell what the facing did: dechatter analyze asks; note whether "
+            "it ran to its end, stopped part-way or never started)"
         )
     return f"(RECORD: start one continuous recording {start}; stop after M30)"
 

@@ -140,6 +140,12 @@ def _print_round(session_dir: Path, plan: Plan) -> None:
         )
     print(f"wrote {session.round_dir(session_dir, plan.round) / session.PROGRAM_FILE}")
     print(f"run it while recording, then: dechatter analyze {session_dir} <recording>")
+    if plan.mid_facing is not None:
+        print(
+            "  the recording cannot tell what the facing did: once the run gets to it, analyze "
+            "asks, and you add --facing done (it ran to its end), cut-short (it stopped "
+            "part-way) or not-run (it never started)"
+        )
 
 
 def cmd_plan(args: argparse.Namespace) -> int:
@@ -211,21 +217,26 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     print(
         f"wrote {target.path / session.RESULTS_FILE} (edit a verdict there if your ears disagree)"
     )
-    faced = session.facing_at_stop(target.plan, results.passes)
+    faced = session.facing_asked(target.plan, results.passes)
     if faced is not None and results.facing is None:
-        reface = target.plan.legs[faced].reface_mm
+        leg = target.plan.legs[faced]
         segments = f" --segments {args.segments}" if args.segments else ""
+        again = f"dechatter analyze {args.session} {args.recording} --round {number}{segments}"
         print(
-            f"the run stopped right before the program faces the top down {reface:g} mm, and "
-            "the recording cannot tell whether that facing ran. Before planning, say what it "
-            "did (done: it finished; cut-short: it stopped part-way, and the next round faces "
-            "the top again first; not-run: it never started):"
+            f"the program faces the top down {leg.reface_mm:g} mm before pass "
+            f"{leg.passes[0].id}, and a recording cannot tell what that facing did. Did it "
+            "run to its end, stop part-way, or never start? Say which before planning:"
         )
+        print(f"  {again} --facing done       # it ran to its end")
         print(
-            f"  dechatter analyze {args.session} {args.recording} --round {number}{segments} "
-            f"--facing {'|'.join(session.Facing)}"
+            f"  {again} --facing cut-short  # it stopped part-way: the next round faces "
+            "the top again first"
         )
-        print(f'or set "facing" to one of those in {target.path / session.RESULTS_FILE}')
+        print(f"  {again} --facing not-run    # it never started")
+        print(
+            "(cut-short and not-run drop whatever was heard after the facing as not run; or "
+            f'set "facing" in {target.path / session.RESULTS_FILE})'
+        )
         return 0
     print(f"next: dechatter plan {args.session}")
     return 0

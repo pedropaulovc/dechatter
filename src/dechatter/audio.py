@@ -30,6 +30,11 @@ TRAILING_SKIP = 0.25
 # Facing the top down mid-round, heard when the recording was not paused through it, spans
 # its rows' cuts and the rapids between them: up to this many times its feed moves (face_s).
 FACING_SPAN = 2.0
+# A segment dropped once the passes before such a facing are done may be one of its rows: a
+# facing stopped after a few rows, or rows heard apart. It costs this much instead of 1, so
+# a few of them never outweigh the passes before them (lost to a threshold that hears only
+# one cut, and cheap trailing skips).
+FACING_ROW_DROP = 0.3
 # A cut is told from the spindle running in the air by its level over the floor around it:
 # the spindle's own noise rises with its speed, by 8 dB or more across a round, while a light
 # cut is only a few dB over the spindle. The floor is a low percentile of the level over a
@@ -296,21 +301,27 @@ def align(plan: Plan, segments: list[Segment]) -> Alignment:
 
     Facing the top down before a leg may match a run of segments that spans about as long
     (see FACING_SPAN), heard when the recording was not paused through it: loud and long,
-    it would otherwise drown the passes after it. Not heard, it costs nothing.
+    it would otherwise drown the passes after it. Not heard, it costs nothing. A segment
+    dropped after it, as long as a row of it can be, may be a row (see FACING_ROW_DROP).
     """
     passes = plan.passes
     widest = max(p.width_mm for p in passes)
     skip = [0.3 + 0.7 * p.width_mm / widest if p.kind is PassKind.TEST else 0.3 for p in passes]
     steps = _steps(plan)
     n, m = len(steps), len(segments)
+    # Step counts from which on the facing partway is behind: its rows may come next. (One
+    # at the start of the round comes before the recording.)
+    facing_at = {i: plan.legs[~s].face_s for i, s in enumerate(steps, start=1) if s < -1}
     cost = np.full((n + 1, m + 1), math.inf)
     cost[0, :] = np.arange(m + 1)
     move = np.full((n + 1, m + 1), DROP, dtype=np.int8)
     came_from = np.zeros((n + 1, m + 1), dtype=int)  # the segment count before the move
     came_from[0, 1:] = np.arange(m)
     limit = math.log(DURATION_TOLERANCE)
+    behind = None  # face_s of the facing last behind
     for i in range(1, n + 1):
         step = steps[i - 1]
+        behind = facing_at.get(i, behind)
         for j in range(m + 1):
             # On a tie a match wins, then a skip: options in that order.
             options = []
@@ -329,7 +340,8 @@ def align(plan: Plan, segments: list[Segment]) -> Alignment:
             trailing = TRAILING_SKIP if j == m and j > 0 else 1.0
             options.append((cost[i - 1, j] + (0.0 if step < 0 else skip[step] * trailing), SKIP, j))
             if j > 0:
-                options.append((cost[i, j - 1] + 1.0, DROP, j - 1))
+                row = behind is not None and segments[j - 1].duration_s <= behind
+                options.append((cost[i, j - 1] + (FACING_ROW_DROP if row else 1.0), DROP, j - 1))
             cost[i, j], move[i, j], came_from[i, j] = min(options, key=lambda o: o[0])
 
     matches: dict[int, Segment] = {}

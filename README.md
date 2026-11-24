@@ -163,7 +163,9 @@ dechatter plan al-10mm          # writes al-10mm/round-01/program.nc
 Set the work zero at the left end of the stock, on its front face, at the top. Start one
 continuous recording, run the program, stop recording after `M30`. If the program faces the
 top down partway, it stops (`M0`) before and after the facing: pause the recording through
-it (see [Facing the top down](#facing-the-top-down)). Then:
+it, and note what the facing did, since `analyze` asks once the run gets to it (`--facing
+done` for a facing that ran to its end; see [Facing the top down](#facing-the-top-down)).
+Then:
 
 ```sh
 dechatter analyze al-10mm recording.wav   # classifies each pass
@@ -336,25 +338,29 @@ Facing is no test cut, and must not be analysed as one. The widget records on th
 and knows it from the windows it recorded: no pass's cut is in it. A recording from the
 command line is searched for its cuts by sound, so it should not hold the facing: the
 program stops (`M0`) after facing at its start, to start the recording then, and before and
-after facing partway, to pause the recording through it. The cuts on either side then
-follow on in the recording as they do in the plan. A recording left running through the
-facing still matches: a stretch about as long as the facing, where the plan has one, is
-taken for it and left out.
+after facing partway, to pause the recording through it. Pause it there: the cuts on either
+side then follow on in the recording as they do in the plan. A recording left running
+through a facing that ran to its end still matches (a stretch about as long as the facing,
+where the plan has one, is taken for it and left out), but a facing stopped after a few
+rows sounds like cuts.
 
-A run stopped right before facing partway leaves the stock as the facing left it: the new
-top if it finished, the old one if it never started, and if it stopped part-way, a top
-faced only in part, which the next round faces down again from the old top before any cut.
-The widget records each row of the facing, so it knows which. A recording does not (paused,
-it holds none of the facing; left running, a facing stopped part-way can sound like a whole
-one), so when the last cut heard is the one before the facing, `dechatter analyze` asks
-what the facing did and `dechatter plan` refuses until it is told:
+A run that gets to facing partway leaves the stock as the facing left it: the new top if it
+finished, the old one if it never started, and if it stopped part-way, a top faced only in
+part, which the next round faces down again from the old top before any cut. The widget
+records each row of the facing, so it knows which. A recording does not: paused, it holds
+none of the facing, and left running, a facing stopped after a few rows sounds like the
+cuts after it. So once a recording shows the run got to the facing (a cut after it heard, or
+the last cut heard the one right before it), `dechatter analyze` asks what the facing did,
+and `dechatter plan` waits for the answer. For a round run to its end, that is `--facing
+done`:
 
 ```sh
 dechatter analyze al-10mm recording.wav --facing done   # or cut-short, or not-run
 ```
 
-or set `"facing"` to one of those in the round's `results.json`, which keeps the verdicts
-edited there.
+`cut-short` and `not-run` drop whatever was heard after the facing as not run. The answer
+can also go in the round's `results.json` as `"facing"`, which keeps the verdicts edited
+there. `dechatter plan` and the program's header say so for every round that faces partway.
 
 A chip-load sweep is planned only where all its cuts fit, in what the lanes have left, on
 the lanes after them or on a faced top: cut short by the stock, its heaviest chip loads

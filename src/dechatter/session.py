@@ -121,8 +121,8 @@ def spindle_fit(p: PassResult) -> SpindleFit | None:
 
 
 class Facing(StrEnum):
-    """What became of facing the top down mid-round, for a run that stopped right before it:
-    no sound tells whether it finished (see facing_at_stop)."""
+    """What became of facing the top down mid-round, for a run that got to it: no sound
+    tells (see facing_asked)."""
 
     DONE = "done"  # it finished: the new top is flat
     CUT_SHORT = "cut-short"  # it stopped part-way: the top is faced only in part
@@ -135,8 +135,8 @@ class Results:
     recording: str
     thresholds: Thresholds
     passes: tuple[PassResult, ...]
-    # For a run that stopped right before facing the top down mid-round (see facing_at_stop):
-    # what the facing did, from the widget's record of the run or the operator's word. None
+    # For a run that got to facing the top down mid-round (see facing_asked): what the
+    # facing did, from the widget's record of the run or the operator's word. None
     # elsewhere, or until the operator says.
     facing: Facing | None = None
     schema: int = SCHEMA
@@ -361,30 +361,36 @@ def _last_heard(r: Round) -> int | None:
     return _final(r.results.passes)
 
 
-def facing_at_stop(plan: Plan, passes: tuple[PassResult, ...]) -> int | None:
-    """The leg whose facing of the top the run stopped right before, as heard: its last pass
-    heard ran to its end, and the program faces the top next. The run may have stopped there,
-    or faced the top all the way or part-way and stopped before the next cut: a recording
-    paused through the facing cannot tell, and one that ran on through it may hold a facing
-    cut short as well as a whole one. The widget's record of the run, or the operator, says
-    (Results.facing). None: the run went on past a facing, or stopped elsewhere."""
+def facing_asked(plan: Plan, passes: tuple[PassResult, ...]) -> int | None:
+    """The leg whose mid-round facing of the top (Plan.mid_facing) the run got to, as far as
+    its passes tell: one of that leg's passes or a later one was heard, or the last pass heard
+    ran to its end right before the facing. What the facing did must then be said
+    (Results.facing), by the widget's record of the run or by the operator: sound cannot
+    tell. Paused through, a recording holds none of it; left running, a facing stopped after
+    a few rows sounds like the passes after it, and a whole one may be missed. None: no such
+    facing, or the run stopped short of it."""
+    faced = plan.mid_facing
     final = _final(passes)
-    if final is None or passes[final].status is PassStatus.ABORTED:
+    if faced is None or final is None:
         return None
-    return plan.facing_before(final + 1)
+    start = plan.first_index(faced)
+    if final >= start:
+        return faced
+    if final == start - 1 and passes[final].status is not PassStatus.ABORTED:
+        return faced
+    return None
 
 
 def _facing_unknown(r: Round, faced: int) -> str:
     n = r.plan.round
-    final = r.results.passes[_last_heard(r)].id
+    first = r.plan.legs[faced].passes[0].id
     return (
-        f"round {n} stopped after pass {final}, right before its program faces the top down "
-        f"{r.plan.legs[faced].reface_mm:g} mm, and the recording cannot tell whether the facing "
-        f"ran. Say what it did: `dechatter analyze {r.path.parent} <recording> --round {n} "
-        "--facing done` if it finished, `--facing cut-short` if it stopped part-way (the next "
-        "round faces the top again first), `--facing not-run` if it never started; or set "
-        f'"facing" to one of those in {r.path.name}/{RESULTS_FILE}, which keeps the verdicts '
-        "set there by hand"
+        f"round {n} faces the top down {r.plan.legs[faced].reface_mm:g} mm before pass "
+        f"{first}, and its recording cannot tell what that facing did. Say so: `dechatter "
+        f"analyze {r.path.parent} <recording> --round {n} --facing done` if it ran to its end, "
+        "`--facing cut-short` if it stopped part-way (the next round faces the top again "
+        "first), `--facing not-run` if it never started; or set "
+        f'"facing" to one of those in {r.path.name}/{RESULTS_FILE}'
     )
 
 
@@ -392,33 +398,34 @@ def face_after(last: Round) -> Face:
     """Where the stock stands after a round was run: on the lane of the last pass heard, its
     face and the step an aborted pass left on it, with the top that leg was cut from. With
     no pass heard, where the round started (after the facing it starts with, if any). Where
-    the run stopped right before facing the top down mid-round, what the facing did says:
-    the new top, the old one, or the old one faced in part, to face again before any cut."""
+    the run got to facing the top down mid-round (see facing_asked), what the facing did
+    says: done, the new top; cut short, the end of the leg before it on the old top, faced
+    in part, to face again before any cut; not run, the last pass heard before it."""
     if last.results is None:
         raise SessionError(f"{last.path.name} has no results; run `dechatter analyze` first")
+    plan, passes, facing = last.plan, last.results.passes, last.results.facing
+    faced = plan.mid_facing
+    if facing is None and facing_asked(plan, passes) is not None:
+        raise SessionError(_facing_unknown(last, faced))
     final = _last_heard(last)
+    done = faced is not None and facing is Facing.DONE
+    if done and (final is None or final < plan.first_index(faced)):
+        # Faced, and stopped before the first cut on the new top.
+        new = plan.legs[faced]
+        return Face(new.lane, new.face_y_start_mm, 0.0, new.lane_cap_mm, new.top_mm)
+    if faced is not None and facing is Facing.CUT_SHORT:
+        end = plan.legs[faced - 1]
+        return Face(end.lane, end.face_y_end_mm, 0.0, end.lane_cap_mm, end.top_mm, Top.PART_FACED)
     if final is None:
-        start = last.plan.legs[0]
+        start = plan.legs[0]
         return Face(start.lane, start.face_y_start_mm, 0.0, start.lane_cap_mm, start.top_mm)
-    number, place = last.plan.leg_of(final)
-    leg = last.plan.legs[number]
+    number, place = plan.leg_of(final)
+    leg = plan.legs[number]
     widths = [p.width_mm for p in leg.passes]
     y = leg.face_y_start_mm + sum(widths[:place])
-    if last.results.passes[final].status is PassStatus.ABORTED:
+    if passes[final].status is PassStatus.ABORTED:
         return Face(leg.lane, y, widths[place], leg.lane_cap_mm, leg.top_mm)
-    after = Face(leg.lane, y + widths[place], 0.0, leg.lane_cap_mm, leg.top_mm)
-    faced = facing_at_stop(last.plan, last.results.passes)
-    if faced is None:
-        return after
-    facing = last.results.facing
-    if facing is None:
-        raise SessionError(_facing_unknown(last, faced))
-    if facing is Facing.DONE:
-        new = last.plan.legs[faced]
-        return Face(new.lane, new.face_y_start_mm, 0.0, new.lane_cap_mm, new.top_mm)
-    if facing is Facing.CUT_SHORT:
-        return dataclasses.replace(after, top=Top.PART_FACED)
-    return after
+    return Face(leg.lane, y + widths[place], 0.0, leg.lane_cap_mm, leg.top_mm)
 
 
 @dataclass(frozen=True)
@@ -514,7 +521,7 @@ def _match(plan: Plan, samples: np.ndarray, rate: int, manual: list[audio.Segmen
     if manual is not None and matched[final].duration_s < cut_short:
         statuses[final] = PassStatus.ABORTED
     # Sound after the last pass heard is the next pass, stopped early; but before a facing it
-    # may as well be the facing, stopped or not: facing_at_stop leaves that to the operator.
+    # may as well be the facing, stopped or not: facing_asked leaves that to the operator.
     nxt = final + 1
     stopped_in_next = tail and tail[0].duration_s >= MIN_ABORTED_S and nxt < len(plan.passes)
     if stopped_in_next and plan.facing_before(nxt) is None:
@@ -534,9 +541,11 @@ def analyze(
     facing: Facing | None = None,
 ) -> Results:
     """Classify each pass. Where the widget recorded the run (`timeline`), its windows say
-    where every cut is; otherwise the cuts are found by their sound. Where the run stopped
-    right before facing the top down mid-round (see facing_at_stop), the widget's record
-    says what the facing did, else `facing`: the operator's word."""
+    where every cut is; otherwise the cuts are found by their sound. Where the run got to
+    facing the top down mid-round (see facing_asked), the widget's record says what the
+    facing did, else `facing`: the operator's word, without which the next round cannot be
+    planned. Cut short or not run, it leaves nothing cut after it: whatever was heard there
+    (the facing's own rows, perhaps) is dropped."""
     placed = (
         None if manual is not None or timeline is None else placements_from_timeline(plan, timeline)
     )
@@ -624,36 +633,39 @@ def analyze(
             )
         )
     passes = tuple(results)
-    faced = facing_at_stop(plan, passes)
-    if facing is not None and faced is None:
-        final = _final(passes)
-        where = "no pass" if final is None else f"pass {passes[final].id}"
-        raise SessionError(
-            "--facing is for a run that stopped right before its program faces the top down "
-            f"mid-round, and the last cut heard here is {where}: leave it out"
+    faced = facing_asked(plan, passes)
+    if faced is None:
+        if facing is not None:
+            raise SessionError(
+                "--facing is for a run that got to its program's facing of the top partway "
+                "through, and this one stopped short of it, or the round has none: leave it out"
+            )
+        return Results(plan.round, recording, thresholds, passes)
+    if windowed:
+        if facing is not None:
+            raise SessionError(
+                "the widget's record of the run says what the facing did: leave --facing out"
+            )
+        went_on = _final(passes) >= plan.first_index(faced)
+        recorded = Facing.DONE if went_on else facing_in_timeline(timeline)
+        return Results(plan.round, recording, thresholds, passes, recorded)
+    if facing in (Facing.CUT_SHORT, Facing.NOT_RUN):
+        start = plan.first_index(faced)
+        dropped = tuple(
+            PassResult(p.id, p.kind, p.rpm, p.width_mm, PassStatus.LIKELY_NOT_RUN)
+            for p in passes[start:]
         )
-    recorded = None if timeline is None or faced is None else facing_in_timeline(timeline, faced)
-    if facing is not None and recorded is not None:
-        raise SessionError(
-            f"the widget's record of the run says what the facing did ({recorded}): leave "
-            "--facing out"
-        )
-    return Results(
-        plan.round, recording, thresholds, passes, facing if recorded is None else recorded
-    )
+        passes = passes[:start] + dropped
+    return Results(plan.round, recording, thresholds, passes, facing)
 
 
-def facing_in_timeline(timeline: list, leg: int) -> Facing | None:
-    """What the widget's record of the run says the facing of the top before `leg` did, by
-    its rows: the last one finished, one stopped or none run. None: no record of a run."""
-    if not any(e.get("event") == "record" for e in timeline):
-        return None
-    rows = [e for e in timeline if e.get("event") == "face" and e.get("leg") == leg]
-    if not rows:
-        return Facing.NOT_RUN
+def facing_in_timeline(timeline: list) -> Facing:
+    """What the widget's record of the run says its facing of the top partway did, by its
+    rows: the last one finished, one stopped or none run."""
+    rows = [e for e in timeline if e.get("event") == "face"]
     if any(e.get("rows_after") == 0 and not e.get("aborted") for e in rows):
         return Facing.DONE
-    return Facing.CUT_SHORT
+    return Facing.CUT_SHORT if rows else Facing.NOT_RUN
 
 
 class Stock(StrEnum):
@@ -691,9 +703,11 @@ def _reached(r: Round) -> tuple[Leg, ...]:
 
 def _faced_at_stop(r: Round) -> bool:
     """Whether the round's run ended by facing the top all the way down, after its last cut."""
-    if r.results is None or r.results.facing is not Facing.DONE:
+    faced = r.plan.mid_facing
+    if r.results is None or r.results.facing is not Facing.DONE or faced is None:
         return False
-    return facing_at_stop(r.plan, r.results.passes) is not None
+    final = _last_heard(r)
+    return final is None or final < r.plan.first_index(faced)
 
 
 def _cut_since_top(rounds: list[Round]) -> tuple[float, ...]:

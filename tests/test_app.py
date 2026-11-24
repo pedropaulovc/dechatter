@@ -1315,6 +1315,14 @@ def test_once_every_lane_is_used_the_round_faces_the_top_midway_and_goes_on(engi
         assert p["status"] == "analysed"
         assert p["kind"] != "test" or p["verdict"] == ("unstable" if truth else "stable")
 
+    # Found by sound (this run's timeline records no windows), so the recording cannot tell
+    # what the facing did, though the run went on past it: it is asked.
+    with pytest.raises(RuntimeError, match="cannot tell what that facing did"):
+        engine.call("plan", NAME, "same")
+    folder = session.round_dir(engine.root / NAME, first["round"])
+    where, wav = str(engine.root / NAME), str(folder / session.RECORDING_FILE)
+    assert cli.main(["analyze", where, wav, "--facing", "done"]) == 0
+
     # The next round starts where this one ended: on the new top, in the lane it ended in,
     # or the fresh lane after it, cut back no further.
     ended = session.face_after(session.load_rounds(engine.root / NAME)[-1])
@@ -1368,10 +1376,15 @@ def test_from_the_command_line_a_run_stopped_at_the_facing_must_say_what_it_did(
     wav = folder / "phone.wav"
     audio.save_wav(wav, synth.record(before, MACHINE, seed=1), synth.RATE)
     where = str(engine.root / NAME)
+    # Said up front: the plan's output and the program's header.
+    cli._print_round(engine.root / NAME, planned)
+    assert "analyze asks, and you add --facing done" in capsys.readouterr().out
+    program = engine.call("program", NAME, first["round"], "mm")
+    assert "dechatter analyze asks" in program
     assert cli.main(["analyze", where, str(wav)]) == 0
-    assert "--facing done|cut-short|not-run" in capsys.readouterr().out
+    assert "Did it run to its end, stop part-way, or never start?" in capsys.readouterr().out
     assert cli.main(["plan", where]) == 1
-    assert "--facing done` if it finished" in capsys.readouterr().err
+    assert "--facing done` if it ran to its end" in capsys.readouterr().err
 
     # Stopped part-way through the facing: the next round faces the top down again from
     # the old top before any cut, then starts at the first lane below it.
