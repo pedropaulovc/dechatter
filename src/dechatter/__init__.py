@@ -1,3 +1,3 @@
 """Find chatter-free milling parameters from test cuts and a phone recording."""
 
-__version__ = "0.5.0"  # the package version (pyproject.toml reads it); package.json repeats it
+__version__ = "0.6.0"  # the package version (pyproject.toml reads it); package.json repeats it
