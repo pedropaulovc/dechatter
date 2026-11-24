@@ -16,6 +16,7 @@ from dechatter.detect import Thresholds, Verdict
 from dechatter.plan import (
     REFACE_EXTRA_MM,
     Face,
+    PassKind,
     Plan,
     PlannerKind,
     Top,
@@ -601,6 +602,38 @@ def test_a_facing_stopped_after_a_few_rows_is_never_taken_for_cuts(write_setup, 
     first = nxt.legs[0]
     assert (first.lane, first.face_y_start_mm, first.top_mm) == (1, 0.0, first.reface_mm)
     assert first.reface_mm == pytest.approx(depth + REFACE_EXTRA_MM)
+
+
+@pytest.mark.parametrize("facing", [session.Facing.NOT_RUN, session.Facing.CUT_SHORT])
+def test_a_facing_set_by_hand_drops_what_was_heard_after_it(write_setup, tmp_path, facing):
+    _, plan, faced, row_s = rows_setup(write_setup, 1)
+    start = plan.first_index(faced)
+    recording = synth.record(plan, seed=3, facing=synth.Facing.ROWS, row_s=row_s, stop_after_rows=2)
+    results = session.analyze(plan, recording, synth.RATE, "r.wav", Thresholds())
+    # As an older matcher could: the facing's two rows taken for the faced leg's first passes.
+    passes = list(results.passes)
+    for i in (start, start + 1):
+        passes[i] = dataclasses.replace(
+            passes[i], status=PassStatus.ANALYSED, verdict=Verdict.UNSTABLE
+        )
+    folder = tmp_path / "round-02"
+    folder.mkdir()
+    dataclasses.replace(results, passes=tuple(passes)).save(folder / session.RESULTS_FILE)
+    # The operator answers in results.json by hand, as the refusal offers.
+    edited = json.loads((folder / session.RESULTS_FILE).read_text())
+    (folder / session.RESULTS_FILE).write_text(json.dumps({**edited, "facing": facing.value}))
+    r = session.Round(folder, plan, session.Results.load(folder / session.RESULTS_FILE))
+    assert {p.status for p in r.results.passes[start:]} == {PassStatus.LIKELY_NOT_RUN}
+    # The next round starts before the facing, on the old top; the passes after it are no
+    # evidence.
+    face = session.face_after(r)
+    end = plan.legs[faced - 1]
+    assert (face.lane, face.top_mm) == (end.lane, 0.0)
+    assert face.top is (Top.PART_FACED if facing is session.Facing.CUT_SHORT else Top.FLAT)
+    observed = session._tests([r], lambda depth: True)
+    heard_before = [p for p in r.results.passes[:start] if p.kind is PassKind.TEST and p.verdict]
+    assert len(observed) == len(heard_before) > 0
+    assert [(o.rpm, o.width_mm) for o in observed] == [(p.rpm, p.width_mm) for p in heard_before]
 
 
 @pytest.mark.parametrize(

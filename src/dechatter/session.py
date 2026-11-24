@@ -195,6 +195,29 @@ class Round:
     plan: Plan
     results: Results | None
 
+    def __post_init__(self):
+        # However the results were set (analysis, or "facing" edited in results.json), a
+        # facing cut short or never run leaves nothing cut after it.
+        if self.results is not None:
+            object.__setattr__(self, "results", after_facing(self.plan, self.results))
+
+
+def after_facing(plan: Plan, results: Results) -> Results:
+    """`results` with every pass from the leg after a mid-round facing on counted as not
+    run, when the facing was cut short or never ran: a pass heard there was something else
+    (the facing's own rows, perhaps), and its verdict is no evidence."""
+    faced = plan.mid_facing
+    if faced is None or results.facing not in (Facing.CUT_SHORT, Facing.NOT_RUN):
+        return results
+    start = plan.first_index(faced)
+    if all(p.status is PassStatus.LIKELY_NOT_RUN for p in results.passes[start:]):
+        return results
+    dropped = tuple(
+        PassResult(p.id, p.kind, p.rpm, p.width_mm, PassStatus.LIKELY_NOT_RUN)
+        for p in results.passes[start:]
+    )
+    return dataclasses.replace(results, passes=results.passes[:start] + dropped)
+
 
 def round_dir(session: Path, number: int) -> Path:
     return session / f"round-{number:02d}"
@@ -649,14 +672,7 @@ def analyze(
         went_on = _final(passes) >= plan.first_index(faced)
         recorded = Facing.DONE if went_on else facing_in_timeline(timeline)
         return Results(plan.round, recording, thresholds, passes, recorded)
-    if facing in (Facing.CUT_SHORT, Facing.NOT_RUN):
-        start = plan.first_index(faced)
-        dropped = tuple(
-            PassResult(p.id, p.kind, p.rpm, p.width_mm, PassStatus.LIKELY_NOT_RUN)
-            for p in passes[start:]
-        )
-        passes = passes[:start] + dropped
-    return Results(plan.round, recording, thresholds, passes, facing)
+    return after_facing(plan, Results(plan.round, recording, thresholds, passes, facing))
 
 
 def facing_in_timeline(timeline: list) -> Facing:
