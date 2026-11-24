@@ -149,15 +149,17 @@ class Results:
 
 
 def _finite(p: dict) -> dict:
-    """A saved pass, its verdicts parsed, without the NaN 0.5.0 wrote for a silent cut: that
-    reading measured nothing, so its numbers and the detector's verdict are dropped (a
-    verdict set by hand stays), and the round can be read and analysed again."""
+    """A saved pass, its verdicts parsed, without the NaN 0.5.0 wrote for a silent cut: the
+    numbers that are not numbers are dropped, and with a prominence that is not one, the
+    detector's verdict too (it measured nothing; a verdict set by hand stays)."""
     verdict = Verdict(p["verdict"]) if p["verdict"] else None
     detected = Verdict(p["detected"]) if p["detected"] else None
     void = [k for k, v in p.items() if isinstance(v, float) and not math.isfinite(v)]
     if not void:
         return {**p, "verdict": verdict, "detected": detected}
-    log.warning("pass %s: %s not a number: its reading is dropped", p["id"], ", ".join(void))
+    log.warning("pass %s: %s not a number: dropped", p["id"], ", ".join(void))
+    if "prominence_db" not in void:
+        return {**p, **dict.fromkeys(void), "verdict": verdict, "detected": detected}
     if verdict is detected:
         verdict = None
     return {**p, **dict.fromkeys(void), "verdict": verdict, "detected": None}

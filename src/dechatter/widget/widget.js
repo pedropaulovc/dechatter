@@ -1011,7 +1011,7 @@ function verdictCell(round, pass) {
   );
   select.value = pass.verdict ?? '';
   const quiet = pass.over_air_db === null
-    ? 'Nothing to hear where the run cut it: the recording stopped first. The face still moved on.'
+    ? 'Nothing could be analysed where the run cut it (silent or too short). The face still moved on.'
     : `No louder than the spindle in the air (${pass.over_air_db} dB over it): it may have cut nothing. Was the face where the plan put it?`;
   select.title = pass.status === 'no cut heard'
     ? quiet
