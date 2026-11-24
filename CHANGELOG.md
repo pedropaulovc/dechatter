@@ -6,6 +6,8 @@ What changed for people who use the dechatter widget and command line. The forma
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-23
+
 ### Added
 
 - **Stepping the depth**: a session can hold the radial width and step the axial depth
@@ -282,7 +284,8 @@ What changed for people who use the dechatter widget and command line. The forma
   Sessions export to a zip the command line reads, and import in another browser.
 - Published on npm as `dechatter`, with third-party notices for the bundled Pyodide.
 
-[Unreleased]: https://github.com/pedropaulovc/dechatter/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/pedropaulovc/dechatter/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/pedropaulovc/dechatter/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/pedropaulovc/dechatter/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/pedropaulovc/dechatter/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/pedropaulovc/dechatter/compare/v0.2.0...v0.3.0
