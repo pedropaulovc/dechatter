@@ -15,6 +15,7 @@ from dechatter.plan import (
     PlanError,
     PlannerKind,
     assemble,
+    cut_order,
     envelope,
     facing_rows,
     grid_tests,
@@ -413,26 +414,27 @@ def test_a_round_uses_what_every_lane_has_left_before_it_faces_the_top_down(writ
     assert legs[3].face_s > 0 and plan.run_time_s == pytest.approx(cuts + legs[3].face_s)
 
 
-def test_the_top_comes_down_as_often_as_needed_while_the_next_cut_clears_the_jaws(write_setup):
+def test_a_round_faces_the_top_down_once_then_drops_what_its_lanes_cannot_hold(write_setup):
     setup = load_setup(write_setup(**SPILL))
     env = envelope(setup)
     depth = setup.cut.axial_depth_mm
     tests = grid_tests(setup, env)
     step = depth + REFACE_EXTRA_MM
-
-    def facings(top_mm: float):
-        # Every lane used, the top already `top_mm` down.
-        used = Face(lane=3, y_mm=5.0, cap_mm=5.0, top_mm=top_mm)
-        plan = assemble(setup, env, 3, PlannerKind.GRID, tests, face=used, cut_mm=(depth,))
-        tests_cut = len(plan.passes) - len(plan.legs)  # one truing pass a leg
-        return [leg.top_mm for leg in plan.legs if leg.reface_mm], tests_cut
-
-    # The top comes down twice, below the round's own cuts the second time, to fit them all.
-    assert facings(20.0) == (pytest.approx([20.0 + step, 20.0 + 2 * step]), len(tests))
-    # Higher up, only one facing leaves the clearance above the jaws: the rest wait.
-    tops, tests_cut = facings(20.0 + step)
-    assert tops == pytest.approx([20.0 + 2 * step]) and 0 < tests_cut < len(tests)
-    assert tops[-1] + step + depth + setup.program.clearance_mm > 40.0
+    # Every lane used, the top already 20 mm down: the tests need more than one new top.
+    used = Face(lane=3, y_mm=5.0, cap_mm=5.0, top_mm=20.0)
+    plan = assemble(setup, env, 3, PlannerKind.GRID, tests, face=used, cut_mm=(depth,))
+    # One facing, then every lane of the new top; the tests left over are dropped.
+    assert [leg.reface_mm for leg in plan.legs] == pytest.approx([step, 0, 0])
+    assert [leg.lane for leg in plan.legs] == [1, 2, 3]
+    assert all(leg.top_mm == pytest.approx(20.0 + step) for leg in plan.legs)
+    tests_cut = len(plan.passes) - len(plan.legs)  # one truing pass a leg
+    assert 0 < tests_cut < len(tests)
+    widths = [p.width_mm for p in plan.passes if p.kind is PassKind.TEST]
+    assert widths == pytest.approx([t[1] for t in cut_order(setup, tests)[:tests_cut]])
+    # A chip-load sweep the new top's lanes cannot hold whole is not planned at all.
+    sweep = sweep_tests(setup, env, tests[0][0], 4.0)
+    with pytest.raises(PlanError, match="needs room for all its"):
+        assemble(setup, env, 3, PlannerKind.SWEEP, sweep, face=used, cut_mm=(depth,))
 
 
 def test_a_chip_load_sweep_may_span_lanes_but_is_never_cut_short(write_setup):

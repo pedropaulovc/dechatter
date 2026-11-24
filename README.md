@@ -325,10 +325,12 @@ at most `face_depth_mm` (1 mm) and rows `face_width_mm` (a quarter of the cutter
 from the front face to the back (`thickness_mm`, or the width used) and past both ends, at
 the speed of the cut that comes next. Then the round goes on at the first lane, below the
 new top, with the same zero: no remounting, no re-zeroing. That can happen at the start of
-a round or partway, when the lanes run out with cuts still to make, and again if those fill
-the new top too. It does so as long as the next cut's bottom stays the clearance above that
+a round or partway, when the lanes run out with cuts still to make, but at most once a
+round: facing is slow, so the round uses the stock left in its lanes first, faces once,
+fills the lanes of the new top, and drops the cuts that still do not fit; the next round
+plans afresh. It faces only while the next cut's bottom stays the clearance above that
 height; past that the round keeps the cuts that fit, and the next one asks for fresh stock.
-The run time covers every facing.
+The run time covers the facing.
 
 Facing is no test cut, and must not be analysed as one. The widget records on through it
 and knows it from the windows it recorded: no pass's cut is in it. A recording from the

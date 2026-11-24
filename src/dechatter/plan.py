@@ -460,7 +460,8 @@ def _lay_out(
     last lane is used, or the face is flat only above the round's depth (`cut_mm`: the depths
     cut into the top as it stands), the top comes down below the deepest of those cuts, given
     stock.height_mm and while the next cut's bottom stays the clearance above it, and the
-    round goes on at the first lane.
+    round goes on at the first lane. A round faces the top at most once: facing is slow, so
+    the tests the lanes of the new top cannot hold are left over (assemble drops them).
     """
     depth = setup.cut.axial_depth_mm
     left = cut_order(setup, tests)
@@ -482,9 +483,9 @@ def _lay_out(
             here = Face(here.lane + 1, 0.0, 0.0, here.y_mm, here.top_mm)
             continue
         # Every lane of this top is used, or none would hold the next test (a lane after this
-        # one may go no further back): only a fresh top can.
+        # one may go no further back): only a fresh top can, once a round.
         height = setup.stock.height_mm
-        if height is None or not cut:
+        if height is None or not cut or here.top_mm > face.top_mm:
             break
         down = max(cut) + REFACE_EXTRA_MM
         lower = Face(top_mm=here.top_mm + down)
