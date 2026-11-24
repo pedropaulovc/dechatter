@@ -223,6 +223,39 @@ test('stop holds, resets once the machine has decelerated, and ends the run', as
   ]);
 });
 
+// The rows of facing the top down before leg 1, at these Y, as the engine's blocks give them.
+const facing = (rows) => rows.map((y, i) => ({
+  step: 'face', lines: [`G0 X-8 Y${y}`, 'G0 Z3', 'G1 Z-1 F150', 'G1 X68 F500', 'G0 Z10'], pass_id: null, rpm: 1000, seconds: null, target: { x: 68, y, z: 10 }, leg: 1, rows_after: rows.length - 1 - i,
+}));
+
+test('each row of facing the top down is recorded, and one a stop cuts short is marked', async () => {
+  const [setup, ...first] = round([1]);
+  const blocks = [setup, ...first.slice(0, -1), ...facing([1, 4, 7]), ...pass(2), first.at(-1)];
+  // Run whole: every row, the last saying none is left.
+  const whole = new Machine();
+  const run = whole.stepper_for();
+  assert.equal(await run.stepper.run(blocks), PHASE.DONE);
+  assert.deepEqual(run.windows.filter((w) => w.kind === 'face'), [
+    { kind: 'face', leg: 1, rows_after: 2, start: 14, end: 16 },
+    { kind: 'face', leg: 1, rows_after: 1, start: 16, end: 18 },
+    { kind: 'face', leg: 1, rows_after: 0, start: 18, end: 20 },
+  ]);
+  // Stopped in the second row: the top is faced only in part.
+  const machine = new Machine();
+  const { stepper, windows } = machine.stepper_for();
+  machine.onMove = async (lines) => {
+    if (lines[0] === 'G0 X-8 Y4') {
+      machine.moving = false;
+      await stepper.stop();
+    }
+  };
+  assert.equal(await stepper.run(blocks), PHASE.STOPPED);
+  assert.deepEqual(windows.filter((w) => w.kind === 'face'), [
+    { kind: 'face', leg: 1, rows_after: 2, start: 14, end: 16 },
+    { kind: 'face', leg: 1, rows_after: 1, start: 16, end: 16, aborted: true },
+  ]);
+});
+
 test('a stop during the dwell ends it at once', async () => {
   const machine = new Machine();
   const { stepper } = machine.stepper_for();

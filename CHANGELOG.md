@@ -6,6 +6,41 @@ What changed for people who use the dechatter widget and command line. The forma
 
 ## [Unreleased]
 
+### Changed
+
+- A round uses the stock left in every lane before the top is faced down. It fills what
+  is left of the lane it starts on, then goes on into the next lane and the ones after it,
+  each a fresh face at Y0 with its own truing pass, within the same program; only once
+  every lane is used (and `height_mm` is given) does it face the top down, partway through
+  if need be, and go on at the first lane below the new top. It faces at most once: the
+  cuts the new top's lanes cannot hold are dropped, and the next round plans afresh.
+  Before, a round that did not fit what its lane had left or the single next lane faced
+  the whole top down, wasting those lanes and every lane after them. A chip-load sweep may
+  now span lanes, still only whole. The program comments each lane change and the facing;
+  `dechatter plan`, the widget and the report list the lanes a round cuts, the pass each
+  starts at, and where the top is faced. The next round starts in the lane the last one
+  ended in.
+- From the command line, a program that faces the top down partway stops (`M0`) before
+  and after the facing: pause the recording through it, so the cuts found by their sound
+  follow on as planned. A recording that runs on through a facing that ran to its end is
+  still matched: the facing is heard as one long stretch and left out, and a few rows of a
+  facing stopped early no longer make the cuts before them go unmatched. The widget records
+  on through it and leaves it out of the analysis.
+- Once a run gets to facing the top down partway, the next round starts from what the
+  facing did: on the new top if it finished, where the run stopped if it never started, and
+  if it stopped part-way, by facing the top down again from the old top before any cut. The
+  widget records the facing's rows and knows which. A recording cannot tell (a facing
+  stopped after a few rows sounds like cuts), so whenever it shows the run got to the facing
+  `dechatter analyze` asks for `--facing done` (a round run to its end), `cut-short` or
+  `not-run` (or `"facing"` in the round's `results.json`), and `dechatter plan` waits for
+  it; `cut-short` and `not-run` count what was heard after the facing as not run (no
+  verdict can be set on it), set in `results.json` by hand as well. `results.json` keeps
+  what was heard, so correcting `"facing"` to `done` brings it back. `dechatter plan` and
+  the program's header say so up front. Sound after the last cut before the facing is no
+  longer taken for the next pass stopped early.
+- Sessions planned by this version cannot be opened by dechatter 0.5.0, whose plans hold a
+  round on a single lane. Sessions from 0.2.0 to 0.5.0 load as they are.
+
 ### Fixed
 
 - A pass the widget's run cut, but whose stretch of the recording is silent or cut off (the

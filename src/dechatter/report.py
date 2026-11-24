@@ -16,7 +16,7 @@ from . import __version__, bayes, materials, session
 from .config import WATTS_PER_HP, SpindleControl, load_setup
 from .detect import Verdict
 from .gcode import MM_PER_INCH, Units
-from .plan import SPINDLE_EFFICIENCY, PassKind, PlannerKind, envelope, feed_mm_min
+from .plan import SPINDLE_EFFICIENCY, PassKind, Plan, PlannerKind, envelope, feed_mm_min
 from .session import PassStatus, Round, SpindleFit, VerdictSource
 
 REPORT_FILE = session.REPORT_FILE
@@ -72,6 +72,23 @@ def _table(head: Iterable[str], rows: Iterable[Iterable[str]], cls: str = "") ->
     header = "".join(f"<th>{_e(h)}</th>" for h in head)
     body = "".join("<tr>" + "".join(f"<td>{_e(c)}</td>" for c in row) + "</tr>" for row in rows)
     return f'<table class="{cls}"><thead><tr>{header}</tr></thead><tbody>{body}</tbody></table>'
+
+
+def _where(plan: Plan, units: Units) -> str:
+    """Where a round cuts, as it goes: its lanes, and where it faces the top down."""
+    parts = []
+    for number, leg in enumerate(plan.legs):
+        lane = f"lane {leg.lane} of {plan.lanes}" if plan.lanes > 1 else ""
+        faced = f"top faced down {_length(leg.reface_mm, units)}" if leg.reface_mm > 0 else ""
+        start = leg.passes[0].id
+        if number == 0:
+            parts += [p for p in (lane, faced and f"{faced} first") if p]
+            continue
+        if faced:
+            parts.append(f"{faced} before pass {start}, then {lane or 'the front face'} again")
+            continue
+        parts.append(f"{lane} from pass {start}")
+    return "".join(f", {p}" for p in parts)
 
 
 def _dates(rounds: list[Round]) -> str:
@@ -298,12 +315,7 @@ def render(session_dir: Path, units: Units) -> str:
         log.append(
             f"<h3>Round {r.plan.round}: {_e(_length(r.plan.axial_depth_mm, units))} deep, "
             f"{_e(PLANNER_NAMES[r.plan.planner])}, planned {_e(r.plan.planned_on)}"
-            + (f", lane {r.plan.lane} of {r.plan.lanes}" if r.plan.lanes > 1 else "")
-            + (
-                f", top faced down {_e(_length(r.plan.reface_mm, units))} first"
-                if r.plan.reface_mm > 0
-                else ""
-            )
+            + _e(_where(r.plan, units))
             + f", {state}</h3>"
             + _table(
                 [

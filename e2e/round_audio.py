@@ -6,7 +6,8 @@ The widget's Export button produces the zip. Play the WAV into the widget with f
 or through the speakers, starting when the job starts. The cuts are timed from the round's
 G-code the way fake_grbl.py runs it at its default --rapid (G0 at 3000 mm/min, G1 at its feed,
 G4 for its seconds), so the sound follows the simulated machine's motion to within about a
-second: the simulator's 10 ms ticks add up over a round.
+second: the simulator's 10 ms ticks add up over a round. Facing the top down is heard as it
+runs, right after the pass before it: the widget records on through it and sends no M0.
 
 Assumes every earlier round's program ran to completion on the same simulator, since that is
 where this round starts from. Manual-spindle programs are refused: their M0 stops last as
@@ -36,16 +37,18 @@ WORD = re.compile(r"([GXYZFP])(-?\d+(?:\.\d+)?)")
 
 
 def run(program: str, start: tuple[float, float, float]) -> tuple[list[tuple[float, float]], tuple]:
-    """(start, end) seconds of every cutting move (G1 along X), and where the machine ends up."""
+    """(start, end) seconds of every pass's cutting move (the G1 along X after its dwell), and
+    where the machine ends up."""
     position = dict(zip("XYZ", start, strict=True))
-    clock, feed, cuts = 0.0, 0.0, []
-    for line in program.splitlines():
+    clock, feed, cuts, dwelled = 0.0, 0.0, [], -1
+    for index, line in enumerate(program.splitlines()):
         code = re.sub(r"\(.*?\)", "", line).strip()
         words = dict(WORD.findall(code))
-        if re.match(r"M0\b", code):
+        if re.match(r"M0\b", code) and "set the spindle" in line:
             raise SystemExit("manual-spindle program: its M0 stops cannot be timed in advance")
         if words.get("G") == "4":
             clock += float(words["P"])
+            dwelled = index
             continue
         if words.get("G") not in ("0", "1"):
             if set(words) & set("XYZ"):
@@ -55,7 +58,7 @@ def run(program: str, start: tuple[float, float, float]) -> tuple[list[tuple[flo
         target = {axis: float(words.get(axis, position[axis])) for axis in "XYZ"}
         seconds = math.dist(list(position.values()), list(target.values())) * 60
         seconds /= RAPID_MM_MIN if words["G"] == "0" else feed
-        if words["G"] == "1" and "X" in words:
+        if words["G"] == "1" and "X" in words and dwelled == index - 1:
             cuts.append((clock, clock + seconds))
         clock += seconds
         position = target
@@ -79,11 +82,13 @@ def main(export: Path, out: Path) -> None:
     for program in programs:
         cuts, position = run(program, position)
 
+    # Facing is heard from the end of the pass before it; the rest of the gap is spindle.
+    faced = {leg.passes[0].id: leg.face_s for leg in plan.legs if leg.reface_mm > 0}
     air, heard_until = [], 0.0
     for p, (start, _) in zip(plan.passes, cuts, strict=True):
-        air.append(start + p.lead_in_s - heard_until)
+        air.append(start + p.lead_in_s - heard_until - faced.get(p.id, 0.0))
         heard_until = start + p.lead_in_s + p.expected_cut_s
-    heard = synth.record(plan, seed=plan.round, air_s=air)
+    heard = synth.record(plan, seed=plan.round, air_s=air, facing=synth.Facing.HEARD)
     out.parent.mkdir(parents=True, exist_ok=True)
     audio.save_wav(out, heard, synth.RATE)
     print(json.dumps({"round": plan.round, "seconds": round(len(heard) / synth.RATE, 1)}))

@@ -107,23 +107,30 @@ def _print_round(session_dir: Path, plan: Plan) -> None:
     tests = [p for p in plan.passes if p.kind is PassKind.TEST]
     print(
         f"round {plan.round}, {plan.axial_depth_mm:g} mm deep: {len(tests)} test cuts, "
-        f"about {plan.run_time_s / 60:.0f} min, "
-        f"uses {plan.consumed_mm:.1f} mm of stock width"
+        f"about {plan.run_time_s / 60:.0f} min"
     )
-    if plan.reface_mm > 0:
-        print(
-            f"  faces the top down {plan.reface_mm:g} mm first, to Z{-plan.top_mm:g}"
-            " (keep the zero; start recording at the M0 after it)"
-        )
-    if plan.lanes > 1:
-        first, last = lane_x_mm(
-            load_setup(session.round_dir(session_dir, plan.round) / session.SETUP_FILE),
-            plan.lane,
-            plan.lanes,
-        )
-        fresh = plan.face_y_start_mm == 0 and plan.lane > 1
+    setup = load_setup(session.round_dir(session_dir, plan.round) / session.SETUP_FILE)
+    for number, leg in enumerate(plan.legs):
+        if leg.reface_mm > 0 and number == 0:
+            print(
+                f"  first faces the top down {leg.reface_mm:g} mm, to Z{-leg.top_mm:g} "
+                "(keep the zero; start recording at the M0 after it)"
+            )
+        if leg.reface_mm > 0 and number > 0:
+            print(
+                f"  then faces the top down {leg.reface_mm:g} mm, to Z{-leg.top_mm:g} (keep the "
+                "zero; pause the recording at the M0 before it, resume it at the M0 after it)"
+            )
+        where = "front face" if plan.lanes == 1 else f"lane {leg.lane} of {plan.lanes}"
+        if plan.lanes > 1:
+            first, last = lane_x_mm(setup, leg.lane, plan.lanes)
+            where += f", X{first:g} to X{last:g}"
+        fresh = leg.face_y_start_mm == 0 and (leg.lane > 1 or leg.top_mm > 0)
         fresh = " (a fresh face: keep the same zero)" if fresh else ""
-        print(f"  lane {plan.lane} of {plan.lanes}, X{first:g} to X{last:g}{fresh}")
+        print(
+            f"  {where}: Y{leg.face_y_start_mm:g} to Y{leg.face_y_end_mm:.2f}, passes "
+            f"{leg.passes[0].id}-{leg.passes[-1].id}{fresh}"
+        )
     for p in tests:
         chance = "" if p.p_stable is None else f"  P(stable) {p.p_stable:.2f}"
         chip = "" if p.chip_load_mm is None else f"  {p.chip_load_mm:g} mm/tooth"
@@ -133,6 +140,12 @@ def _print_round(session_dir: Path, plan: Plan) -> None:
         )
     print(f"wrote {session.round_dir(session_dir, plan.round) / session.PROGRAM_FILE}")
     print(f"run it while recording, then: dechatter analyze {session_dir} <recording>")
+    if plan.mid_facing is not None:
+        print(
+            "  the recording cannot tell what the facing did: once the run gets to it, analyze "
+            "asks, and you add --facing done (it ran to its end), cut-short (it stopped "
+            "part-way) or not-run (it never started)"
+        )
 
 
 def cmd_plan(args: argparse.Namespace) -> int:
@@ -179,7 +192,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
     manual = audio.read_segments(args.segments) if args.segments else None
     thresholds = Thresholds(args.prominence_db, args.excess_db)
-    results = session.analyze_recording(target, args.recording, thresholds, manual)
+    results = session.analyze_recording(target, args.recording, thresholds, manual, args.facing)
 
     print(f"round {number}: {args.recording.name}")
 
@@ -204,6 +217,27 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     print(
         f"wrote {target.path / session.RESULTS_FILE} (edit a verdict there if your ears disagree)"
     )
+    faced = session.facing_asked(target.plan, results.passes)
+    if faced is not None and results.facing is None:
+        leg = target.plan.legs[faced]
+        segments = f" --segments {args.segments}" if args.segments else ""
+        again = f"dechatter analyze {args.session} {args.recording} --round {number}{segments}"
+        print(
+            f"the program faces the top down {leg.reface_mm:g} mm before pass "
+            f"{leg.passes[0].id}, and a recording cannot tell what that facing did. Did it "
+            "run to its end, stop part-way, or never start? Say which before planning:"
+        )
+        print(f"  {again} --facing done       # it ran to its end")
+        print(
+            f"  {again} --facing cut-short  # it stopped part-way: the next round faces "
+            "the top again first"
+        )
+        print(f"  {again} --facing not-run    # it never started")
+        print(
+            "(cut-short and not-run drop whatever was heard after the facing as not run; or "
+            f'set "facing" in {target.path / session.RESULTS_FILE})'
+        )
+        return 0
     print(f"next: dechatter plan {args.session}")
     return 0
 
@@ -285,6 +319,13 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("recording", type=Path)
     analyze.add_argument("--round", type=int, help="default: the latest round")
     analyze.add_argument("--segments", type=Path, help="CSV of start,end seconds per pass run")
+    analyze.add_argument(
+        "--facing",
+        type=session.Facing,
+        choices=list(session.Facing),
+        help="for a run that stopped right before its program faces the top down mid-round: "
+        "whether the facing finished, stopped part-way, or never started",
+    )
     defaults = Thresholds()
     analyze.add_argument("--prominence-db", type=float, default=defaults.prominence_db)
     analyze.add_argument("--excess-db", type=float, default=defaults.excess_db)

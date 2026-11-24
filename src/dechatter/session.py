@@ -19,16 +19,19 @@ from .bayes import Observation
 from .config import Setup, SetupFile, SetupSource, load_setup, setup_source
 from .detect import Thresholds, Verdict
 from .plan import (
-    REFACE_EXTRA_MM,
+    DEPTH_TOLERANCE_MM,
+    FRESH,
     Envelope,
+    Face,
+    Leg,
     PassKind,
     Plan,
     PlanError,
     PlannerKind,
     SchemaError,
+    Top,
     assemble,
     auto_lanes,
-    fitting,
     grid_tests,
     mrr_mm3_min,
     sweep_tests,
@@ -117,12 +120,25 @@ def spindle_fit(p: PassResult) -> SpindleFit | None:
     return SpindleFit.EDGE if off >= EDGE_FRACTION * detect.RPM_TOLERANCE else SpindleFit.NEAR
 
 
+class Facing(StrEnum):
+    """What became of facing the top down mid-round, for a run that got to it: no sound
+    tells (see facing_asked)."""
+
+    DONE = "done"  # it finished: the new top is flat
+    CUT_SHORT = "cut-short"  # it stopped part-way: the top is faced only in part
+    NOT_RUN = "not-run"  # it never started
+
+
 @dataclass(frozen=True)
 class Results:
     round: int
     recording: str
     thresholds: Thresholds
     passes: tuple[PassResult, ...]
+    # For a run that got to facing the top down mid-round (see facing_asked): what the
+    # facing did, from the widget's record of the run or the operator's word. None
+    # elsewhere, or until the operator says.
+    facing: Facing | None = None
     schema: int = SCHEMA
 
     def save(self, path: Path) -> None:
@@ -145,7 +161,15 @@ class Results:
             )
             for p in data.pop("passes")
         )
-        return Results(**{**data, "thresholds": Thresholds(**data["thresholds"]), "passes": passes})
+        facing = Facing(data["facing"]) if data.get("facing") else None
+        return Results(
+            **{
+                **data,
+                "thresholds": Thresholds(**data["thresholds"]),
+                "passes": passes,
+                "facing": facing,
+            }
+        )
 
 
 def _finite(p: dict) -> dict:
@@ -170,6 +194,28 @@ class Round:
     path: Path
     plan: Plan
     results: Results | None
+
+    def __post_init__(self):
+        # However the results were set (analysis, or "facing" edited in results.json), a
+        # facing cut short or never run leaves nothing cut after it. Only on read: the file
+        # keeps what was heard, should the facing be corrected to done.
+        if self.results is not None:
+            object.__setattr__(self, "results", after_facing(self.plan, self.results))
+
+
+def after_facing(plan: Plan, results: Results) -> Results:
+    """`results` with every pass from the leg after a mid-round facing on not run, when the
+    facing was cut short or never ran: a pass heard there was something else (the facing's
+    own rows, perhaps), and its verdict is no evidence, nor can one be set."""
+    faced = plan.mid_facing
+    if faced is None or results.facing not in (Facing.CUT_SHORT, Facing.NOT_RUN):
+        return results
+    start = plan.first_index(faced)
+    dropped = tuple(
+        PassResult(p.id, p.kind, p.rpm, p.width_mm, PassStatus.NOT_RUN)
+        for p in results.passes[start:]
+    )
+    return dataclasses.replace(results, passes=results.passes[:start] + dropped)
 
 
 def round_dir(session: Path, number: int) -> Path:
@@ -205,9 +251,6 @@ def load_rounds(session: Path) -> list[Round]:
         results = _read(results_path, Results.load) if results_path.exists() else None
         rounds.append(Round(plan_path.parent, plan, results))
     return rounds
-
-
-DEPTH_TOLERANCE_MM = 1e-6
 
 
 def _tests(rounds: list[Round], wanted) -> list[Observation]:
@@ -330,19 +373,81 @@ def next_stage(setup: Setup, env: Envelope, rounds: list[Round], found: list[Sta
     return stage
 
 
-def face_after(last: Round) -> tuple[float, float]:
-    """(front face Y, width of the step an aborted pass left on it) after a round was run."""
+def _final(passes: tuple[PassResult, ...]) -> int | None:
+    """The index of the last pass a run got to, as heard; None if none was."""
+    attempted = [i for i, p in enumerate(passes) if p.status not in UNHEARD]
+    return attempted[-1] if attempted else None
+
+
+def _last_heard(r: Round) -> int | None:
+    return _final(r.results.passes)
+
+
+def facing_asked(plan: Plan, passes: tuple[PassResult, ...]) -> int | None:
+    """The leg whose mid-round facing of the top (Plan.mid_facing) the run got to, as far as
+    its passes tell: one of that leg's passes or a later one was heard, or the last pass heard
+    ran to its end right before the facing. What the facing did must then be said
+    (Results.facing), by the widget's record of the run or by the operator: sound cannot
+    tell. Paused through, a recording holds none of it; left running, a facing stopped after
+    a few rows sounds like the passes after it, and a whole one may be missed. None: no such
+    facing, or the run stopped short of it."""
+    faced = plan.mid_facing
+    final = _final(passes)
+    if faced is None or final is None:
+        return None
+    start = plan.first_index(faced)
+    if final >= start:
+        return faced
+    if final == start - 1 and passes[final].status is not PassStatus.ABORTED:
+        return faced
+    return None
+
+
+def _facing_unknown(r: Round, faced: int) -> str:
+    n = r.plan.round
+    first = r.plan.legs[faced].passes[0].id
+    return (
+        f"round {n} faces the top down {r.plan.legs[faced].reface_mm:g} mm before pass "
+        f"{first}, and its recording cannot tell what that facing did. Say so: `dechatter "
+        f"analyze {r.path.parent} <recording> --round {n} --facing done` if it ran to its end, "
+        "`--facing cut-short` if it stopped part-way (the next round faces the top again "
+        "first), `--facing not-run` if it never started; or set "
+        f'"facing" to one of those in {r.path.name}/{RESULTS_FILE}'
+    )
+
+
+def face_after(last: Round) -> Face:
+    """Where the stock stands after a round was run: on the lane of the last pass heard, its
+    face and the step an aborted pass left on it, with the top that leg was cut from. With
+    no pass heard, where the round started (after the facing it starts with, if any). Where
+    the run got to facing the top down mid-round (see facing_asked), what the facing did
+    says: done, the new top; cut short, the end of the leg before it on the old top, faced
+    in part, to face again before any cut; not run, the last pass heard before it."""
     if last.results is None:
         raise SessionError(f"{last.path.name} has no results; run `dechatter analyze` first")
-    widths = [p.width_mm for p in last.plan.passes]
-    attempted = [i for i, p in enumerate(last.results.passes) if p.status not in UNHEARD]
-    start = last.plan.face_y_start_mm
-    if not attempted:
-        return start, 0.0
-    final = attempted[-1]
-    if last.results.passes[final].status is PassStatus.ABORTED:
-        return start + sum(widths[:final]), widths[final]
-    return start + sum(widths[: final + 1]), 0.0
+    plan, passes, facing = last.plan, last.results.passes, last.results.facing
+    faced = plan.mid_facing
+    if facing is None and facing_asked(plan, passes) is not None:
+        raise SessionError(_facing_unknown(last, faced))
+    final = _last_heard(last)
+    done = faced is not None and facing is Facing.DONE
+    if done and (final is None or final < plan.first_index(faced)):
+        # Faced, and stopped before the first cut on the new top.
+        new = plan.legs[faced]
+        return Face(new.lane, new.face_y_start_mm, 0.0, new.lane_cap_mm, new.top_mm)
+    if faced is not None and facing is Facing.CUT_SHORT:
+        end = plan.legs[faced - 1]
+        return Face(end.lane, end.face_y_end_mm, 0.0, end.lane_cap_mm, end.top_mm, Top.PART_FACED)
+    if final is None:
+        start = plan.legs[0]
+        return Face(start.lane, start.face_y_start_mm, 0.0, start.lane_cap_mm, start.top_mm)
+    number, place = plan.leg_of(final)
+    leg = plan.legs[number]
+    widths = [p.width_mm for p in leg.passes]
+    y = leg.face_y_start_mm + sum(widths[:place])
+    if passes[final].status is PassStatus.ABORTED:
+        return Face(leg.lane, y, widths[place], leg.lane_cap_mm, leg.top_mm)
+    return Face(leg.lane, y + widths[place], 0.0, leg.lane_cap_mm, leg.top_mm)
 
 
 @dataclass(frozen=True)
@@ -437,9 +542,13 @@ def _match(plan: Plan, samples: np.ndarray, rate: int, manual: list[audio.Segmen
     cut_short = plan.passes[final].expected_cut_s / audio.DURATION_TOLERANCE
     if manual is not None and matched[final].duration_s < cut_short:
         statuses[final] = PassStatus.ABORTED
-    if tail and final + 1 < len(plan.passes) and tail[0].duration_s >= MIN_ABORTED_S:
-        matched[final + 1] = tail[0]
-        statuses[final + 1] = PassStatus.ABORTED
+    # Sound after the last pass heard is the next pass, stopped early; but before a facing it
+    # may as well be the facing, stopped or not: facing_asked leaves that to the operator.
+    nxt = final + 1
+    stopped_in_next = tail and tail[0].duration_s >= MIN_ABORTED_S and nxt < len(plan.passes)
+    if stopped_in_next and plan.facing_before(nxt) is None:
+        matched[nxt] = tail[0]
+        statuses[nxt] = PassStatus.ABORTED
     return {i: Placement(matched[i], statuses[i]) for i in matched}
 
 
@@ -451,9 +560,14 @@ def analyze(
     thresholds: Thresholds,
     manual: list[audio.Segment] | None = None,
     timeline: list | None = None,
+    facing: Facing | None = None,
 ) -> Results:
     """Classify each pass. Where the widget recorded the run (`timeline`), its windows say
-    where every cut is; otherwise the cuts are found by their sound."""
+    where every cut is; otherwise the cuts are found by their sound. Where the run got to
+    facing the top down mid-round (see facing_asked), the widget's record says what the
+    facing did, else `facing`: the operator's word, without which the next round cannot be
+    planned. Cut short or not run, it leaves nothing cut after it: what was heard there (the
+    facing's own rows, perhaps) is kept here, and counted as not run on read (after_facing)."""
     placed = (
         None if manual is not None or timeline is None else placements_from_timeline(plan, timeline)
     )
@@ -540,7 +654,33 @@ def analyze(
                 over_air_db=None if over_air is None else round(over_air, 1),
             )
         )
-    return Results(plan.round, recording, thresholds, tuple(results))
+    passes = tuple(results)
+    faced = facing_asked(plan, passes)
+    if faced is None:
+        if facing is not None:
+            raise SessionError(
+                "--facing is for a run that got to its program's facing of the top partway "
+                "through, and this one stopped short of it, or the round has none: leave it out"
+            )
+        return Results(plan.round, recording, thresholds, passes)
+    if windowed:
+        if facing is not None:
+            raise SessionError(
+                "the widget's record of the run says what the facing did: leave --facing out"
+            )
+        went_on = _final(passes) >= plan.first_index(faced)
+        recorded = Facing.DONE if went_on else facing_in_timeline(timeline)
+        return Results(plan.round, recording, thresholds, passes, recorded)
+    return Results(plan.round, recording, thresholds, passes, facing)
+
+
+def facing_in_timeline(timeline: list) -> Facing:
+    """What the widget's record of the run says its facing of the top partway did, by its
+    rows: the last one finished, one stopped or none run."""
+    rows = [e for e in timeline if e.get("event") == "face"]
+    if any(e.get("rows_after") == 0 and not e.get("aborted") for e in rows):
+        return Facing.DONE
+    return Facing.CUT_SHORT if rows else Facing.NOT_RUN
 
 
 class Stock(StrEnum):
@@ -567,26 +707,36 @@ def _rounds_to_plan_after(session: Path, source: SetupFile) -> list[Round]:
     return rounds
 
 
-@dataclass(frozen=True)
-class _Face:
-    """Where a round could cut: a lane's face as it stands, and the top it is cut from."""
-
-    face: float
-    remnant: float
-    lane: int
-    cap: float | None
-    top: float = 0.0
-    reface: float = 0.0
+def _reached(r: Round) -> tuple[Leg, ...]:
+    """The legs of a round its run got to: up to that of its last pass heard (the first, if
+    none was), or every leg of a round never analysed."""
+    if r.results is None:
+        return r.plan.legs
+    final = _last_heard(r)
+    return r.plan.legs[: 1 if final is None else r.plan.leg_of(final)[0] + 1]
 
 
-def _since_top(rounds: list[Round]) -> list[Round]:
-    """The rounds cut on the top as it stands: since the block was mounted or last faced."""
-    since = []
+def _faced_at_stop(r: Round) -> bool:
+    """Whether the round's run ended by facing the top all the way down, after its last cut."""
+    faced = r.plan.mid_facing
+    if r.results is None or r.results.facing is not Facing.DONE or faced is None:
+        return False
+    final = _last_heard(r)
+    return final is None or final < r.plan.first_index(faced)
+
+
+def _cut_since_top(rounds: list[Round]) -> tuple[float, ...]:
+    """The depths cut into the top as it stands: since the block was mounted or last faced,
+    the depth of every leg a run got to."""
+    cut = []
     for r in reversed(rounds):
-        since.append(r)
-        if r.plan.face_y_start_mm == 0 and r.plan.lane == 1:
-            break
-    return since
+        if _faced_at_stop(r):
+            return tuple(cut)
+        for leg in reversed(_reached(r)):
+            cut.append(r.plan.axial_depth_mm)
+            if leg.face_y_start_mm == 0 and leg.lane == 1:
+                return tuple(cut)
+    return tuple(cut)
 
 
 def _place(
@@ -599,84 +749,25 @@ def _place(
     planner: PlannerKind,
     tests: list,
 ) -> Plan:
-    """Lay the tests out on the face as it stands, and write the round.
+    """Lay the tests out on the stock from where the last round left it, and write the round.
 
-    The round may cut, cheapest first: the lane it is on, the next lane (a fresh face at
-    Y0 once the stock is in lanes), or, with stock.height_mm given, a fresh top: the round
-    first faces the top down below every cut made on it, and starts again at the first
-    lane. It takes the first that has room for all its tests, else the one with room for
-    most. A chip-load sweep must fit whole: cut short, its heaviest chip loads would go
-    untried and the lightest read as a limit.
+    The round fills what is left of the lane it is on, then the lanes after it, and with
+    stock.height_mm given, faces the top down and starts again at the first lane, for as long
+    as it has tests left and the top can come down (see plan.assemble).
     """
     setup = source.setup
     number = rounds[-1].plan.round + 1 if rounds else 1
     # The lanes are settled by the session's first round: an automatic count must not move
     # with a speed limit changed since.
     lanes = rounds[-1].plan.lanes if rounds else auto_lanes(setup, env)
+    face, cut = FRESH, ()
+    if rounds and stock is Stock.SAME:
+        face = face_after(rounds[-1])
+        # A top whose first lane is still whole at Y0 was not cut into.
+        if face.y_mm > 0 or face.lane > 1:
+            cut = _cut_since_top(rounds)
     at = at_depth(setup, depth_mm)
-    if not rounds or stock is Stock.FRESH:
-        options = [_Face(0.0, 0.0, 1, None)]
-        refused = ""
-    else:
-        last = rounds[-1].plan
-        face, remnant = face_after(rounds[-1])
-        cut = _since_top(rounds)
-        shallowest = min(r.plan.axial_depth_mm for r in cut)
-        options = []
-        refused = ""
-        if (face > 0 or last.lane > 1) and depth_mm > shallowest + DEPTH_TOLERANCE_MM:
-            refused = (
-                f"round {number} would cut {depth_mm:g} mm deep, but this block's face is "
-                f"only flat down to {shallowest:g} mm"
-            )
-        else:
-            options.append(_Face(face, remnant, last.lane, last.lane_cap_mm, last.top_mm))
-            if last.lane < lanes and face > 0:
-                options.append(_Face(0.0, 0.0, last.lane + 1, face, last.top_mm))
-        if face > 0 or last.lane > 1:
-            reface = max(r.plan.axial_depth_mm for r in cut) + REFACE_EXTRA_MM
-            top = last.top_mm + reface
-            height = setup.stock.height_mm
-            if height is not None and top + depth_mm + setup.program.clearance_mm <= height:
-                options.append(_Face(0.0, 0.0, 1, None, top, reface))
-    room = [fitting(at, env, o.face, o.remnant, tests, o.cap) for o in options]
-    whole = [o for o, n in zip(options, room, strict=True) if n == len(tests)]
-    if whole:
-        chosen = whole[0]
-    elif planner is PlannerKind.SWEEP or not room or max(room) == 0:
-        chosen = None
-    else:
-        chosen = options[room.index(max(room))]
-    if chosen is None:
-        if setup.stock.height_mm is None:
-            hint = (
-                "Mount fresh stock and plan with new stock, or give the stock's height above "
-                "the vise jaws ([stock] height_mm) so dechatter can face the top down itself"
-            )
-        else:
-            hint = "The top cannot come down further: mount fresh stock and plan with new stock"
-        if refused:
-            raise PlanError(f"{refused}. {hint}.")
-        what = (
-            f"the chip-load sweep needs room for all its {len(tests)} cuts"
-            if planner is PlannerKind.SWEEP and room and max(room) > 0
-            else "stock exhausted"
-        )
-        raise PlanError(f"{what}: no face left has room for them. {hint}.")
-    plan = assemble(
-        at,
-        env,
-        number,
-        planner,
-        chosen.face,
-        chosen.remnant,
-        tests,
-        lane=chosen.lane,
-        lanes=lanes,
-        lane_cap_mm=chosen.cap,
-        top_mm=chosen.top,
-        reface_mm=chosen.reface,
-    )
+    plan = assemble(at, env, number, planner, tests, face=face, cut_mm=cut, lanes=lanes)
     _write_round(session, source.text, at, plan)
     return plan
 
@@ -1075,14 +1166,18 @@ def analyze_recording(
     recording: Path,
     thresholds: Thresholds,
     manual: list[audio.Segment] | None = None,
+    facing: Facing | None = None,
 ) -> Results:
-    """Classify a round's passes from its recording and save the results beside the plan."""
+    """Classify a round's passes from its recording and save the results beside the plan;
+    returned as they are read (see after_facing)."""
     samples, rate = audio.load(recording)
     timeline_path = target.path / TIMELINE_FILE
     timeline = (
         json.loads(timeline_path.read_text(encoding="utf-8")) if timeline_path.exists() else None
     )
-    results = analyze(target.plan, samples, rate, recording.name, thresholds, manual, timeline)
+    results = analyze(
+        target.plan, samples, rate, recording.name, thresholds, manual, timeline, facing
+    )
     results.save(target.path / RESULTS_FILE)
     log.info(
         "analysed round %d from %s: %.0f s at %d Hz",
@@ -1091,4 +1186,4 @@ def analyze_recording(
         len(samples) / rate,
         rate,
     )
-    return results
+    return after_facing(target.plan, results)

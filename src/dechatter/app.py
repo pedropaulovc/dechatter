@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from enum import StrEnum
 from pathlib import Path
 
@@ -159,13 +159,21 @@ class App:
             "planner": r.plan.planner,
             "program": self.program_name(r),
             "run_time_s": round(r.plan.run_time_s),
-            "face_y_start_mm": r.plan.face_y_start_mm,
-            "face_y_end_mm": round(r.plan.face_y_start_mm + r.plan.consumed_mm, 2),
-            "lane": r.plan.lane,
             "lanes": r.plan.lanes,
-            "lane_x_mm": list(lane_x_mm(self.setup, r.plan.lane, r.plan.lanes)),
-            "top_mm": r.plan.top_mm,
-            "reface_mm": r.plan.reface_mm,
+            # Where the round cuts, in the order it runs: from each leg's first pass on, one
+            # lane's face, with the top faced down first where `reface_mm` says so.
+            "legs": [
+                {
+                    "lane": leg.lane,
+                    "lane_x_mm": list(lane_x_mm(self.setup, leg.lane, r.plan.lanes)),
+                    "face_y_start_mm": leg.face_y_start_mm,
+                    "face_y_end_mm": round(leg.face_y_end_mm, 2),
+                    "top_mm": leg.top_mm,
+                    "reface_mm": leg.reface_mm,
+                    "first_pass": leg.passes[0].id,
+                }
+                for leg in r.plan.legs
+            ],
             "analysed": r.results is not None,
             "has_recording": (r.path / RECORDING_FILE).exists(),
             "passes": passes,
@@ -245,25 +253,23 @@ class App:
         session.analyze_recording(target, recording, self.thresholds)
 
     def set_verdict(self, number: int, pass_id: int, verdict: Verdict) -> None:
-        """The operator's ears overrule the detector."""
+        """The operator's ears overrule the detector. The verdict goes into the results as
+        saved, not as read: a pass a facing cut short drops is kept in the file, should the
+        facing be corrected to done."""
         target = self._round(number)
         if target.results is None:
             raise SessionError(f"round {number} is not analysed")
+        read = {p.id: p for p in target.results.passes}
+        if pass_id in read and read[pass_id].status is PassStatus.NOT_RUN:
+            raise SessionError(f"pass {pass_id} of round {number} was never run")
+        saved = session.Results.load(target.path / session.RESULTS_FILE)
         passes = []
-        for p in target.results.passes:
+        for p in saved.passes:
             if p.id == pass_id:
-                if p.status is PassStatus.NOT_RUN:
-                    raise SessionError(f"pass {pass_id} of round {number} was never run")
                 status = PassStatus.ANALYSED if p.status in session.UNHEARD else p.status
                 p = session.PassResult(**{**asdict(p), "verdict": verdict, "status": status})
             passes.append(p)
         if all(p.id != pass_id or p.kind is not PassKind.TEST for p in passes):
             raise SessionError(f"round {number} has no test pass {pass_id}")
-        updated = session.Results(
-            target.results.round,
-            target.results.recording,
-            target.results.thresholds,
-            tuple(passes),
-        )
-        updated.save(target.path / session.RESULTS_FILE)
+        replace(saved, passes=tuple(passes)).save(target.path / session.RESULTS_FILE)
         log.info("round %d pass %d set to %s by the operator", number, pass_id, verdict)

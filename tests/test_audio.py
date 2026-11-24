@@ -71,7 +71,7 @@ def test_a_silent_cut_is_refused_and_silent_air_reads_finite():
 
 def round1(setup):
     env = envelope(setup)
-    return assemble(setup, env, 1, PlannerKind.GRID, 0.0, 0.0, grid_tests(setup, env))
+    return assemble(setup, env, 1, PlannerKind.GRID, grid_tests(setup, env))
 
 
 def test_recording_is_split_into_passes_and_each_classified(setup):
@@ -96,9 +96,9 @@ def test_aborted_run_marks_the_cut_short_pass_and_the_rest_likely_not_run(setup)
     # From the sound alone, passes after the last cut are likeliest not run.
     assert set(statuses[stopped + 1 :]) == {PassStatus.LIKELY_NOT_RUN}
 
-    face, remnant = session.face_after(session.Round(None, plan, results))
-    assert remnant == plan.passes[stopped].width_mm
-    assert face == pytest.approx(sum(p.width_mm for p in plan.passes[:stopped]))
+    face = session.face_after(session.Round(None, plan, results))
+    assert face.remnant_mm == plan.passes[stopped].width_mm
+    assert face.y_mm == pytest.approx(sum(p.width_mm for p in plan.passes[:stopped]))
 
 
 def test_quiet_truing_pass_going_undetected_does_not_shift_the_matching(setup):
