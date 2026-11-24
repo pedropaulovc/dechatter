@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from enum import StrEnum
 from pathlib import Path
 
@@ -267,11 +267,6 @@ class App:
             passes.append(p)
         if all(p.id != pass_id or p.kind is not PassKind.TEST for p in passes):
             raise SessionError(f"round {number} has no test pass {pass_id}")
-        updated = session.Results(
-            target.results.round,
-            target.results.recording,
-            target.results.thresholds,
-            tuple(passes),
-        )
+        updated = replace(target.results, passes=tuple(passes))
         updated.save(target.path / session.RESULTS_FILE)
         log.info("round %d pass %d set to %s by the operator", number, pass_id, verdict)

@@ -61,6 +61,7 @@ class Block:
     # then. None for a block that moves nothing.
     target: dict[str, float] | None = None
     leg: int | None = None  # the plan's leg; facing belongs to the leg it lowers the top for
+    rows_after: int | None = None  # FACE: the facing's rows still to come after this one
 
 
 def blocks(plan: Plan, setup: Setup, units: Units) -> list[Block]:
@@ -107,7 +108,7 @@ def blocks(plan: Plan, setup: Setup, units: Units) -> list[Block]:
             spindle_rpm = first.rpm
             feed = plan.chip_load_mm * plan.flutes * first.rpm
             old_top = leg.top_mm - leg.reface_mm
-            for row in rows:
+            for index, row in enumerate(rows):
                 x_start, x_end = x_at(row.start), x_at(row.end)
                 found.append(
                     Block(
@@ -123,6 +124,7 @@ def blocks(plan: Plan, setup: Setup, units: Units) -> list[Block]:
                         first.rpm,
                         target=move(x=x_end, y=row.y_mm, z=safe_z),
                         leg=number,
+                        rows_after=len(rows) - 1 - index,
                     )
                 )
 

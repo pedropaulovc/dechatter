@@ -976,7 +976,7 @@ function renderStep() {
           ? 'Keep the zero the block was first cut with (X at the left end of the stock, Y on its front face as first mounted, Z on its top as first mounted).'
           : 'Zero X at the left end of the stock, Y on its front face, Z on top.'),
       el('li', {}, start, ' runs the round from here, one move at a time, and records it. Keep this tab open.', ...(unknownUnits ? [' cncjs has not reported G20 or G21 yet; the machine is in ', declare] : [])),
-      ...midFacings.map((leg) => el('li', {}, `Before pass ${leg.first_pass}, with ${round.lanes > 1 ? 'every lane' : 'the face'} used, the program faces the top down ${length(leg.reface_mm, units(), { mmToo: true })}, to Z ${length(-leg.top_mm, units(), { mmToo: true })}, and goes on at the first lane with the same zero, without stopping. The recording runs on; the facing is not analysed.`)),
+      ...midFacings.map((leg) => el('li', {}, `Before pass ${leg.first_pass}, as ${round.lanes > 1 ? 'the lanes left have' : 'the face has'} no room for the next cut, the program faces the top down ${length(leg.reface_mm, units(), { mmToo: true })}, to Z ${length(-leg.top_mm, units(), { mmToo: true })}, and goes on at the first lane with the same zero${state.spindle === 'manual' ? '' : ', without stopping'}. The recording runs on; the facing is not analysed.`)),
       ...(state.spindle === 'manual' ? [el('li', {}, `Before each of its ${speedChanges(round)} spindle speeds the round stops; set the speed shown here and press Continue.`)] : []),
     ),
   );

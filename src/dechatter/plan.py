@@ -17,7 +17,7 @@ from . import materials
 from .config import Direction, Setup, SpindleControl
 
 # 2: dechatter 0.2.0 (planned_on, per-pass chip loads); 3: 0.6.0 (a round in legs, across
-# lanes and faced tops)
+# lanes and faced tops). A schema-2 plan still loads, as one leg (see _one_leg).
 SCHEMA = 3
 SPINDLE_EFFICIENCY = 0.8
 SPEED_TOLERANCE_RPM = 0.5
@@ -112,6 +112,13 @@ class Plan:
             index -= len(leg.passes)
         raise IndexError(index)
 
+    def facing_before(self, index: int) -> int | None:
+        """The leg whose facing of the top comes right before the pass at `index`, if any."""
+        if index >= len(self.passes):
+            return None
+        number, place = self.leg_of(index)
+        return number if place == 0 and self.legs[number].reface_mm > 0 else None
+
     @property
     def run_time_s(self) -> float:
         """Feed moves and dwells, facing included. Rapids come on top and depend on the machine."""
@@ -127,6 +134,8 @@ class Plan:
     @staticmethod
     def load(path: Path) -> Plan:
         data = json.loads(path.read_text(encoding="utf-8"))
+        if data.get("schema") == 2:
+            data = _one_leg(data)
         if data.get("schema") != SCHEMA:
             raise SchemaError(path, data.get("schema"), SCHEMA)
         legs = tuple(
@@ -141,6 +150,18 @@ class Plan:
             for leg in data.pop("legs")
         )
         return Plan(**{**data, "planner": PlannerKind(data["planner"]), "legs": legs})
+
+
+# What a schema-2 plan held of its round's one lane, the leg it is now.
+SCHEMA_2_LEG = ("face_y_start_mm", "lane_cap_mm", "top_mm", "reface_mm", "face_s")
+
+
+def _one_leg(data: dict) -> dict:
+    """A plan of dechatter 0.2.0 to 0.5.0, a round on one lane, as a single leg. Fields
+    0.2.0 to 0.4.0 lacked take their defaults, as they did then."""
+    leg = {key: data.pop(key) for key in SCHEMA_2_LEG if key in data}
+    leg = {"lane": data.pop("lane", 1), **leg, "passes": data.pop("passes")}
+    return {**data, "legs": [leg], "schema": SCHEMA}
 
 
 @dataclass(frozen=True)
@@ -364,17 +385,27 @@ def lane_budget_mm(setup: Setup, lane_cap_mm: float | None) -> float:
     return min(setup.stock.width_mm, math.inf if lane_cap_mm is None else lane_cap_mm)
 
 
+class Top(StrEnum):
+    """What the stock's top is like at `top_mm`, the lanes' cuts aside."""
+
+    FLAT = "flat"
+    # A facing stopped part-way: some of it is faced lower. Only facing it down again from
+    # `top_mm` makes it flat; a cut planned on it could meet less stock than planned.
+    PART_FACED = "part faced"
+
+
 @dataclass(frozen=True)
 class Face:
     """Where cutting can go on: a lane's front face `y_mm` back from Y0, the step an aborted
-    pass left on it, how far back the lane may go (None: the stock's width), and how far below
-    Z0 the top stands."""
+    pass left on it, how far back the lane may go (None: the stock's width), how far below
+    Z0 the top stands, and whether it is flat there."""
 
     lane: int = 1
     y_mm: float = 0.0
     remnant_mm: float = 0.0
     cap_mm: float | None = None
     top_mm: float = 0.0
+    top: Top = Top.FLAT
 
 
 FRESH = Face()  # fresh stock: the first lane's face at Y0, the top at Z0
@@ -458,17 +489,18 @@ def _lay_out(
     A leg takes the tests that fit on its face, up to the first that does not. The next leg
     is the next lane: a fresh face at Y0, cut back no further than this one was. Once the
     last lane is used, or the face is flat only above the round's depth (`cut_mm`: the depths
-    cut into the top as it stands), the top comes down below the deepest of those cuts, given
-    stock.height_mm and while the next cut's bottom stays the clearance above it, and the
-    round goes on at the first lane. A round faces the top at most once: facing is slow, so
-    the tests the lanes of the new top cannot hold are left over (assemble drops them).
+    cut into the top as it stands), or the top is faced only in part (a facing stopped
+    part-way), the top comes down below the deepest of those cuts, given stock.height_mm and
+    while the next cut's bottom stays the clearance above it, and the round goes on at the
+    first lane. A round faces the top at most once: facing is slow, so the tests the lanes of
+    the new top cannot hold are left over (assemble drops them).
     """
     depth = setup.cut.axial_depth_mm
     left = cut_order(setup, tests)
     legs: list[Leg] = []
     here, cut, reface = face, list(cut_mm), 0.0
     while left:
-        flat = not cut or depth <= min(cut) + DEPTH_TOLERANCE_MM
+        flat = here.top is Top.FLAT and (not cut or depth <= min(cut) + DEPTH_TOLERANCE_MM)
         prep, kept = _fill(setup, env, here, left) if flat else ([], [])
         if kept:
             first_id = sum(len(leg.passes) for leg in legs)
@@ -513,6 +545,11 @@ def _no_room(
         )
     else:
         hint = "The top cannot come down further: mount fresh stock and plan with new stock"
+    if face.top is Top.PART_FACED and not legs:
+        return (
+            f"the last round stopped part-way through facing the top down, so round {round_no} "
+            f"must face it again first, and it has no room to. {hint}."
+        )
     if legs:
         return (
             f"the chip-load sweep needs room for all its {len(tests)} cuts: no face left has "

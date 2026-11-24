@@ -73,6 +73,9 @@ const UNSETTLED_ADVICE = 'so it was not reset. Make sure it has stopped, then re
 // inches, and a program in inches rounds its words to four decimals.
 const TOLERANCE_MM = 0.02;
 
+// The moves whose windows the run reports: each cut, and each row of facing the top down.
+const WINDOWED = new Set(['cut', 'face']);
+
 export class Stepper {
   // io: { send(lines), feedhold(), cyclestart(), reset() }. It never unlocks ($X): an
   // alarm is for the operator to clear.
@@ -334,18 +337,22 @@ export class Stepper {
     const start = this.now();
     this.io.send(block.lines);
     this.enterHoldIfHeld();
-    const window = (end, more = {}) => ({ kind: 'cut', pass: block.pass_id, start, end, holds: this.holds.map(([s, e]) => [s, e ?? end]), ...more });
+    // A cut's window, or a facing row's: the engine reads from these whether the facing ran.
+    const window = (end, more = {}) => (block.step === 'face'
+      ? { kind: 'face', leg: block.leg, rows_after: block.rows_after, start, end, ...more }
+      : { kind: 'cut', pass: block.pass_id, start, end, holds: this.holds.map(([s, e]) => [s, e ?? end]), ...more });
     let end;
     try {
       end = await this.wait((state) => state.activeState === 'Idle' && this.at(state.wpos, block.target));
     } catch (err) {
-      // A cut cut short still counts, up to where it stopped.
-      if (block.step === 'cut' && err instanceof Ended) {
+      // A cut cut short still counts, up to where it stopped; a facing row cut short leaves
+      // the top faced in part.
+      if (WINDOWED.has(block.step) && err instanceof Ended) {
         this.onWindow(window(this.endedAt, { aborted: true }));
       }
       throw err;
     }
-    if (block.step === 'cut') {
+    if (WINDOWED.has(block.step)) {
       this.onWindow(window(end));
     }
   }

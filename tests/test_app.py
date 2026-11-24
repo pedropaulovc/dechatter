@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import io
 import json
 import re
@@ -16,7 +17,7 @@ import synth
 from scipy import signal
 
 import dechatter
-from dechatter import browser, cli, plan, session
+from dechatter import audio, browser, cli, plan, session
 from dechatter.app import TIMELINE_FILE, App
 from dechatter.config import load_setup
 from dechatter.detect import Verdict
@@ -1351,6 +1352,46 @@ def test_a_round_stopped_before_its_facing_goes_on_where_it_stopped(engine):
     assert (start["lane"], start["top_mm"], start["reface_mm"]) == (leg.lane, 0.0, 0.0)
     assert start["face_y_start_mm"] == pytest.approx(sum(widths))
     assert second["passes"][0]["kind"] == "cleanup"
+
+
+def test_from_the_command_line_a_run_stopped_at_the_facing_must_say_what_it_did(engine, capsys):
+    form = engine.call("setup_form", NAME)["values"]
+    form["stock"].update(SPILL)
+    engine.call("save_setup", NAME, json.dumps(form))
+    first = engine.call("plan", NAME, "same")["rounds"][-1]
+    folder = session.round_dir(engine.root / NAME, first["round"])
+    planned = Plan.load(folder / session.PLAN_FILE)
+    faced = next(n for n, leg in enumerate(planned.legs) if n > 0 and leg.reface_mm > 0)
+    # Recorded up to the stop before the facing, then paused, and nothing more: the run may
+    # have stopped there, or after facing the top all the way or part-way.
+    before = dataclasses.replace(planned, legs=planned.legs[:faced])
+    wav = folder / "phone.wav"
+    audio.save_wav(wav, synth.record(before, MACHINE, seed=1), synth.RATE)
+    where = str(engine.root / NAME)
+    assert cli.main(["analyze", where, str(wav)]) == 0
+    assert "--facing done|cut-short|not-run" in capsys.readouterr().out
+    assert cli.main(["plan", where]) == 1
+    assert "--facing done` if it finished" in capsys.readouterr().err
+
+    # Stopped part-way through the facing: the next round faces the top down again from
+    # the old top before any cut, then starts at the first lane below it.
+    assert cli.main(["analyze", where, str(wav), "--facing", "cut-short"]) == 0
+    assert "next: dechatter plan" in capsys.readouterr().out
+    assert cli.main(["plan", where]) == 0
+    second = Plan.load(session.round_dir(engine.root / NAME, 2) / session.PLAN_FILE)
+    step = form["cut"]["axial_depth_mm"] + plan.REFACE_EXTRA_MM
+    start = second.legs[0]
+    assert (start.lane, start.face_y_start_mm) == (1, 0.0)
+    assert (start.reface_mm, start.top_mm) == (pytest.approx(step), pytest.approx(step))
+
+    # Finished: the next round starts on the new top, the cuts above it gone with it.
+    shutil.rmtree(session.round_dir(engine.root / NAME, 2))
+    assert cli.main(["analyze", where, str(wav), "--facing", "done"]) == 0
+    assert cli.main(["plan", where]) == 0
+    second = Plan.load(session.round_dir(engine.root / NAME, 2) / session.PLAN_FILE)
+    start = second.legs[0]
+    assert (start.lane, start.face_y_start_mm, start.reface_mm) == (1, 0.0, 0.0)
+    assert start.top_mm == pytest.approx(step)
 
 
 def test_without_room_to_face_the_top_down_fresh_stock_is_asked_for(engine):

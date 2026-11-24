@@ -73,7 +73,8 @@ const stepper = new Stepper({
   },
   onWindow: (w) => {
     windows.push(w);
-    log(`${w.kind} pass ${w.pass}: ${(w.end - w.start).toFixed(2)} s`);
+    const what = w.kind === 'face' ? `face leg ${w.leg}, ${w.rows_after} rows after` : `${w.kind} pass ${w.pass}`;
+    log(`${what}: ${(w.end - w.start).toFixed(2)} s${w.aborted ? ' (aborted)' : ''}`);
   },
 });
 

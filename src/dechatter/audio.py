@@ -9,7 +9,7 @@ import shutil
 import subprocess
 import tempfile
 import wave
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -27,6 +27,9 @@ DURATION_TOLERANCE = 1.35
 THRESHOLD_STEPS = 32
 # Passes skipped after the last cut found: the run stopped there, which is common.
 TRAILING_SKIP = 0.25
+# Facing the top down mid-round, heard when the recording was not paused through it, spans
+# its rows' cuts and the rapids between them: up to this many times its feed moves (face_s).
+FACING_SPAN = 2.0
 # A cut is told from the spindle running in the air by its level over the floor around it:
 # the spindle's own noise rises with its speed, by 8 dB or more across a round, while a light
 # cut is only a few dB over the spindle. The floor is a low percentile of the level over a
@@ -46,7 +49,9 @@ FLOOR_PERCENTILE = (5, 25)
 # spindle is silence where the spindle cannot be: in stretches longer than a pass's cycle,
 # or at either end of the recording; a spindle left running after the round is as long,
 # but no quieter. No fixed offset from the median or a percentile holds: silence can be
-# most of a recording, and a cut 40 dB over the spindle.
+# most of a recording, and a cut 40 dB over the spindle. A run as long as facing the top
+# down mid-round (heard when the recording ran on through it) may be that facing, far
+# louder than the spindle: it is no measure of the spindle's level.
 SILENCE_MARGIN_DB = 6.0
 SILENCE_FAR_DB = 20.0
 MODE_MIN_SHARE = 0.02  # of the frames, for a histogram peak to count as a mode
@@ -182,6 +187,15 @@ def _runs(mask: np.ndarray) -> list[tuple[int, int]]:
     return list(zip(edges[::2], edges[1::2], strict=True))
 
 
+def _facing_like(plan: Plan, duration_s: float) -> bool:
+    """Whether a stretch this long could be facing the top down, heard (see align)."""
+    return any(
+        leg.face_s / DURATION_TOLERANCE <= duration_s <= leg.face_s * FACING_SPAN
+        for leg in plan.legs
+        if leg.reface_mm > 0 and leg.face_s > 0
+    )
+
+
 def silence(level_db: np.ndarray, plan: Plan, percentile: float) -> np.ndarray:
     """Frames of silence: see the comment on SILENCE_MARGIN_DB."""
     n = len(level_db)
@@ -189,10 +203,15 @@ def silence(level_db: np.ndarray, plan: Plan, percentile: float) -> np.ndarray:
     low = level_db < lowest_mode_db(level_db) + SILENCE_MARGIN_DB
     if low.all():
         return np.zeros(n, dtype=bool)
-    above = max(end - start for start, end in _runs(~low)) * HOP_S
+    runs = _runs(~low)
+    above = max(end - start for start, end in runs) * HOP_S
     far = np.zeros(n, dtype=bool)
-    if above > cycle:
-        spindle = np.percentile(level_db[~low], percentile)
+    spindle_like = ~low
+    for start, end in runs:
+        if _facing_like(plan, (end - start) * HOP_S):
+            spindle_like[start:end] = False
+    if above > cycle and spindle_like.any():
+        spindle = np.percentile(level_db[spindle_like], percentile)
         far = low & (level_db < spindle - SILENCE_FAR_DB)
     stretches = np.zeros(n, dtype=bool)
     for start, end in _runs(low):
@@ -235,6 +254,34 @@ class Alignment:
     cost: float
     matches: dict[int, Segment]  # index into plan.passes -> segment
     unmatched: list[Segment]  # detected, in time order, but fitting no pass
+    # Leg -> the stretch heard as the facing of the top before it (the recording ran on).
+    facings: dict[int, Segment] = field(default_factory=dict)
+
+
+MATCH, SKIP, DROP = 0, 1, 2  # align's moves: match a step, skip it, drop a segment
+
+
+def _steps(plan: Plan) -> list[int]:
+    """What a run does, in order: each pass (its index in plan.passes), and before a leg
+    that faces the top down, the facing (~leg, so below 0)."""
+    steps: list[int] = []
+    index = 0
+    for number, leg in enumerate(plan.legs):
+        if leg.reface_mm > 0 and leg.face_s > 0:
+            steps.append(~number)
+        steps += range(index, index + len(leg.passes))
+        index += len(leg.passes)
+    return steps
+
+
+def _facing_cost(span_s: float, face_s: float) -> float:
+    """What matching a stretch `span_s` long to a facing costs; inf if it cannot be one."""
+    mismatch = math.log(span_s / face_s)
+    if mismatch < 0:
+        limit = math.log(DURATION_TOLERANCE)
+        return -mismatch / limit if -mismatch <= limit else math.inf
+    limit = math.log(FACING_SPAN)
+    return mismatch / limit if mismatch <= limit else math.inf
 
 
 def align(plan: Plan, segments: list[Segment]) -> Alignment:
@@ -246,39 +293,62 @@ def align(plan: Plan, segments: list[Segment]) -> Alignment:
     first, so passes of equal length are told apart by which ones are loud enough to hear.
     Passes skipped after the last cut cost a quarter: a run stopped early is likelier than
     one whose passes went unheard.
+
+    Facing the top down before a leg may match a run of segments that spans about as long
+    (see FACING_SPAN), heard when the recording was not paused through it: loud and long,
+    it would otherwise drown the passes after it. Not heard, it costs nothing.
     """
     passes = plan.passes
     widest = max(p.width_mm for p in passes)
     skip = [0.3 + 0.7 * p.width_mm / widest if p.kind is PassKind.TEST else 0.3 for p in passes]
-    n, m = len(passes), len(segments)
+    steps = _steps(plan)
+    n, m = len(steps), len(segments)
     cost = np.full((n + 1, m + 1), math.inf)
     cost[0, :] = np.arange(m + 1)
-    cost[1:, 0] = np.cumsum(skip)
-    move = np.zeros((n + 1, m + 1), dtype=np.int8)  # 0 match, 1 skip pass, 2 drop segment
-    move[0, 1:] = 2
-    move[1:, 0] = 1
+    move = np.full((n + 1, m + 1), DROP, dtype=np.int8)
+    came_from = np.zeros((n + 1, m + 1), dtype=int)  # the segment count before the move
+    came_from[0, 1:] = np.arange(m)
     limit = math.log(DURATION_TOLERANCE)
     for i in range(1, n + 1):
-        for j in range(1, m + 1):
-            mismatch = abs(math.log(segments[j - 1].duration_s / passes[i - 1].expected_cut_s))
-            options = (
-                cost[i - 1, j - 1] + (mismatch / limit if mismatch <= limit else math.inf),
-                cost[i - 1, j] + skip[i - 1] * (TRAILING_SKIP if j == m else 1.0),
-                cost[i, j - 1] + 1.0,
-            )
-            move[i, j] = int(np.argmin(options))
-            cost[i, j] = options[move[i, j]]
+        step = steps[i - 1]
+        for j in range(m + 1):
+            # On a tie a match wins, then a skip: options in that order.
+            options = []
+            if j > 0 and step >= 0:
+                mismatch = abs(math.log(segments[j - 1].duration_s / passes[step].expected_cut_s))
+                if mismatch <= limit:
+                    options.append((cost[i - 1, j - 1] + mismatch / limit, MATCH, j - 1))
+            if j > 0 and step < 0:
+                face_s = plan.legs[~step].face_s
+                for first in range(j, 0, -1):
+                    span = segments[j - 1].end_s - segments[first - 1].start_s
+                    if span > face_s * FACING_SPAN:
+                        break
+                    fit = _facing_cost(span, face_s)
+                    options.append((cost[i - 1, first - 1] + fit, MATCH, first - 1))
+            trailing = TRAILING_SKIP if j == m and j > 0 else 1.0
+            options.append((cost[i - 1, j] + (0.0 if step < 0 else skip[step] * trailing), SKIP, j))
+            if j > 0:
+                options.append((cost[i, j - 1] + 1.0, DROP, j - 1))
+            cost[i, j], move[i, j], came_from[i, j] = min(options, key=lambda o: o[0])
 
     matches: dict[int, Segment] = {}
+    facings: dict[int, Segment] = {}
+    used: set[int] = set()
     i, j = n, m
     while i > 0 or j > 0:
-        step = move[i, j]
-        if step == 0:
-            matches[int(i) - 1] = segments[j - 1]
-        i -= step != 2
-        j -= step != 1
-    used = set(matches.values())
-    return Alignment(float(cost[n, m]), matches, [s for s in segments if s not in used])
+        kind, before = move[i, j], int(came_from[i, j])
+        step = steps[i - 1] if i > 0 else 0
+        if kind == MATCH and step >= 0:
+            matches[step] = segments[j - 1]
+        if kind == MATCH and step < 0:
+            facings[~step] = Segment(segments[before].start_s, segments[j - 1].end_s)
+        if kind == MATCH:
+            used.update(range(before, j))
+        i -= kind != DROP
+        j = before
+    unmatched = [s for k, s in enumerate(segments) if k not in used]
+    return Alignment(float(cost[n, m]), matches, unmatched, facings)
 
 
 def find_cuts(samples: np.ndarray, rate: int, plan: Plan) -> Alignment:
@@ -314,6 +384,13 @@ def find_cuts_in(level: np.ndarray, plan: Plan) -> Alignment:
         len(alignments[chosen].matches),
         len(plan.passes),
     )
+    for number, heard in alignments[chosen].facings.items():
+        log.info(
+            "the top faced down before leg %d heard at %.0f-%.0f s (the recording ran on)",
+            number,
+            heard.start_s,
+            heard.end_s,
+        )
     return alignments[chosen]
 
 

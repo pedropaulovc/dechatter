@@ -111,7 +111,7 @@ def record(
     `air_s` there is no leading silence: the spindle is heard from the first sample. The
     passes in `in_air` (indices) move as planned but cut nothing: no stock was where they ran.
     With `facing` HEARD, each facing of the top is in the recording, as long as it takes,
-    right before the first pass after it.
+    after a rapid to it and right before the first pass after it.
     """
     rng = np.random.default_rng(seed)
     parts = [0.0005 * rng.standard_normal(0 if air_s is not None else 3 * RATE)]
@@ -120,6 +120,7 @@ def record(
     for index, p in enumerate(plan.passes):
         spindle_hz = p.rpm * (1 + machine.rpm_error) / 60
         if facing is Facing.HEARD and p.id in faced:
+            parts.append(_air(rapid_s, spindle_hz, machine, rng))
             # The whole top at a quarter of the cutter: louder than any test cut, and chatter.
             quarter = plan.diameter_mm / 4
             parts.append(_cut(faced[p.id], spindle_hz, plan.flutes, quarter, True, machine, rng))

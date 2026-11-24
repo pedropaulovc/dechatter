@@ -5,10 +5,10 @@
   "diameter_mm": 12.7,
   "axial_depth_mm": 5.08,
   "chip_load_mm": 0.0889,
+  "face_y_start_mm": 20.7,
   "dwell_s": 4,
   "plunge_s": 3.23,
-  "legs": [{"lane": 1, "face_y_start_mm": 20.7, "lane_cap_mm": null, "top_mm": 0.0,
-            "reface_mm": 0.0, "face_s": 0.0, "passes": [
+  "passes": [
     {
       "id": 0,
       "kind": "truing",
@@ -75,8 +75,7 @@
       "p_stable": 0.672,
       "chip_load_mm": null
     }
-  ]}],
+  ],
   "planned_on": "2026-11-11",
-  "lanes": 1,
-  "schema": 3
+  "schema": 2
 }

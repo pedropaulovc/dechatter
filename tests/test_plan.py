@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -9,11 +10,14 @@ from dechatter import gcode
 from dechatter.config import ConfigError, load_setup, parse_setup
 from dechatter.plan import (
     REFACE_EXTRA_MM,
+    SCHEMA,
     SWEEP_PASSES,
     Face,
     PassKind,
+    Plan,
     PlanError,
     PlannerKind,
+    Top,
     assemble,
     cut_order,
     envelope,
@@ -518,3 +522,55 @@ def test_facing_takes_the_top_down_in_levels_and_rows_over_the_whole_stock(write
     assert plan.legs[0].face_s > 0 and plan.run_time_s > round1(setup).run_time_s
     plunge = next(b for b in found if b.step is gcode.Step.PLUNGE)
     assert plunge.target["z"] == pytest.approx(-(7.4 + setup.cut.axial_depth_mm))
+    # Each row says how many are still to come: the widget knows from it whether the
+    # facing finished.
+    after = [b.rows_after for b in found if b.step is gcode.Step.FACE]
+    assert after == list(range(len(rows) - 1, -1, -1))
+
+
+def test_a_top_faced_only_in_part_is_faced_again_before_any_cut(write_setup):
+    setup = load_setup(write_setup(**SPILL))
+    env = envelope(setup)
+    depth = setup.cut.axial_depth_mm
+    tests = grid_tests(setup, env)
+    # A facing stopped part-way: lane 3 still has room, but its top may be gone in places.
+    stopped = Face(lane=3, y_mm=1.0, cap_mm=4.2, top=Top.PART_FACED)
+    plan = assemble(setup, env, 3, PlannerKind.GRID, tests, face=stopped, cut_mm=(depth, depth))
+    first = plan.legs[0]
+    step = depth + REFACE_EXTRA_MM
+    # Faced down again from the old top, as the facing cut short would have, then lane 1.
+    assert (first.lane, first.face_y_start_mm, first.reface_mm) == (1, 0.0, pytest.approx(step))
+    assert first.top_mm == pytest.approx(step)
+    program = gcode.render(plan, setup, MM).splitlines()
+    plunges = [line for line in program if line.startswith("G1 Z")]
+    assert float(plunges[0].split()[1][1:]) > -1.0  # the first level, just under the old top
+    # With no height to face it, nothing is cut on it.
+    flat_only = load_setup(write_setup(l=("width_mm = 30.0", "width_mm = 5.0\nlanes = 3")))
+    with pytest.raises(PlanError, match="stopped part-way through facing the top down"):
+        assemble(flat_only, env, 3, PlannerKind.GRID, tests, face=stopped, cut_mm=(depth,))
+
+
+FIXTURES = Path(__file__).parent / "fixtures" / "v8"
+
+
+def test_a_plan_of_0_5_0_or_before_loads_as_one_leg(write_setup, tmp_path):
+    # A real 0.2.0 session's round: one lane, its face 20.7 mm in.
+    old = Plan.load(FIXTURES / "round-02" / "plan.json")
+    assert old.schema == SCHEMA and old.lanes == 1 and len(old.legs) == 1
+    leg = old.legs[0]
+    assert (leg.lane, leg.face_y_start_mm, leg.lane_cap_mm, leg.top_mm) == (1, 20.7, None, 0.0)
+    assert len(old.passes) == 6 and [p.id for p in old.passes] == list(range(6))
+
+    # A 0.5.0 round on lane 2 of 3, faced down first: every field kept.
+    setup = load_setup(write_setup(**SPILL))
+    env = envelope(setup)
+    used = Face(lane=2, y_mm=1.0, cap_mm=4.2, top_mm=5.2)
+    tests = grid_tests(setup, env)[:2]
+    plan = assemble(setup, env, 4, PlannerKind.GRID, tests, face=used, cut_mm=(5.0,), lanes=3)
+    assert len(plan.legs) == 1
+    plan.save(tmp_path / "plan.json")
+    data = json.loads((tmp_path / "plan.json").read_text())
+    (single,) = data.pop("legs")
+    schema_2 = {**data, **single, "schema": 2}
+    (tmp_path / "old.json").write_text(json.dumps(schema_2))
+    assert Plan.load(tmp_path / "old.json") == plan

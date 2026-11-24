@@ -22,11 +22,18 @@ What changed for people who use the dechatter widget and command line. The forma
   ended in.
 - From the command line, a program that faces the top down partway stops (`M0`) before
   and after the facing: pause the recording through it, so the cuts found by their sound
-  follow on as planned. The widget records on through it and leaves it out of the analysis.
-- **Breaking:** sessions planned before this version do not load: a round's plan now holds
-  the lanes it runs across. dechatter says the round was written by an older dechatter;
-  start a new session. Sessions planned by this version cannot be opened by dechatter
-  0.5.0.
+  follow on as planned. A recording that runs on through the facing is still matched: the
+  facing is heard as one long stretch and left out. The widget records on through it and
+  leaves it out of the analysis.
+- Where a run stopped right before facing the top down partway, the next round starts
+  from what the facing did: on the new top if it finished, where the run stopped if it never
+  started, and if it stopped part-way, by facing the top down again from the old top before
+  any cut. The widget records the facing's rows and knows which. A recording cannot tell, so
+  `dechatter analyze` asks for `--facing done`, `cut-short` or `not-run` (or `"facing"` in
+  the round's `results.json`), and `dechatter plan` refuses until it is given. Sound after
+  the last cut before the facing is no longer taken for the next pass stopped early.
+- Sessions planned by this version cannot be opened by dechatter 0.5.0, whose plans hold a
+  round on a single lane. Sessions from 0.2.0 to 0.5.0 load as they are.
 
 ### Fixed
 

@@ -186,7 +186,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
     manual = audio.read_segments(args.segments) if args.segments else None
     thresholds = Thresholds(args.prominence_db, args.excess_db)
-    results = session.analyze_recording(target, args.recording, thresholds, manual)
+    results = session.analyze_recording(target, args.recording, thresholds, manual, args.facing)
 
     print(f"round {number}: {args.recording.name}")
 
@@ -211,6 +211,22 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     print(
         f"wrote {target.path / session.RESULTS_FILE} (edit a verdict there if your ears disagree)"
     )
+    faced = session.facing_at_stop(target.plan, results.passes)
+    if faced is not None and results.facing is None:
+        reface = target.plan.legs[faced].reface_mm
+        segments = f" --segments {args.segments}" if args.segments else ""
+        print(
+            f"the run stopped right before the program faces the top down {reface:g} mm, and "
+            "the recording cannot tell whether that facing ran. Before planning, say what it "
+            "did (done: it finished; cut-short: it stopped part-way, and the next round faces "
+            "the top again first; not-run: it never started):"
+        )
+        print(
+            f"  dechatter analyze {args.session} {args.recording} --round {number}{segments} "
+            f"--facing {'|'.join(session.Facing)}"
+        )
+        print(f'or set "facing" to one of those in {target.path / session.RESULTS_FILE}')
+        return 0
     print(f"next: dechatter plan {args.session}")
     return 0
 
@@ -292,6 +308,13 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("recording", type=Path)
     analyze.add_argument("--round", type=int, help="default: the latest round")
     analyze.add_argument("--segments", type=Path, help="CSV of start,end seconds per pass run")
+    analyze.add_argument(
+        "--facing",
+        type=session.Facing,
+        choices=list(session.Facing),
+        help="for a run that stopped right before its program faces the top down mid-round: "
+        "whether the facing finished, stopped part-way, or never started",
+    )
     defaults = Thresholds()
     analyze.add_argument("--prominence-db", type=float, default=defaults.prominence_db)
     analyze.add_argument("--excess-db", type=float, default=defaults.excess_db)
