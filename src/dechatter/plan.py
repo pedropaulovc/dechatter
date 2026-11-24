@@ -64,6 +64,13 @@ class Order(StrEnum):
     DEEPEST_FIRST = "deepest-first"  # as the stock demands where depths differ
 
 
+class Reach(StrEnum):
+    """How far along its lane a pass was cut."""
+
+    END = "end"
+    PART = "part"  # stopped part-way: beyond where it stopped the stock stands uncut
+
+
 def order(vary: Vary, kind: Milling, lanes: int) -> Order:
     """A round that steps the depth cuts deepest first: stock is only clear down to the
     shallowest cut made in front of it, on a face and from one lane to the next, so a
@@ -275,7 +282,7 @@ class Envelope:
         return np.arange(self.speed_min_rpm, self.speed_max_rpm + 1, step_rpm, dtype=float)
 
     def engagements(self, step_mm: float) -> np.ndarray:
-        count = max(1, int(round(self.engagement_max_mm / step_mm)))
+        count = max(1, int(round(self.engagement_top_mm / step_mm)))
         return step_mm * np.arange(1, count + 1, dtype=float)
 
 
@@ -308,6 +315,15 @@ def engagement_step_mm(setup: Setup) -> float:
     finest = setup.cut.depth_max_mm / DEPTH_LEVELS
     decade = 10.0 ** math.floor(math.log10(finest))
     return decade * max(m for m in (1, 2, 5) if m * decade <= finest * (1 + 1e-9))
+
+
+def _levels(setup: Setup, engagement_max_mm: float, step_mm: float) -> int:
+    """How many steps the search takes up to its largest cut. A width rounds to its step, a
+    hair over at most. A depth never goes over: depth_max_mm is as deep as the setup lets a
+    cut go, and what stock.height_mm was checked against."""
+    if setup.cut.vary is Vary.DEPTH:
+        return max(1, math.floor(engagement_max_mm / step_mm + 1e-9))
+    return max(1, int(round(engagement_max_mm / step_mm)))
 
 
 def milling(setup: Setup) -> Milling:
@@ -348,7 +364,7 @@ def envelope(setup: Setup) -> Envelope:
         mrr_limit_mm3_min=usable_w / material.specific_energy_j_mm3 * 60,
         speed_low_rpm=speed_low,
         speed_high_rpm=speed_high,
-        engagement_top_mm=engagement_step * max(1, int(round(engagement_max / engagement_step))),
+        engagement_top_mm=engagement_step * _levels(setup, engagement_max, engagement_step),
     )
 
 
@@ -552,12 +568,14 @@ FRESH = Face()  # fresh stock: the first lane's face at Y0, the top at Z0
 @dataclass(frozen=True)
 class Made:
     """A pass cut into the top as it stands: its lane, how far from Y0 it reached (the face
-    it left, or a slot's far wall), how deep it went, and how it met the stock."""
+    it left, or a slot's far wall), how deep it went, how it met the stock, and whether it
+    ran the lane's length."""
 
     lane: int
     y_mm: float
     depth_mm: float
     milling: Milling = Milling.SIDE
+    reach: Reach = Reach.END
 
 
 def cut_order(
@@ -586,17 +604,46 @@ def _face_floor(setup: Setup, lane: int, made: list[Made]) -> float:
     return min((m.depth_mm for m in made if m.lane == lane), default=math.inf)
 
 
-def _lane_floor(lane: int, y_mm: float, made: list[Made]) -> float:
+# Slots of two lanes are in one row when their far walls are this close: what rounding a
+# leg's wall and start to the plan's 0.001 mm adds up to over a stock's rows.
+ROW_TOLERANCE_MM = 0.01
+
+
+def _lane_floor(kind: Milling, lane: int, y_mm: float, made: list[Made]) -> float:
     """How deep a cut reaching `y_mm` from Y0 may go in a lane after the first: the cutter
     comes to it through the lane before, which is clear only as deep as it was cut there.
-    With no pass of that lane on record, only the face's cap bounds the cut."""
+    With no pass of that lane on record, only the face's cap bounds the cut.
+
+    A slot comes in through the slot of its own row and no other: beside it stand the walls.
+    That slot must have run the lane's length, since the cutter plunges inside its far end:
+    one stopped part-way clears nothing for the lane after it.
+    """
     before = [m for m in made if m.lane == lane - 1]
     if not before:
         return math.inf
+    if kind is Milling.SLOT:
+        row = [
+            m
+            for m in before
+            if m.milling is Milling.SLOT and abs(m.y_mm - y_mm) <= ROW_TOLERANCE_MM
+        ]
+        if not row or any(m.reach is Reach.PART for m in row):
+            return -math.inf
+        return min(m.depth_mm for m in row)
     reached = [m for m in before if m.y_mm >= y_mm - 1e-6]
     if not reached:
         return -math.inf
     return min(reached, key=lambda m: m.y_mm).depth_mm
+
+
+def _too_low(setup: Setup, top_mm: float, depth_mm: float) -> bool:
+    """Whether a cut `depth_mm` deep, on a top faced down to `top_mm` below Z0, would come
+    within the clearance of what stock.height_mm keeps the cutter above. On the top as it
+    was mounted the setup itself says how deep a cut may go (see config)."""
+    height = setup.stock.height_mm
+    if height is None or top_mm <= 0:
+        return False
+    return top_mm + depth_mm + setup.program.clearance_mm > height + DEPTH_TOLERANCE_MM
 
 
 def _fill(
@@ -604,7 +651,7 @@ def _fill(
 ) -> tuple[list[tuple[float, float]], list[tuple]]:
     """(face preparation, the tests that fit after it): `tests` in order, up to the first
     that does not fit, or that cuts deeper than the stock in front of it is clear (`made`:
-    the passes cut into the top as it stands)."""
+    the passes cut into the top as it stands), or too near what the stock stands on."""
     prep = preparation_passes(setup, env, face.remnant_mm)
     y = face.y_mm + sum(w for _, w in prep)
     budget = lane_budget_mm(setup, face.cap_mm)
@@ -614,8 +661,10 @@ def _fill(
     for test in tests:
         width, depth = cut_size(setup, test[1])
         y += width + wall
-        clear = min(floor, _lane_floor(face.lane, y, made))
+        clear = min(floor, _lane_floor(milling(setup), face.lane, y, made))
         if depth > clear + DEPTH_TOLERANCE_MM or y > budget + 1e-9:
+            break
+        if _too_low(setup, face.top_mm, depth):
             break
         if milling(setup) is Milling.SIDE:
             floor = min(floor, depth)
@@ -766,6 +815,12 @@ def _no_room(
     floor = _face_floor(setup, face.lane, list(made))
     first = cut_order(setup, tests, lanes, floor)[0]
     depth = cut_size(setup, first[1])[1]
+    if _too_low(setup, face.top_mm, depth):
+        return (
+            f"round {round_no} would cut {depth:g} mm deep below a top already faced down "
+            f"{face.top_mm:g} mm, less than the clearance ({setup.program.clearance_mm:g} mm) "
+            f"above [stock] height_mm ({setup.stock.height_mm:g} mm). {hint}."
+        )
     if depth > floor + DEPTH_TOLERANCE_MM:
         return (
             f"round {round_no} would cut {depth:g} mm deep, but this block's face is only flat "
@@ -803,21 +858,27 @@ def assemble(
     setup steps that. `made` are the passes cut into the top as it stands (none: it is
     untouched). Tests left over once the stock runs out are dropped, the heaviest ones: a
     ramp leaves them for last, and a round that runs deepest first is laid out again without
-    them, since the lighter cuts are what the heavier ones were chosen on. But a chip-load
-    sweep must fit whole: cut short, its heaviest chip loads would go untried and the
-    lightest read as a limit.
+    them, since the lighter cuts are what the heavier ones were chosen on; so too when its
+    deepest cut fits nowhere (deeper than any face left is clear, or too near what the stock
+    stands on) and lighter ones do. But a chip-load sweep must fit whole: cut short, its
+    heaviest chip loads would go untried and the lightest read as a limit.
     """
     lanes = lanes or auto_lanes(setup, env)
+    asked = tests
     legs, left = _lay_out(setup, env, tests, face, made, lanes)
-    if not legs or (left and planner is PlannerKind.SWEEP):
-        raise PlanError(_no_room(setup, round_no, tests, face, made, lanes, legs))
+    if left and planner is PlannerKind.SWEEP:
+        raise PlanError(_no_room(setup, round_no, asked, face, made, lanes, legs))
     deepest_first = order(setup.cut.vary, milling(setup), lanes) is Order.DEEPEST_FIRST
-    while left and deepest_first:
-        lighter = sorted(tests, key=lambda t: (t[1], t[0]))[: len(tests) - len(left)]
+    while left and deepest_first and len(tests) > 1:
+        # With nothing laid out the heaviest test is in the way: try without it.
+        keep = len(tests) - len(left) if legs else len(tests) - 1
+        lighter = sorted(tests, key=lambda t: (t[1], t[0]))[:keep]
         again, rest = _lay_out(setup, env, lighter, face, made, lanes)
-        if not again:
+        if legs and not again:
             break
         tests, legs, left = lighter, again, rest
+    if not legs:
+        raise PlanError(_no_room(setup, round_no, asked, face, made, lanes, legs))
     return Plan(
         round=round_no,
         planner=planner,
@@ -862,7 +923,10 @@ def grid_tests(setup: Setup, env: Envelope) -> list[tuple[float, float, None]]:
     step = engagement_step_mm(setup)
     fractions = cfg.round1_depth_fractions if deep else cfg.round1_width_fractions
     engagements = sorted(
-        {max(step, round(f * env.engagement_max_mm / step) * step) for f in fractions}
+        {
+            min(env.engagement_top_mm, max(step, round(f * env.engagement_max_mm / step) * step))
+            for f in fractions
+        }
     )
     tests = [
         (float(rpm), float(engagement), None)

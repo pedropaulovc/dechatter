@@ -4,12 +4,13 @@ or side milling on the front face."""
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 import soundfile
 import synth
 
-from dechatter import browser, cli, gcode, report, session
+from dechatter import bayes, browser, cli, gcode, report, session
 from dechatter.app import App
 from dechatter.config import ConfigError, Vary, parse_setup
 from dechatter.detect import Thresholds, Verdict
@@ -22,6 +23,7 @@ from dechatter.plan import (
     PassKind,
     PlanError,
     PlannerKind,
+    Reach,
     assemble,
     envelope,
     grid_tests,
@@ -285,6 +287,132 @@ def test_a_cut_deeper_than_its_face_allows_moves_to_a_fresh_lane():
         tall, env, 2, PlannerKind.BAYES, [(2000.0, 2.4, 0.9)], face=face, made=tuple(made)
     )
     assert plan.legs[0].reface_mm == pytest.approx(1.8 + REFACE_EXTRA_MM)
+
+
+def far_walls(plan, lane: int, top_mm: float) -> list[float]:
+    """The far wall, from Y0, of every slot a plan cuts in a lane on a top."""
+    walls = []
+    for leg in plan.legs:
+        y = leg.face_y_start_mm
+        for p in leg.passes:
+            y += p.width_mm + leg.wall_mm
+            if (leg.lane, leg.top_mm) == (lane, top_mm):
+                walls.append(round(y, 3))
+    return walls
+
+
+def test_a_slot_stopped_part_way_clears_nothing_for_the_next_lane():
+    setup = slots()
+    env = envelope(setup)
+    first = assemble(setup, env, 1, PlannerKind.GRID, [(1500.0, 0.6, None), (1500.0, 0.5, None)])
+    assert [(leg.lane, len(leg.passes)) for leg in first.legs] == [(1, 2)]
+    # The second slot, in the second row of lane 1, was feed-held part-way.
+    heard = tuple(
+        session.PassResult(p.id, p.kind, p.rpm, p.width_mm, status, verdict)
+        for p, status, verdict in zip(
+            first.passes,
+            (session.PassStatus.ANALYSED, session.PassStatus.ABORTED),
+            (Verdict.STABLE, Verdict.UNSTABLE),
+            strict=True,
+        )
+    )
+    results = session.Results(1, "recording.wav", Thresholds(), heard)
+    cut = session.Round(Path("round-01"), first, results)
+    face = session.face_after(cut)
+    made = session._made_since_top([cut])
+    # Its row is used in lane 1, and the stock beyond where it stopped stands uncut.
+    assert (face.lane, face.y_mm, face.remnant_mm) == (1, pytest.approx(2 * PITCH), 0.0)
+    assert [m.reach for m in made] == [Reach.END, Reach.PART]
+
+    tests = [(1500.0, 0.6, None), (1500.0, 0.5, None), (1500.0, 0.45, None)]
+    plan = assemble(setup, env, 2, PlannerKind.BAYES, tests, face=face, made=made, lanes=2)
+    # Lane 2 comes in through the whole slot of row 1 only. A slot in row 2 would plunge at
+    # X59.3, inside lane 1, into the stock the stopped slot never reached: the third cut
+    # waits for the top to be faced instead.
+    assert far_walls(plan, 1, 0.0) == [pytest.approx(3 * PITCH)]
+    assert far_walls(plan, 2, 0.0) == [pytest.approx(PITCH)]
+    assert [leg.reface_mm for leg in plan.legs] == pytest.approx([0, 0, 0.6 + REFACE_EXTRA_MM])
+    for block in gcode.blocks(plan, setup, MM):
+        inside_lane_1 = block.step is gcode.Step.RAPID and block.target["x"] > 0
+        assert not inside_lane_1 or block.target["y"] == pytest.approx(WALL + RADIUS)
+    # With no height to face the top there is room for two cuts, the row lane 1 has left
+    # and row 1 of lane 2: the heaviest waits, and nothing goes into row 2 of lane 2.
+    bare = slots(**NO_HEIGHT)
+    plan = assemble(bare, env, 2, PlannerKind.BAYES, tests, face=face, made=made, lanes=2)
+    assert [(leg.lane, p.depth_mm) for leg in plan.legs for p in leg.passes] == [
+        (1, 0.5),
+        (2, 0.45),
+    ]
+    assert far_walls(plan, 2, 0.0) == [pytest.approx(PITCH)]
+
+
+def test_a_slot_in_a_later_lane_needs_the_slot_of_its_own_row_before_it():
+    # The wall sets the rows: it is part of what a session's slots were cut with.
+    assert "program.slot_wall_mm" not in session.FREE_AFTER_CUT
+    thin = slots(p=("[stock]", "[program]\nslot_wall_mm = 1.0\n\n[stock]"))
+    assert session._measured_changes(slots(), thin) == ["program.slot_wall_mm"]
+
+    # Lane 1 holds three slots 3.175 mm apart. Slots 1 mm apart would lie across its walls:
+    # none goes into lane 2 on this top, whatever the depth.
+    env = envelope(thin)
+    used = Face(lane=1, y_mm=3 * PITCH)
+    made = tuple(Made(1, row * PITCH, 0.6, Milling.SLOT) for row in (1, 2, 3))
+    tests = [(1500.0, 0.5, None)] * 3
+    plan = assemble(thin, env, 2, PlannerKind.BAYES, tests, face=used, made=made, lanes=2)
+    assert far_walls(plan, 2, 0.0) == []
+    assert [(leg.lane, leg.top_mm) for leg in plan.legs] == [(1, pytest.approx(0.8))]
+    thin_bare = slots(p=("[stock]", "[program]\nslot_wall_mm = 1.0\n\n[stock]"), **NO_HEIGHT)
+    with pytest.raises(PlanError, match="no room left for a slot"):
+        assemble(thin_bare, env, 2, PlannerKind.BAYES, tests, face=used, made=made, lanes=2)
+    # On the rows lane 1 was cut in, they go in, no deeper than its slots.
+    plan = assemble(slots(), env, 2, PlannerKind.BAYES, tests, face=used, made=made, lanes=2)
+    assert far_walls(plan, 2, 0.0) == pytest.approx([PITCH, 2 * PITCH, 3 * PITCH])
+
+
+DEEP = {"d": ("depth_max_mm = 0.75", "depth_max_mm = 3.0")}
+
+
+def test_no_depth_searched_or_planned_is_deeper_than_depth_max_mm():
+    coarse = "[planner]\ndepth_step_mm = 0.4\nround1_depth_fractions = [0.5, 1.0]\n\n[stock]"
+    setup = slots(**DEEP, p=("[stock]", coarse), c=("chip_load_mm = 0.071", "chip_load_mm = 0.01"))
+    env = envelope(setup)
+    # 3.0 mm is 7.5 steps of 0.4 mm: the search stops at 7, 2.8 mm, not at 8, 3.2 mm.
+    assert env.engagements(0.4)[-1] == pytest.approx(2.8)
+    assert env.engagement_top_mm == pytest.approx(2.8)
+    assert bayes.build_map(setup, env, []).engagements[-1] == pytest.approx(2.8)
+    tests = grid_tests(setup, env)
+    assert sorted({depth for _, depth, _ in tests}) == pytest.approx([1.6, 2.8])
+    plan = assemble(setup, env, 1, PlannerKind.GRID, tests)
+    assert max(p.depth_mm for p in plan.passes) == pytest.approx(2.8)
+
+    # The deepest cut must stay the clearance (3 mm) above what the stock stands on.
+    with pytest.raises(ConfigError, match="must leave .* below the deepest cut.*at least 6 mm"):
+        slots(**DEEP, h=("height_mm = 20.0", "height_mm = 5.9"))
+    slots(**DEEP, h=("height_mm = 20.0", "height_mm = 6.0"))
+    with pytest.raises(ConfigError, match="depth_step_mm cannot be more than"):
+        slots(p=("[stock]", "[planner]\ndepth_step_mm = 0.8\n\n[stock]"))
+
+
+def test_a_cut_on_a_faced_top_stays_the_clearance_above_what_the_stock_stands_on():
+    shallow = "[program]\nclearance_mm = 1.0\n\n[stock]"
+    setup = slots(**DEEP, h=("height_mm = 20.0", "height_mm = 5.0"), p=("[stock]", shallow))
+    env = envelope(setup)
+    # Earlier rounds faced the top down 3.2 mm; the search may still ask for 3.0 mm deep,
+    # whose bottom would be 6.2 mm below Z0 on a block that stands 5 mm above the jaws.
+    low = Face(top_mm=3.2)
+    deep, light = (1000.0, 3.0, None), (1000.0, 0.6, None)
+    for lanes in (1, 2):
+        with pytest.raises(PlanError, match="3 mm deep below a top already faced down 3.2 mm"):
+            assemble(setup, env, 5, PlannerKind.BAYES, [deep], face=low, lanes=lanes)
+        # A lighter cut still fits (3.2 + 0.6 + 1 mm): it is cut, the deep one left out,
+        # in a ramp and deepest first alike.
+        plan = assemble(setup, env, 5, PlannerKind.BAYES, [deep, light], face=low, lanes=lanes)
+        assert [(p.depth_mm, leg.top_mm) for leg in plan.legs for p in leg.passes] == [(0.6, 3.2)]
+    # Nor is the top faced down to where the next cut would not fit: 0.8 mm more, then 0.6.
+    used = Face(y_mm=3 * PITCH, top_mm=3.2)
+    made = tuple(Made(1, row * PITCH, 0.6, Milling.SLOT) for row in (1, 2, 3))
+    with pytest.raises(PlanError, match="The top cannot come down further"):
+        assemble(setup, env, 5, PlannerKind.BAYES, [light], face=used, made=made, lanes=1)
 
 
 def record(work, plan, machine, seed) -> None:

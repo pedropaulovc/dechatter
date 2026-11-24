@@ -30,6 +30,7 @@ from .plan import (
     Plan,
     PlanError,
     PlannerKind,
+    Reach,
     SchemaError,
     Top,
     assemble,
@@ -754,12 +755,15 @@ def _faced_at_stop(r: Round) -> bool:
 def _made_since_top(rounds: list[Round]) -> tuple[Made, ...]:
     """The passes cut into the top as it stands: since the block was mounted or last faced,
     every pass a run got to (every pass of a leg none was heard in, or of a round never
-    analysed), with how far from Y0 it reached and how deep it went."""
+    analysed), with how far from Y0 it reached, how deep it went, and whether it was stopped
+    part-way."""
     made = []
     for r in reversed(rounds):
         if _faced_at_stop(r):
             return tuple(made)
         final = None if r.results is None else _last_heard(r)
+        results = () if r.results is None else r.results.passes
+        stopped = {p.id for p in results if p.status is PassStatus.ABORTED}
         reached = _reached(r)
         for number, leg in reversed(list(enumerate(reached))):
             passes = leg.passes
@@ -768,7 +772,8 @@ def _made_since_top(rounds: list[Round]) -> tuple[Made, ...]:
             y = leg.face_y_start_mm
             for p in passes:
                 y += p.width_mm + leg.wall_mm
-                made.append(Made(leg.lane, y, p.depth_mm, r.plan.milling))
+                reach = Reach.PART if p.id in stopped else Reach.END
+                made.append(Made(leg.lane, y, p.depth_mm, r.plan.milling, reach))
             if leg.face_y_start_mm == 0 and leg.lane == 1:
                 return tuple(made)
     return tuple(made)
@@ -960,7 +965,6 @@ FREE_AFTER_CUT = frozenset(
         "stock.thickness_mm",
         "program.face_depth_mm",
         "program.face_width_mm",
-        "program.slot_wall_mm",
     }
 )
 # Fields that are in neither a plan nor its program: an unrun round survives their change.

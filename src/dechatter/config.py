@@ -388,6 +388,15 @@ def _validate(setup: Setup) -> None:
     stock = setup.stock
     if stock.height_mm is not None and stock.height_mm <= getattr(cut, deepest):
         raise ConfigError(f"[stock] height_mm must stand above the deepest cut, {deepest}")
+    # A session that steps the depth cuts as deep as depth_max_mm wherever the search leads:
+    # the deepest cut must clear what the stock stands on, as facing the top down has to.
+    reach = None if cut.vary is Vary.WIDTH else cut.depth_max_mm + setup.program.clearance_mm
+    if stock.height_mm is not None and reach is not None and stock.height_mm < reach:
+        raise ConfigError(
+            "[stock] height_mm must leave [program] clearance_mm "
+            f"({setup.program.clearance_mm:g} mm) below the deepest cut, depth_max_mm: at "
+            f"least {reach:g} mm"
+        )
     if stock.thickness_mm is not None and stock.thickness_mm < stock.width_mm:
         raise ConfigError("[stock] thickness_mm cannot be less than width_mm, the width used")
     wall = slot_wall_mm(setup)
@@ -433,6 +442,8 @@ def _validate(setup: Setup) -> None:
     depth_step = setup.planner.depth_step_mm
     if setup.planner.width_step_mm <= 0 or (depth_step is not None and depth_step <= 0):
         raise ConfigError("[planner] width_step_mm and depth_step_mm must be positive")
+    if cut.vary is Vary.DEPTH and depth_step is not None and depth_step > cut.depth_max_mm:
+        raise ConfigError("[planner] depth_step_mm cannot be more than [cut] depth_max_mm")
     if not 0 < setup.planner.probability_floor <= setup.planner.min_probability < 1:
         raise ConfigError("[planner] need 0 < probability_floor <= min_probability < 1")
     if not 0 < setup.planner.min_cut_s:

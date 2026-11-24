@@ -55,7 +55,11 @@ speed at `round1_depth_fractions` of the deepest cut (20%, 40% and 60%), and the
 in steps of `depth_step_mm`, both in `[planner]`. Left out, the step is a round number that
 gives at least 50 depths up to the deepest (0.01 mm for 0.75 mm, 0.1 mm for 6 mm): the
 planner only steps up where the next depth is likely stable given the one below, and with
-few, coarse steps the deepest ones would each be too big a step to take.
+few, coarse steps the deepest ones would each be too big a step to take. No depth searched
+is deeper than `depth_max_mm`, which a step that does not divide it stops short of. Given
+`height_mm`, it must leave the clearance (`clearance_mm`) below `depth_max_mm`, and on a top
+that was faced down no cut is planned whose bottom would come within that clearance of it:
+such a cut waits for fresh stock.
 
 A width equal to the cutter diameter cuts **slots into the top**. Each slot runs along X
 from the air beyond the end of the stock, where the cutter plunges and the spindle is heard
@@ -65,7 +69,9 @@ the first slot, between slots and behind the last, so every slot is cut from sol
 the cutter's full width. The rows go across the stock's thickness (`thickness_mm`, or
 `width_mm` without it), which must hold at least one slot and its two walls. No face is
 trued. With lanes, a slot in a later lane starts inside the earlier lane's slot in its row,
-so it may be no deeper than that one. Once the rows are used in every lane, the top is faced
+so it may be no deeper than that one, and that one must have run its lane's length: a slot
+stopped part-way leaves its row closed to the lanes after it. The wall sets the rows, so it
+cannot change once a round was cut. Once the rows are used in every lane, the top is faced
 down below the deepest slot (given `height_mm`), or fresh stock is asked for, as in side
 milling.
 

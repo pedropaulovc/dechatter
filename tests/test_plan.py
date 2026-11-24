@@ -553,6 +553,18 @@ def test_a_top_faced_only_in_part_is_faced_again_before_any_cut(write_setup):
         assemble(flat_only, env, 3, PlannerKind.GRID, tests, face=stopped, made=made)
 
 
+def test_a_faced_top_too_low_for_the_cut_is_refused(write_setup):
+    setup = load_setup(write_setup(**SPILL))
+    env = envelope(setup)
+    depth = setup.cut.axial_depth_mm
+    tests = grid_tests(setup, env)
+    # The clearance may be raised, or the height corrected, after the top was faced.
+    fits = 40.0 - depth - setup.program.clearance_mm
+    assert assemble(setup, env, 3, PlannerKind.GRID, tests, face=Face(top_mm=fits)).legs
+    with pytest.raises(PlanError, match="below a top already faced down .*height_mm"):
+        assemble(setup, env, 3, PlannerKind.GRID, tests, face=Face(top_mm=fits + 0.5))
+
+
 FIXTURES = Path(__file__).parent / "fixtures" / "v8"
 
 

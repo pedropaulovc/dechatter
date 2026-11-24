@@ -15,7 +15,10 @@ What changed for people who use the dechatter widget and command line. The forma
   `slot_wall_mm` of stock (`[program]`, a quarter of the cutter by default) on both sides,
   across `thickness_mm`; a narrower width mills the front face at that width. The map, the
   results, the report and the G-code comments show depth against speed. `other_widths_mm`
-  compares narrower widths the way `other_depths_mm` compares shallower depths.
+  compares narrower widths the way `other_depths_mm` compares shallower depths. No cut is
+  deeper than `depth_max_mm`, and with `height_mm` given the deepest must stay
+  `clearance_mm` above it, on a faced-down top too. The slot wall cannot change once a round
+  was cut, and a slot stopped part-way closes its row to the lanes after it.
 - A round that steps the depth runs **deepest first**, on each face and from lane to lane,
   because stock is clear only as deep as the shallowest cut made before it. Its first pass
   is its heaviest: there is no ramp up to it, so be ready to feed-hold from the start. Slots
