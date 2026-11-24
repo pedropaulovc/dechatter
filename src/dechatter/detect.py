@@ -37,6 +37,10 @@ class TooShort(ValueError):
     pass
 
 
+class Silent(ValueError):
+    """No sound at all in the cut: nothing to measure a peak, or its prominence, against."""
+
+
 @dataclass(frozen=True)
 class Thresholds:
     prominence_db: float = 27.0  # peak over the median of the comb-filtered spectrum
@@ -92,8 +96,9 @@ def _on_comb(freqs: np.ndarray, spindle_hz: float) -> np.ndarray:
     return distance <= tolerance
 
 
-def _db(ratio: float) -> float:
-    return 10 * math.log10(max(ratio, 1e-30))
+def _db(power: np.ndarray | float, reference: np.ndarray | float) -> np.ndarray | float:
+    """`power` over `reference` in dB, finite even where either is zero (digital silence)."""
+    return 10 * np.log10(np.maximum(power, 1e-30) / np.maximum(reference, 1e-30))
 
 
 def classify(
@@ -109,29 +114,30 @@ def classify(
         raise TooShort(f"{len(cut) / rate:.2f} s of cut is too short to analyse")
     freqs, psd = _psd(cut, rate, window)
     band = (freqs >= BAND_HZ[0]) & (freqs <= min(BAND_HZ[1], 0.45 * rate))
+    if not psd[band].any():
+        raise Silent(f"{len(cut) / rate:.2f} s of cut is silent: no sound was recorded in it")
 
     spindle_hz = _spindle_hz(freqs, psd, band, rpm / 60, flutes)
     comb = _on_comb(freqs, spindle_hz)
     candidates = band & ~comb
-    excess_ratio = None
+    excess = None
     if air is not None and len(air) >= window:
         _, air_psd = _psd(air, rate, window)
-        excess_ratio = psd / maximum_filter1d(air_psd, 5)
-        louder = candidates & (excess_ratio >= 10 ** (thresholds.excess_db / 10))
+        excess = _db(psd, maximum_filter1d(air_psd, 5))
+        louder = candidates & (excess >= thresholds.excess_db)
         # A tone the idling spindle already makes (drive whine) is not chatter: look past it.
         candidates = louder if louder.any() else candidates
     peak = int(np.argmax(np.where(candidates, psd, 0.0)))
 
-    prominence = _db(psd[peak] / np.median(psd[band & ~comb]))
-    excess = None if excess_ratio is None else _db(excess_ratio[peak])
-
+    prominence = float(_db(psd[peak], np.median(psd[band & ~comb])))
+    peak_excess = None if excess is None else float(excess[peak])
     chatter = prominence >= thresholds.prominence_db and (
-        excess is None or excess >= thresholds.excess_db
+        peak_excess is None or peak_excess >= thresholds.excess_db
     )
     return Reading(
         verdict=Verdict.UNSTABLE if chatter else Verdict.STABLE,
         chatter_hz=float(freqs[peak]),
         spindle_hz=spindle_hz,
         prominence_db=prominence,
-        excess_db=excess,
+        excess_db=peak_excess,
     )

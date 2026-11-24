@@ -19,11 +19,16 @@ import dechatter
 from dechatter import browser, cli, plan, session
 from dechatter.app import TIMELINE_FILE, App
 from dechatter.config import load_setup
+from dechatter.detect import Verdict
 from dechatter.plan import Plan, envelope
 
 MACHINE = synth.Machine()
 NAME = "al-10mm"
 BROWSER_RATE = 48000
+
+
+def not_json(constant: str):
+    raise ValueError(f"{constant} is not valid JSON")
 
 
 class Engine:
@@ -37,7 +42,8 @@ class Engine:
         reply = browser.call(self.sessions, method, *args)
         if isinstance(reply, bytes):
             return reply
-        decoded = json.loads(reply)
+        # As strict as the widget's JSON.parse: no NaN or Infinity.
+        decoded = json.loads(reply, parse_constant=not_json)
         if "error" in decoded:
             raise RuntimeError(decoded["error"])
         return decoded["ok"]
@@ -99,6 +105,43 @@ def converge(engine, setup, machine: synth.Machine = MACHINE, **run) -> dict:
         if state["next"] in ("converged", "sweep"):
             return state
     pytest.fail("did not converge in 16 rounds")
+
+
+def test_a_reply_never_carries_a_value_json_cannot_hold():
+    class Broken:
+        def state(self):
+            return {"prominence_db": float("nan")}
+
+    reply = json.loads(browser.call(Broken(), "state"), parse_constant=not_json)
+    assert reply["error"].startswith("internal error in state: ValueError")
+
+
+def test_a_session_0_5_0_wrote_nan_into_still_opens_and_analyses_again(engine):
+    """0.5.0 analysed a silent cut window to NaN and saved it; such a session must still be
+    read, with those readings dropped, so its round can be analysed again."""
+    engine.call("plan", NAME, "fresh")
+    engine.run_round(1)
+    path = session.round_dir(engine.root / NAME, 1) / session.RESULTS_FILE
+    data = json.loads(path.read_text(encoding="utf-8"))
+    silent, overruled, loud = data["passes"][-1], data["passes"][-2], data["passes"][-3]
+    silent.update(prominence_db=float("nan"), excess_db=float("nan"), detected="stable")
+    silent.update(verdict="stable")
+    overruled.update(prominence_db=float("nan"), detected="stable", verdict="unstable")
+    loud.update(prominence_db=40.0, excess_db=float("inf"), detected="unstable")
+    loud.update(verdict="unstable")
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")  # as 0.5.0 wrote it
+
+    passes = engine.call("state", NAME)["rounds"][0]["passes"]
+    assert (passes[-1]["verdict"], passes[-1]["prominence_db"]) == (None, None)
+    # A verdict set by hand is the operator's, not the reading's: it stays.
+    assert (passes[-2]["verdict"], passes[-2]["prominence_db"]) == ("unstable", None)
+    # Only the number that is not one goes: a reading with a real prominence keeps its verdict.
+    assert (passes[-3]["verdict"], passes[-3]["prominence_db"]) == ("unstable", 40.0)
+    loaded = session.Results.load(path).passes[-3]
+    assert (loaded.excess_db, loaded.detected) == (None, Verdict.UNSTABLE)
+
+    passes = engine.call("analyze", NAME, 1)["rounds"][0]["passes"]
+    assert all(p["prominence_db"] is not None for p in passes if p["status"] == "analysed")
 
 
 def test_session_runs_to_convergence(engine, setup):

@@ -6,6 +6,17 @@ What changed for people who use the dechatter widget and command line. The forma
 
 ## [Unreleased]
 
+### Fixed
+
+- A pass the widget's run cut, but whose stretch of the recording is silent or cut off (the
+  recording stopped before the last passes), now says "no cut heard", with no verdict, and
+  the next round still starts behind its face. Before, a silent stretch was analysed to a
+  prominence of NaN, which made the round's results unreadable: the widget said
+  "Unexpected token 'N' … is not valid JSON". Results and widget replies now refuse NaN and
+  infinity outright. A session 0.5.0 saved NaN into opens again: those numbers are dropped,
+  and with a NaN prominence the detector's verdict too. `dechatter analyze` can analyse the
+  round again.
+
 ## [0.5.0] - 2026-11-23
 
 ### Added

@@ -94,7 +94,9 @@ class Plan:
         return self.face_s + cuts
 
     def save(self, path: Path) -> None:
-        path.write_text(json.dumps(asdict(self), indent=2) + "\n", encoding="utf-8")
+        # NaN and infinity are not JSON (the widget cannot read them back): refuse them here.
+        text = json.dumps(asdict(self), indent=2, allow_nan=False)
+        path.write_text(text + "\n", encoding="utf-8")
 
     @staticmethod
     def load(path: Path) -> Plan:

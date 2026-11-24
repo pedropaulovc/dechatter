@@ -61,6 +61,14 @@ def test_cut_too_short_to_resolve_is_refused():
         detect.classify(np.zeros(1000), None, synth.RATE, 3000, 3)
 
 
+def test_a_silent_cut_is_refused_and_silent_air_reads_finite():
+    with pytest.raises(detect.Silent):
+        detect.classify(np.zeros(synth.RATE * 5), None, synth.RATE, 3000, 3)
+    samples, air = cut(3120, chatter=True)
+    reading = detect.classify(samples, np.zeros_like(air), synth.RATE, 3120, 3)
+    assert np.isfinite(reading.prominence_db) and np.isfinite(reading.excess_db)
+
+
 def round1(setup):
     env = envelope(setup)
     return assemble(setup, env, 1, PlannerKind.GRID, 0.0, 0.0, grid_tests(setup, env))
