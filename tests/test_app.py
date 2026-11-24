@@ -101,7 +101,7 @@ def converge(engine, setup, machine: synth.Machine = MACHINE, **run) -> dict:
         for p in latest["passes"]:
             if p["kind"] != "test":
                 continue
-            truth = machine.chatters(p["rpm"], p["width_mm"], setup.tool.flutes, latest["depth_mm"])
+            truth = machine.chatters(p["rpm"], p["width_mm"], setup.tool.flutes, p["depth_mm"])
             assert p["verdict"] == ("unstable" if truth else "stable")
         if state["next"] in ("converged", "sweep"):
             return state
@@ -180,12 +180,12 @@ def test_a_shallower_depth_is_tried_from_the_stable_widths_and_wins_where_the_ma
 
     state = converge(engine, setup, machine)
 
-    order = [r["depth_mm"] for r in state["rounds"]]
+    order = [r["level_mm"] for r in state["rounds"]]
     assert order == sorted(order, reverse=True) and set(order) == {deep, 4.0}
     tests = lambda depth: [  # noqa: E731
         p
         for r in state["rounds"]
-        if r["depth_mm"] == depth
+        if r["level_mm"] == depth
         for p in r["passes"]
         if p["kind"] == "test"
     ]
@@ -206,30 +206,30 @@ def test_a_deeper_cut_is_refused_on_a_block_whose_face_is_only_flat_higher_up(en
     engine.call("save_setup", NAME, json.dumps(form))
     machine = synth.Machine(reference_depth_mm=5.0)
     state = engine.call("state", NAME)
-    while state["next_depth_mm"] == 5.0:
+    while state["next_level_mm"] == 5.0:
         state = engine.call("plan", NAME, "fresh")
         state = engine.run_round(state["rounds"][-1]["round"], machine=machine)
     state = engine.call("plan", NAME, "fresh")
     state = engine.run_round(state["rounds"][-1]["round"], machine=machine)
-    assert state["rounds"][-1]["depth_mm"] == 4.0
+    assert state["rounds"][-1]["level_mm"] == 4.0
 
     # The operator hears that a 5 mm cut was stable after all: there is more to try at 5 mm,
     # but this block was cut flat only down to 4 mm.
     flips = [
         (r["round"], p["id"])
         for r in state["rounds"]
-        if r["depth_mm"] == 5.0
+        if r["level_mm"] == 5.0
         for p in sorted(r["passes"], key=lambda p: -p["width_mm"])
         if p["verdict"] == "unstable"
     ]
     for number, pass_id in flips:
         state = engine.call("set_verdict", NAME, number, pass_id, "stable")
-        if state["next_depth_mm"] == 5.0:
+        if state["next_level_mm"] == 5.0:
             break
-    assert state["next"] == "plan" and state["next_depth_mm"] == 5.0
+    assert state["next"] == "plan" and state["next_level_mm"] == 5.0
     with pytest.raises(RuntimeError, match="only flat down to 4 mm"):
         engine.call("plan", NAME, "same")
-    assert engine.call("plan", NAME, "fresh")["rounds"][-1]["depth_mm"] == 5.0
+    assert engine.call("plan", NAME, "fresh")["rounds"][-1]["level_mm"] == 5.0
 
 
 def test_planning_waits_until_the_template_setup_is_filled_in(engine):
@@ -355,15 +355,15 @@ def test_the_search_can_be_widened_or_narrowed_after_a_round_was_cut(engine):
     narrowed = json.loads(json.dumps(form))
     narrowed["cut"]["width_max_mm"] = 1.0
     state = engine.call("save_setup", NAME, json.dumps(narrowed))
-    top = state["map"]["widths"][-1]
+    top = state["map"]["engagements"][-1]
     assert top == 1.0
     wide = [p for p in tests if p["width_mm"] > top]
     assert wide and any(p["verdict"] == "stable" for p in wide)
     chatter = sum(p["verdict"] == "unstable" for p in wide)
     assert len(state["observations"]) == cuts - chatter
-    clamped = [o for o in state["observations"] if o["width_mm"] == top]
+    clamped = [o for o in state["observations"] if o["engagement_mm"] == top]
     assert len(clamped) >= sum(p["verdict"] == "stable" for p in wide)
-    assert all(o["verdict"] == "stable" for o in clamped if o["width_mm"] == top)
+    assert all(o["verdict"] == "stable" for o in clamped if o["engagement_mm"] == top)
     assert all(b["width_mm"] <= top for b in state["best"])
     assert len(state["rounds"][0]["passes"]) > cuts
 
@@ -387,7 +387,9 @@ def test_cuts_at_the_grid_edges_count_whatever_the_steps(engine):
     assert max(p["width_mm"] for p in tests) == 4.8
     assert len(state["observations"]) == len(tests)
     edge = {(p["rpm"], p["verdict"]) for p in tests if p["width_mm"] == 4.8}
-    assert edge == {(o["rpm"], o["verdict"]) for o in state["observations"] if o["width_mm"] == 4.8}
+    assert edge == {
+        (o["rpm"], o["verdict"]) for o in state["observations"] if o["engagement_mm"] == 4.8
+    }
     measured = {(p["rpm"], p["width_mm"]) for p in tests}
     state = engine.call("plan", NAME, "same")
     planned = {
@@ -1047,7 +1049,7 @@ def test_a_chip_load_sweep_follows_convergence_and_stays_off_the_map(engine, set
     tests = [p for p in sweep["passes"] if p["kind"] == "test"]
     assert 4 <= len(tests) <= 5
     assert {(p["rpm"], p["width_mm"]) for p in tests} == {(best["rpm"], best["width_mm"])}
-    assert sweep["depth_mm"] == best["depth_mm"]
+    assert sweep["level_mm"] == best["depth_mm"]
     loads = [p["chip_load_mm"] for p in tests]
     session_load = sweep["passes"][0]["chip_load_mm"]  # the truing pass runs at it
     assert loads == sorted(loads) and loads[0] == pytest.approx(0.6 * session_load, abs=1e-4)
@@ -1160,7 +1162,7 @@ def test_the_report_holds_the_results_on_one_offline_page(engine, setup):
     width_in = best["width_mm"] / 25.4
     assert f"{width_in:.4f} in ({best['width_mm']:.2f} mm)" in page
     assert "Set the spindle to (rpm)" in page and f"<td>{best['rpm']}</td>" in page
-    assert page.count("<svg") == len({r["depth_mm"] for r in state["rounds"]})
+    assert page.count("<svg") == len({r["level_mm"] for r in state["rounds"]})
     assert page.count("<td>by hand</td>") == 1
     rounds = len(state["rounds"])
     assert page.count("<h3>Round ") == rounds
@@ -1432,7 +1434,7 @@ def test_a_deeper_depth_faces_the_top_down_instead_of_asking_for_fresh_stock(eng
     engine.call("save_setup", NAME, json.dumps(form))
     machine = synth.Machine(reference_depth_mm=5.0)
     state = engine.call("state", NAME)
-    while state["next_depth_mm"] == 5.0:
+    while state["next_level_mm"] == 5.0:
         state = engine.call("plan", NAME, "fresh")
         state = engine.run_round(state["rounds"][-1]["round"], machine=machine)
     state = engine.call("plan", NAME, "fresh")
@@ -1440,19 +1442,19 @@ def test_a_deeper_depth_faces_the_top_down_instead_of_asking_for_fresh_stock(eng
     flips = [
         (r["round"], p["id"])
         for r in state["rounds"]
-        if r["depth_mm"] == 5.0
+        if r["level_mm"] == 5.0
         for p in sorted(r["passes"], key=lambda p: -p["width_mm"])
         if p["verdict"] == "unstable"
     ]
     for number, pass_id in flips:
         state = engine.call("set_verdict", NAME, number, pass_id, "stable")
-        if state["next_depth_mm"] == 5.0:
+        if state["next_level_mm"] == 5.0:
             break
-    assert state["next_depth_mm"] == 5.0
+    assert state["next_level_mm"] == 5.0
     # The face is flat only down to 4 mm: the top comes down below that first, before the
     # recording starts, and the round starts again at the first lane.
     deeper = engine.call("plan", NAME, "same")["rounds"][-1]
-    assert deeper["depth_mm"] == 5.0
+    assert deeper["level_mm"] == 5.0
     first = deeper["legs"][0]
     assert first["reface_mm"] == pytest.approx(4.0 + plan.REFACE_EXTRA_MM)
     assert (first["lane"], first["face_y_start_mm"], first["top_mm"]) == (

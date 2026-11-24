@@ -9,6 +9,10 @@ G4 for its seconds), so the sound follows the simulated machine's motion to with
 second: the simulator's 10 ms ticks add up over a round. Facing the top down is heard as it
 runs, right after the pass before it: the widget records on through it and sends no M0.
 
+A session that steps the width hears synth.DEFAULT_MACHINE, whose chatter limit is a width at
+each speed. One that steps the depth (full-width slots, or side milling at a set width) hears
+synth.DEPTH_MACHINE, whose limit also falls with depth.
+
 Assumes every earlier round's program ran to completion on the same simulator, since that is
 where this round starts from. Manual-spindle programs are refused: their M0 stops last as
 long as the operator takes.
@@ -30,6 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tests"))
 import synth  # noqa: E402
 
 from dechatter import audio  # noqa: E402
+from dechatter.config import Vary  # noqa: E402
 from dechatter.plan import Plan  # noqa: E402
 
 RAPID_MM_MIN = 3000.0
@@ -88,7 +93,11 @@ def main(export: Path, out: Path) -> None:
     for p, (start, _) in zip(plan.passes, cuts, strict=True):
         air.append(start + p.lead_in_s - heard_until - faced.get(p.id, 0.0))
         heard_until = start + p.lead_in_s + p.expected_cut_s
-    heard = synth.record(plan, seed=plan.round, air_s=air, facing=synth.Facing.HEARD)
+    machine = synth.DEPTH_MACHINE if plan.vary is Vary.DEPTH else synth.DEFAULT_MACHINE
+    # `air` is the whole gap before each cut: no rapid of the recording's own before a facing.
+    heard = synth.record(
+        plan, machine, seed=plan.round, air_s=air, facing=synth.Facing.HEARD, rapid_s=0.0
+    )
     out.parent.mkdir(parents=True, exist_ok=True)
     audio.save_wav(out, heard, synth.RATE)
     print(json.dumps({"round": plan.round, "seconds": round(len(heard) / synth.RATE, 1)}))

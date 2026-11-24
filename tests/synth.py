@@ -23,7 +23,9 @@ class Machine:
     pocket_width: float = 0.12  # as a fraction of lobe spacing
     rpm_error: float = -0.02  # actual speed vs commanded
     whine_hz: float = 4127.0  # drive whine: a loud tone that is not chatter
-    # With a reference depth, cutting shallower widens the limit: (reference / depth) ** power.
+    # With a reference depth, cutting shallower widens the limit: (reference / depth) ** power,
+    # which makes a depth limit of it at any one width; and a cut sounds louder the deeper it
+    # is, as loud as without one at the reference depth.
     reference_depth_mm: float | None = None
     depth_power: float = 1.5
 
@@ -42,8 +44,31 @@ class Machine:
     ) -> bool:
         return width_mm > self.limit_mm(rpm, flutes, depth_mm)
 
+    def depth_limit_mm(self, rpm: float, flutes: int, width_mm: float) -> float:
+        """The deepest stable cut `width_mm` wide; needs a reference depth."""
+        widest = self.limit_mm(rpm, flutes)
+        return self.reference_depth_mm * (widest / width_mm) ** (1 / self.depth_power)
+
+    def load(self, width_mm: float, depth_mm: float) -> float:
+        """How loud the teeth are in a cut, over the spindle in the air."""
+        if self.reference_depth_mm is None:
+            return 0.03 + 0.03 * width_mm
+        return 0.03 + 0.03 * width_mm * depth_mm / self.reference_depth_mm
+
+    def masked(self, rpm: float) -> bool:
+        """Whether the chatter tone lands on a spindle harmonic at `rpm`.
+
+        There it is told from forced vibration by nothing in the sound, here or on a machine.
+        """
+        spindle_hz = rpm * (1 + self.rpm_error) / 60
+        orders = self.natural_hz * 1.03 / spindle_hz
+        return abs(orders - round(orders)) * spindle_hz < 2.0
+
 
 DEFAULT_MACHINE = Machine()
+# A machine whose limit also falls with depth: on it a cut of any one width has a depth limit,
+# 0.25 to 0.5 mm for a 12.7 mm slot and deeper the narrower the cut.
+DEPTH_MACHINE = Machine(reference_depth_mm=1.2)
 
 
 def _tone(t: np.ndarray, hz: float, amplitude: float, rng: np.random.Generator) -> np.ndarray:
@@ -64,14 +89,13 @@ def _cut(
     seconds: float,
     spindle_hz: float,
     flutes: int,
-    width_mm: float,
+    load: float,
     chatter: bool,
     machine: Machine,
     rng: np.random.Generator,
 ) -> np.ndarray:
     t = np.arange(int(seconds * RATE)) / RATE
     out = _air(seconds, spindle_hz, machine, rng) + 0.02 * rng.standard_normal(len(t))
-    load = 0.03 + 0.03 * width_mm
     tooth_hz = spindle_hz * flutes
     for order in range(1, min(int(8000 / tooth_hz), 24) + 1):
         out += _tone(t, order * tooth_hz, load / order, rng)
@@ -121,7 +145,8 @@ def record(
     rng = np.random.default_rng(seed)
     parts = [0.0005 * rng.standard_normal(0 if air_s is not None else 3 * RATE)]
     faced = {leg.passes[0].id: leg.face_s for leg in plan.legs if leg.reface_mm > 0}
-    quarter = plan.diameter_mm / 4  # the facing's width of cut
+    # Facing takes a quarter of the cutter: how loud that is.
+    heavy = machine.load(plan.diameter_mm / 4, machine.reference_depth_mm or 0.0)
     previous_rpm = None
     for index, p in enumerate(plan.passes):
         spindle_hz = p.rpm * (1 + machine.rpm_error) / 60
@@ -131,11 +156,11 @@ def record(
                     parts.append(0.0005 * rng.standard_normal(2 * RATE))
                     return np.concatenate(parts).astype(np.float32)
                 parts.append(_air(2 * rapid_s, spindle_hz, machine, rng))
-                parts.append(_cut(seconds, spindle_hz, plan.flutes, quarter, False, machine, rng))
+                parts.append(_cut(seconds, spindle_hz, plan.flutes, heavy, False, machine, rng))
         if facing is Facing.HEARD and p.id in faced:
             parts.append(_air(rapid_s, spindle_hz, machine, rng))
             # The whole top at a quarter of the cutter: louder than any test cut, and chatter.
-            parts.append(_cut(faced[p.id], spindle_hz, plan.flutes, quarter, True, machine, rng))
+            parts.append(_cut(faced[p.id], spindle_hz, plan.flutes, heavy, True, machine, rng))
         if speed_change_s and p.rpm != previous_rpm:
             parts.append(0.3 * rng.standard_normal(int(0.3 * RATE)))
             parts.append(_air(speed_change_s, spindle_hz, machine, rng))
@@ -143,11 +168,12 @@ def record(
         air = rapid_s + plan.dwell_s + p.lead_in_s if air_s is None else air_s[index]
         parts.append(_air(air, spindle_hz, machine, rng))
         seconds = p.expected_cut_s * (0.4 if index == abort_in_pass else 1.0)
-        chatter = machine.chatters(p.rpm, p.width_mm, plan.flutes, plan.axial_depth_mm)
+        chatter = machine.chatters(p.rpm, p.width_mm, plan.flutes, p.depth_mm)
+        load = machine.load(p.width_mm, p.depth_mm)
         if index in in_air:
             parts.append(_air(seconds, spindle_hz, machine, rng))
         else:
-            parts.append(_cut(seconds, spindle_hz, plan.flutes, p.width_mm, chatter, machine, rng))
+            parts.append(_cut(seconds, spindle_hz, plan.flutes, load, chatter, machine, rng))
         if index == abort_in_pass:
             break
     parts.append(0.0005 * rng.standard_normal(2 * RATE))

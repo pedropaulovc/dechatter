@@ -31,6 +31,13 @@ class ToolMaterial(StrEnum):
     HSS = "hss"
 
 
+class Vary(StrEnum):
+    """What a session steps besides the spindle speed; the other dimension it holds."""
+
+    WIDTH = "width"  # the radial width, at a fixed axial depth
+    DEPTH = "depth"  # the axial depth, at a fixed radial width
+
+
 class SetupSource(StrEnum):
     TEMPLATE = "template"  # the example `init` and the widget write, as written: not this machine
     FILLED_IN = "filled-in"
@@ -70,9 +77,16 @@ class Tool:
 @dataclass(frozen=True)
 class Cut:
     material: str
-    axial_depth_mm: float  # the deepest cut; the session settles speed and width here first
+    # vary = "width": the deepest cut; the session settles speed and width here first
+    axial_depth_mm: float | None = None
     other_depths_mm: tuple[float, ...] = ()  # shallower depths to compare afterwards
     width_max_mm: float | None = None
+    vary: Vary = Vary.WIDTH
+    # vary = "depth": the widest cut, where the session settles speed and depth first. The
+    # cutter diameter cuts full-width slots into the top; a narrower width mills the front face.
+    radial_width_mm: float | None = None
+    other_widths_mm: tuple[float, ...] = ()  # narrower widths to compare afterwards
+    depth_max_mm: float | None = None  # the deepest cut tried
     chip_load_mm: float | None = None
     speed_min_rpm: int | None = None
     speed_max_rpm: int | None = None
@@ -108,18 +122,24 @@ class Program:
     # far each pass steps along Y (None: a quarter of the cutter diameter).
     face_depth_mm: float = 1.0
     face_width_mm: float | None = None
+    # Full-width slots (vary = "depth" at the cutter diameter): the stock left standing on
+    # both sides of every slot (None: a quarter of the cutter diameter).
+    slot_wall_mm: float | None = None
 
 
 @dataclass(frozen=True)
 class Planner:
     round1_speeds: int = 5
     round1_width_fractions: tuple[float, ...] = (0.1, 0.2, 0.35)
+    round1_depth_fractions: tuple[float, ...] = (0.2, 0.4, 0.6)  # vary = "depth": of depth_max
     batch_size: int = 8
     min_probability: float = 0.8
     probability_floor: float = 0.5
     stop_improvement: float = 0.05
     speed_step_rpm: int = 10
     width_step_mm: float = 0.1
+    # None: about a fiftieth of depth_max_mm, see plan.engagement_step_mm.
+    depth_step_mm: float | None = None
     speed_sigma_fraction: float = 0.015
     misclassification: float = 0.05
     sweet_spot_trust: float = 0.5
@@ -236,6 +256,7 @@ def _toml_value(value: object) -> str:
 UNLISTED_PLANNER = (
     "speed_step_rpm",
     "width_step_mm",
+    "depth_step_mm",
     "speed_sigma_fraction",
     "misclassification",
     "sweet_spot_trust",
@@ -283,17 +304,102 @@ def dump_setup(values: dict) -> str:
     return "\n\n".join(blocks) + "\n"
 
 
+FULL_WIDTH_TOLERANCE_MM = 1e-6
+
+
+def full_width(setup: Setup) -> bool:
+    """Whether every test cut takes the whole cutter diameter: a slot in the top."""
+    cut = setup.cut
+    if cut.vary is not Vary.DEPTH:
+        return False
+    return cut.radial_width_mm >= setup.tool.diameter_mm - FULL_WIDTH_TOLERANCE_MM
+
+
+def slot_wall_mm(setup: Setup) -> float:
+    """The stock left standing on both sides of a full-width slot."""
+    if setup.program.slot_wall_mm is None:
+        return setup.tool.diameter_mm / 4
+    return setup.program.slot_wall_mm
+
+
+def _number(value: object) -> bool:
+    return type(value) in (int, float)
+
+
+def _lower(values: object, top: float) -> bool:
+    return isinstance(values, tuple) and all(_number(v) and 0 < v < top for v in values)
+
+
+def _validate_cut(setup: Setup) -> str:
+    """Check the dimension the session holds and the one it steps; answer the name of the
+    [cut] entry that gives the deepest cut."""
+    cut, diameter = setup.cut, setup.tool.diameter_mm
+    if cut.vary is Vary.DEPTH:
+        unused = [
+            name
+            for name in ("axial_depth_mm", "other_depths_mm", "width_max_mm")
+            if getattr(cut, name) not in (None, ())
+        ]
+        if unused:
+            raise ConfigError(
+                f'[cut] {", ".join(unused)} do not apply with vary = "depth": the width is '
+                "radial_width_mm, and depth_max_mm bounds the depth"
+            )
+        if not _number(cut.radial_width_mm) or not 0 < cut.radial_width_mm <= diameter:
+            raise ConfigError(
+                '[cut] vary = "depth" needs radial_width_mm within (0, tool diameter]: the '
+                "width every cut takes (the tool diameter cuts full-width slots)"
+            )
+        if not _number(cut.depth_max_mm) or cut.depth_max_mm <= 0:
+            raise ConfigError(
+                '[cut] vary = "depth" needs depth_max_mm above 0: the deepest cut to try'
+            )
+        if not _lower(cut.other_widths_mm, cut.radial_width_mm):
+            raise ConfigError(
+                "[cut] other_widths_mm must list widths above 0 and narrower than radial_width_mm"
+            )
+        return "depth_max_mm"
+    unused = [
+        name
+        for name in ("radial_width_mm", "other_widths_mm", "depth_max_mm")
+        if getattr(cut, name) not in (None, ())
+    ]
+    if unused:
+        raise ConfigError(
+            f'[cut] {", ".join(unused)} apply only with vary = "depth"; with vary = "width" '
+            "the depth is axial_depth_mm, and width_max_mm bounds the width"
+        )
+    if not _number(cut.axial_depth_mm) or cut.axial_depth_mm <= 0:
+        raise ConfigError("[cut] axial_depth_mm must be given, above 0: the depth of every cut")
+    if cut.width_max_mm is not None and not 0 < cut.width_max_mm <= diameter:
+        raise ConfigError("[cut] width_max_mm must be within (0, tool diameter]")
+    if not _lower(cut.other_depths_mm, cut.axial_depth_mm):
+        raise ConfigError(
+            "[cut] other_depths_mm must list depths above 0 and shallower than axial_depth_mm"
+        )
+    return "axial_depth_mm"
+
+
 def _validate(setup: Setup) -> None:
     tool, cut, machine = setup.tool, setup.cut, setup.machine
     if tool.diameter_mm <= 0 or tool.flutes < 1:
         raise ConfigError("[tool] diameter_mm and flutes must be positive")
-    if cut.width_max_mm is not None and not 0 < cut.width_max_mm <= tool.diameter_mm:
-        raise ConfigError("[cut] width_max_mm must be within (0, tool diameter]")
+    deepest = _validate_cut(setup)
     stock = setup.stock
-    if stock.height_mm is not None and stock.height_mm <= cut.axial_depth_mm:
-        raise ConfigError("[stock] height_mm must stand above the deepest cut, axial_depth_mm")
+    if stock.height_mm is not None and stock.height_mm <= getattr(cut, deepest):
+        raise ConfigError(f"[stock] height_mm must stand above the deepest cut, {deepest}")
     if stock.thickness_mm is not None and stock.thickness_mm < stock.width_mm:
         raise ConfigError("[stock] thickness_mm cannot be less than width_mm, the width used")
+    wall = slot_wall_mm(setup)
+    if wall <= 0:
+        raise ConfigError("[program] slot_wall_mm must be positive")
+    across = stock.thickness_mm or stock.width_mm
+    if full_width(setup) and across + 1e-9 < tool.diameter_mm + 2 * wall:
+        raise ConfigError(
+            f"[stock] {across:g} mm along Y (thickness_mm, or width_mm) holds no "
+            f"{tool.diameter_mm:g} mm slot with {wall:g} mm of stock on both sides "
+            "([program] slot_wall_mm)"
+        )
     face_width = setup.program.face_width_mm
     if setup.program.face_depth_mm <= 0 or (
         face_width is not None and not 0 < face_width <= tool.diameter_mm / 2
@@ -316,20 +422,17 @@ def _validate(setup: Setup) -> None:
         )
     if machine.min_rpm >= machine.max_rpm:
         raise ConfigError("[machine] min_rpm must be below max_rpm")
-    depths = cut.other_depths_mm
-    if not isinstance(depths, tuple) or not all(
-        type(d) in (int, float) and 0 < d < cut.axial_depth_mm for d in depths
-    ):
-        raise ConfigError(
-            "[cut] other_depths_mm must list depths above 0 and shallower than axial_depth_mm"
-        )
-    fractions = setup.planner.round1_width_fractions
-    if (
-        not isinstance(fractions, tuple)
-        or not fractions
-        or not all(type(f) in (int, float) and 0 < f <= 1 for f in fractions)
-    ):
-        raise ConfigError("[planner] round1_width_fractions must list numbers in (0, 1]")
+    for name in ("round1_width_fractions", "round1_depth_fractions"):
+        fractions = getattr(setup.planner, name)
+        if (
+            not isinstance(fractions, tuple)
+            or not fractions
+            or not all(type(f) in (int, float) and 0 < f <= 1 for f in fractions)
+        ):
+            raise ConfigError(f"[planner] {name} must list numbers in (0, 1]")
+    depth_step = setup.planner.depth_step_mm
+    if setup.planner.width_step_mm <= 0 or (depth_step is not None and depth_step <= 0):
+        raise ConfigError("[planner] width_step_mm and depth_step_mm must be positive")
     if not 0 < setup.planner.probability_floor <= setup.planner.min_probability < 1:
         raise ConfigError("[planner] need 0 < probability_floor <= min_probability < 1")
     if not 0 < setup.planner.min_cut_s:
@@ -360,10 +463,17 @@ material = "carbide"     # carbide | hss
 
 [cut]
 material = "aluminum-6061"   # see `dechatter materials`
+# vary = "width"             # width: hold the depth, step the radial width | depth: see below
 axial_depth_mm = 5.0         # the deepest cut; the test steps speed and radial width at it
 # other_depths_mm = [2.5]    # shallower depths to compare once that one is settled
 direction = "conventional"   # conventional | climb
 # width_max_mm = 4.7         # default: half the tool diameter
+# With vary = "depth" the test holds a radial width and steps speed and axial depth. In
+# place of axial_depth_mm, other_depths_mm and width_max_mm it takes:
+# radial_width_mm = 9.525    # the cutter diameter: full-width slots in the top; narrower:
+#                            # side milling on the front face, deepest cut first
+# other_widths_mm = [4.0]    # narrower widths to compare once that one is settled
+# depth_max_mm = 3.0         # the deepest cut to try
 # chip_load_mm = 0.05        # default: from the material table, derated by machine weight
 # speed_min_rpm = 1250       # default: a quarter of the top test speed
 # speed_max_rpm = 5000       # default: min(machine max, material surface-speed limit)
@@ -378,11 +488,14 @@ clearance_mm = 3.0
 safe_z_mm = 10.0
 plunge_feed_mm_min = 150.0
 truing_width_mm = 0.2
+# slot_wall_mm = 2.4       # full-width slots: stock left on both sides of each slot; default:
+                         # a quarter of the tool diameter
 coolant = "none"         # none | flood | mist (coolant noise hurts detection)
 
 [planner]
 round1_speeds = 5
 round1_width_fractions = [0.1, 0.2, 0.35]   # of width_max
+# round1_depth_fractions = [0.2, 0.4, 0.6]  # vary = "depth": of depth_max
 batch_size = 8
 min_probability = 0.8      # each cut is this likely stable, if the cut before it passes
 probability_floor = 0.5    # ... and this likely stable on measured data alone

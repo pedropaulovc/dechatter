@@ -6,8 +6,30 @@ What changed for people who use the dechatter widget and command line. The forma
 
 ## [Unreleased]
 
+### Added
+
+- **Stepping the depth**: a session can hold the radial width and step the axial depth
+  instead of the reverse. Choose "the axial depth, at a set width" in the wizard's Cut step
+  (`vary = "depth"`, `radial_width_mm` and `depth_max_mm` in `[cut]`). A width equal to the
+  cutter diameter cuts full-width slots into the top, each in a row of its own with
+  `slot_wall_mm` of stock (`[program]`, a quarter of the cutter by default) on both sides,
+  across `thickness_mm`; a narrower width mills the front face at that width. The map, the
+  results, the report and the G-code comments show depth against speed. `other_widths_mm`
+  compares narrower widths the way `other_depths_mm` compares shallower depths.
+- A round that steps the depth runs **deepest first**, on each face and from lane to lane,
+  because stock is clear only as deep as the shallowest cut made before it. Its first pass
+  is its heaviest: there is no ramp up to it, so be ready to feed-hold from the start. Slots
+  in a single lane keep the ramp, shallowest first. The program, `dechatter plan` and the
+  widget say which order a round runs in. A round with more cuts than its stock holds
+  leaves out the heaviest, as a ramp does.
+
 ### Changed
 
+- A deeper cut may go to a fresh lane wherever the lane before it was cut at least as deep
+  that far back from Y0. Before, any cut deeper than a block's shallowest needed fresh stock
+  or the top faced down.
+- The widget's session state names the stepped dimension rather than the width
+  (`engagement_mm`, `level_mm`), for anything that reads it.
 - A round uses the stock left in every lane before the top is faced down. It fills what
   is left of the lane it starts on, then goes on into the next lane and the ones after it,
   each a fresh face at Y0 with its own truing pass, within the same program; only once
@@ -51,6 +73,9 @@ What changed for people who use the dechatter widget and command line. The forma
   infinity outright. A session 0.5.0 saved NaN into opens again: those numbers are dropped,
   and with a NaN prominence the detector's verdict too. `dechatter analyze` can analyse the
   round again.
+- Lead-in and cut times of a cut wider than half the cutter were computed as if it met the
+  stock at the cutter's centre line. Only run-time estimates and where a cut is looked for
+  in a recording were affected.
 
 ## [0.5.0] - 2026-11-23
 

@@ -14,7 +14,9 @@ MACHINE = synth.Machine()
 
 
 def p_at(stability: bayes.StabilityMap, rpm: float, width: float) -> float:
-    return float(stability.p_stable()[stability.speed_index(rpm), stability.width_index(width)])
+    return float(
+        stability.p_stable()[stability.speed_index(rpm), stability.engagement_index(width)]
+    )
 
 
 def test_prior_falls_with_width(setup):
@@ -80,7 +82,7 @@ def test_proposals_respect_probability_floors_and_power_cap(setup):
     proposal = bayes.propose(setup, env, seen)
     measured = bayes.build_map(setup, env, seen)
     assert 0 < len(proposal.tests) <= setup.planner.batch_size
-    best = max(mrr_mm3_min(setup, env, o.rpm, o.width_mm) for o in seen)
+    best = max(mrr_mm3_min(setup, env, o.rpm, o.engagement_mm) for o in seen)
     for rpm, width, p in proposal.tests:
         assert p == pytest.approx(p_at(measured, rpm, width))
         assert p >= setup.planner.probability_floor
@@ -91,14 +93,14 @@ def test_proposals_respect_probability_floors_and_power_cap(setup):
 
 def test_nothing_proposed_once_the_width_limit_is_reached_at_top_speed(setup):
     env = envelope(setup)
-    top = Observation(env.speed_max_rpm, env.widths(0.1)[-1], Verdict.STABLE)
+    top = Observation(env.speed_max_rpm, env.engagements(0.1)[-1], Verdict.STABLE)
     assert bayes.propose(setup, env, [top]).tests == []
 
 
 def test_a_depth_is_left_once_no_likely_cut_would_beat_what_another_depth_reached(setup):
     env = envelope(setup)
     here = [Observation(4600, 3.0, Verdict.STABLE)]
-    widest = env.widths(setup.planner.width_step_mm)[-1]
+    widest = env.engagements(setup.planner.width_step_mm)[-1]
     within_reach = mrr_mm3_min(setup, env, 4600, 3.4)
     out_of_reach = 0.95 * mrr_mm3_min(setup, env, 4600, widest)
     assert bayes.propose(setup, env, here, within_reach).tests
@@ -108,7 +110,7 @@ def test_a_depth_is_left_once_no_likely_cut_would_beat_what_another_depth_reache
 def true_optimum(setup, env) -> float:
     flutes = setup.tool.flutes
     return max(
-        mrr_mm3_min(setup, env, rpm, min(MACHINE.limit_mm(rpm, flutes), env.width_max_mm))
+        mrr_mm3_min(setup, env, rpm, min(MACHINE.limit_mm(rpm, flutes), env.engagement_max_mm))
         for rpm in env.speeds(10)
     )
 
@@ -138,7 +140,7 @@ def test_session_converges_near_the_true_optimum_from_recordings_alone(tmp_path,
     env = envelope(setup)
     cuts = session.observations(session.load_rounds(work), setup.cut.axial_depth_mm, env)
     for obs in cuts:
-        truth = MACHINE.chatters(obs.rpm, obs.width_mm, setup.tool.flutes)
+        truth = MACHINE.chatters(obs.rpm, obs.engagement_mm, setup.tool.flutes)
         assert (obs.verdict is Verdict.UNSTABLE) == truth
     best_mrr, _ = bayes.best_stable(setup, env, cuts)[0]
     assert best_mrr >= 0.85 * true_optimum(setup, env)

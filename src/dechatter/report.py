@@ -13,10 +13,19 @@ from pathlib import Path
 import numpy as np
 
 from . import __version__, bayes, materials, session
-from .config import WATTS_PER_HP, SpindleControl, load_setup
+from .config import WATTS_PER_HP, SpindleControl, Vary, load_setup
 from .detect import Verdict
 from .gcode import MM_PER_INCH, Units
-from .plan import SPINDLE_EFFICIENCY, PassKind, Plan, PlannerKind, envelope, feed_mm_min
+from .plan import (
+    SPINDLE_EFFICIENCY,
+    Milling,
+    Order,
+    PassKind,
+    Plan,
+    PlannerKind,
+    envelope,
+    feed_mm_min,
+)
 from .session import PassStatus, Round, SpindleFit, VerdictSource
 
 REPORT_FILE = session.REPORT_FILE
@@ -74,6 +83,11 @@ def _table(head: Iterable[str], rows: Iterable[Iterable[str]], cls: str = "") ->
     return f'<table class="{cls}"><thead><tr>{header}</tr></thead><tbody>{body}</tbody></table>'
 
 
+# The dimension a session steps, as a column heads it, and how a level of the other reads.
+STEPPED = {Vary.WIDTH: "Width", Vary.DEPTH: "Depth"}
+HELD = {Vary.WIDTH: "deep", Vary.DEPTH: "wide"}
+
+
 def _where(plan: Plan, units: Units) -> str:
     """Where a round cuts, as it goes: its lanes, and where it faces the top down."""
     parts = []
@@ -85,7 +99,8 @@ def _where(plan: Plan, units: Units) -> str:
             parts += [p for p in (lane, faced and f"{faced} first") if p]
             continue
         if faced:
-            parts.append(f"{faced} before pass {start}, then {lane or 'the front face'} again")
+            again = "the top" if plan.milling is Milling.SLOT else "the front face"
+            parts.append(f"{faced} before pass {start}, then {lane or again} again")
             continue
         parts.append(f"{lane} from pass {start}")
     return "".join(f", {p}" for p in parts)
@@ -98,9 +113,11 @@ def _dates(rounds: list[Round]) -> str:
     return days[0] if days[0] == days[-1] else f"{days[0]} to {days[-1]}"
 
 
-def _map_svg(stability: bayes.StabilityMap, cuts: list[bayes.Observation], units, cfg) -> str:
+def _map_svg(
+    stability: bayes.StabilityMap, cuts: list[bayes.Observation], units, cfg, vary: Vary
+) -> str:
     shown = bayes.coarse(stability)
-    p, rpm, mm = shown.p, shown.speeds, shown.widths
+    p, rpm, mm = shown.p, shown.speeds, shown.engagements
     width_px, height_px = PLOT_W - LEFT - RIGHT, PLOT_H - TOP - BOTTOM
     cell_w, cell_h = width_px / len(rpm), height_px / len(mm)
 
@@ -129,7 +146,7 @@ def _map_svg(stability: bayes.StabilityMap, cuts: list[bayes.Observation], units
         'fill="none" stroke="#000" stroke-width="0.8"/>'
     )
     for cut in cuts:
-        cx, cy = x(cut.rpm), y(cut.width_mm)
+        cx, cy = x(cut.rpm), y(cut.engagement_mm)
         if cut.verdict is Verdict.STABLE:
             parts.append(
                 f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="3.2" fill="#fff" stroke="#000" '
@@ -158,7 +175,7 @@ def _map_svg(stability: bayes.StabilityMap, cuts: list[bayes.Observation], units
         f'<text x="{LEFT + width_px / 2}" y="{PLOT_H - 4}" text-anchor="middle">'
         "spindle speed (rpm)</text>"
         f'<text x="12" y="{TOP + height_px / 2}" text-anchor="middle" '
-        f'transform="rotate(-90 12 {TOP + height_px / 2})">width ({unit})</text>'
+        f'transform="rotate(-90 12 {TOP + height_px / 2})">{STEPPED[vary].lower()} ({unit})</text>'
     )
     return (
         f'<svg viewBox="0 0 {PLOT_W} {PLOT_H}" role="img" '
@@ -175,6 +192,7 @@ def render(session_dir: Path, units: Units) -> str:
     manual = machine.spindle is SpindleControl.MANUAL
     material = materials.lookup(cut.material)
     name = session_dir.resolve().name
+    deep = cut.vary
 
     header = _table(
         ["", ""],
@@ -193,7 +211,17 @@ def render(session_dir: Path, units: Units) -> str:
                 f"holder {tool.holder or 'not given'}",
             ],
             ["Work material", cut.material],
-            ["Depths", ", ".join(_length(d, units) for d in session.depths(setup))],
+            [
+                "Varied",
+                "radial width, at each depth below"
+                if deep is Vary.WIDTH
+                else "axial depth, at each width below (the cutter diameter: full-width slots "
+                "in the top; narrower: side milling, deepest cut first)",
+            ],
+            [
+                "Depths" if deep is Vary.WIDTH else "Widths",
+                ", ".join(_length(level, units) for level in session.levels(setup)),
+            ],
             ["Chip load", f"{_length(env.chip_load_mm, units, 3)} per tooth"],
         ],
         "facts",
@@ -205,13 +233,13 @@ def render(session_dir: Path, units: Units) -> str:
 
     found = session.best_cuts(setup, env, rounds)
     recommended = []
-    for depth in sorted({c.depth_mm for c in found}, reverse=True):
+    for level in sorted({session.level_of(setup, c) for c in found}, reverse=True):
         rows = []
-        for best in [c for c in found if c.depth_mm == depth][:CUTS_PER_DEPTH]:
+        for best in [c for c in found if session.level_of(setup, c) == level][:CUTS_PER_DEPTH]:
             rows.append(
                 [
                     f"{best.rpm:.0f}",
-                    _length(best.width_mm, units),
+                    _length(session.engagement_of(setup, best), units),
                     _feed(feed_mm_min(setup, env, best.rpm), units),
                     _rate(best.mrr_mm3_min, units),
                     power(best.mrr_mm3_min),
@@ -219,8 +247,8 @@ def render(session_dir: Path, units: Units) -> str:
             )
         speed = "Set the spindle to (rpm)" if manual else "Speed (rpm)"
         recommended.append(
-            f"<h3>{_e(_length(depth, units))} deep</h3>"
-            + _table([speed, "Width", "Feed", "Removal rate", "Spindle power"], rows)
+            f"<h3>{_e(_length(level, units))} {HELD[deep]}</h3>"
+            + _table([speed, STEPPED[deep], "Feed", "Removal rate", "Spindle power"], rows)
         )
     if not recommended:
         recommended.append("<p>No stable cut has been measured yet.</p>")
@@ -268,14 +296,14 @@ def render(session_dir: Path, units: Units) -> str:
         )
 
     maps = []
-    for depth in sorted({r.plan.axial_depth_mm for r in rounds}, reverse=True):
+    for level in sorted({r.plan.fixed_mm for r in rounds}, reverse=True):
         stability = bayes.build_map(
-            session.at_depth(setup, depth), env, session.evidence(rounds, depth, env)
+            session.at_level(setup, level), env, session.evidence(rounds, level, env)
         )
-        cuts = session.observations(rounds, depth, env)
+        cuts = session.observations(rounds, level, env)
         maps.append(
-            f"<figure><figcaption>{_e(_length(depth, units))} deep</figcaption>"
-            f"{_map_svg(stability, cuts, units, cfg)}</figure>"
+            f"<figure><figcaption>{_e(_length(level, units))} {HELD[deep]}</figcaption>"
+            f"{_map_svg(stability, cuts, units, cfg, deep)}</figure>"
         )
     if not maps:
         maps.append("<p>No round has been cut yet.</p>")
@@ -303,7 +331,7 @@ def render(session_dir: Path, units: Units) -> str:
                     str(p.id),
                     p.kind.value,
                     str(p.rpm),
-                    _length(p.width_mm, units),
+                    _length(r.plan.engagement_mm(p), units),
                     _length(p.chip_load_mm or r.plan.chip_load_mm, units, 3),
                     _feed(p.feed_mm_min, units),
                     "" if result is None else result.status.value,
@@ -312,8 +340,11 @@ def render(session_dir: Path, units: Units) -> str:
                 ]
             )
         state = "analysed" if r.results else "not analysed"
+        slots = ", full-width slots" if r.plan.milling is Milling.SLOT else ""
+        first = ", deepest cut first" if r.plan.order is Order.DEEPEST_FIRST else ""
         log.append(
-            f"<h3>Round {r.plan.round}: {_e(_length(r.plan.axial_depth_mm, units))} deep, "
+            f"<h3>Round {r.plan.round}: {_e(_length(r.plan.fixed_mm, units))} {HELD[deep]}"
+            f"{slots}{first}, "
             f"{_e(PLANNER_NAMES[r.plan.planner])}, planned {_e(r.plan.planned_on)}"
             + _e(_where(r.plan, units))
             + f", {state}</h3>"
@@ -322,7 +353,7 @@ def render(session_dir: Path, units: Units) -> str:
                     "Pass",
                     "Kind",
                     "rpm",
-                    "Width",
+                    STEPPED[deep],
                     "Chip load",
                     "Feed",
                     "Status",
@@ -352,7 +383,8 @@ def render(session_dir: Path, units: Units) -> str:
 </header>
 <section>
 <h2>Recommended cuts</h2>
-<p class="note">The best stable cuts measured at each depth, most material removed first.
+<p class="note">The session stepped the {STEPPED[deep].lower()} of cut. The best stable cuts
+measured at each {"width" if deep is Vary.DEPTH else "depth"}, most material removed first.
 {"The spindle is set by hand: set the speed shown. " if manual else ""}Power is
 the spindle's estimated draw, and its share of the rated {machine.spindle_power_hp:g} hp.</p>
 {"".join(recommended)}
