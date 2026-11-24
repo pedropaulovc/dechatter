@@ -124,7 +124,9 @@ class Results:
     schema: int = SCHEMA
 
     def save(self, path: Path) -> None:
-        path.write_text(json.dumps(asdict(self), indent=2) + "\n", encoding="utf-8")
+        # NaN and infinity are not JSON (the widget cannot read them back): refuse them here.
+        text = json.dumps(asdict(self), indent=2, allow_nan=False)
+        path.write_text(text + "\n", encoding="utf-8")
 
     @staticmethod
     def load(path: Path) -> Results:
@@ -481,9 +483,10 @@ def analyze(
                 plan.flutes,
                 thresholds,
             )
-        except detect.TooShort as exc:
+        except (detect.TooShort, detect.Silent) as exc:
             log.warning("pass %d: %s", p.id, exc)
-            # A cut stopped part-way still left its step on the face, heard or not.
+            # Too short to hear, or silent (the recording stopped before it): not found in the
+            # recording. A cut stopped part-way still left its step on the face, heard or not.
             short = PassStatus.ABORTED if place.status is PassStatus.ABORTED else PassStatus.MISSING
             results.append(dataclasses.replace(base, status=short))
             continue

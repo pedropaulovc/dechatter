@@ -6,6 +6,13 @@ What changed for people who use the dechatter widget and command line. The forma
 
 ## [Unreleased]
 
+### Fixed
+
+- A pass whose stretch of the recording is silent (the recording stopped before the last
+  passes) is now "missing", with no verdict. Before, it was analysed to a prominence of
+  NaN, which made the round's results unreadable: the widget said "Unexpected token 'N'
+  … is not valid JSON". Results and widget replies now refuse NaN and infinity outright.
+
 ## [0.5.0] - 2026-11-23
 
 ### Added

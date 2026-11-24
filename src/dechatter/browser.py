@@ -281,11 +281,12 @@ def call(sessions: Sessions, method: str, *args) -> str | bytes:
     """Run one widget request. Bytes results pass through; everything else is JSON."""
     try:
         result = getattr(sessions, method)(*args)
+        if isinstance(result, bytes):
+            return result
+        # NaN and infinity are not JSON: the widget's JSON.parse would fail on them.
+        return json.dumps({"ok": result}, allow_nan=False)
     except EXPECTED as exc:
         return json.dumps({"error": str(exc)})
     except Exception as exc:
         log.exception("%s failed", method)
         return json.dumps({"error": f"internal error in {method}: {exc!r}"})
-    if isinstance(result, bytes):
-        return result
-    return json.dumps({"ok": result})

@@ -26,6 +26,10 @@ NAME = "al-10mm"
 BROWSER_RATE = 48000
 
 
+def not_json(constant: str):
+    raise ValueError(f"{constant} is not valid JSON")
+
+
 class Engine:
     """Calls go through `browser.call`, so replies are decoded exactly as the widget does."""
 
@@ -37,7 +41,8 @@ class Engine:
         reply = browser.call(self.sessions, method, *args)
         if isinstance(reply, bytes):
             return reply
-        decoded = json.loads(reply)
+        # As strict as the widget's JSON.parse: no NaN or Infinity.
+        decoded = json.loads(reply, parse_constant=not_json)
         if "error" in decoded:
             raise RuntimeError(decoded["error"])
         return decoded["ok"]
@@ -99,6 +104,15 @@ def converge(engine, setup, machine: synth.Machine = MACHINE, **run) -> dict:
         if state["next"] in ("converged", "sweep"):
             return state
     pytest.fail("did not converge in 16 rounds")
+
+
+def test_a_reply_never_carries_a_value_json_cannot_hold():
+    class Broken:
+        def state(self):
+            return {"prominence_db": float("nan")}
+
+    reply = json.loads(browser.call(Broken(), "state"), parse_constant=not_json)
+    assert reply["error"].startswith("internal error in state: ValueError")
 
 
 def test_session_runs_to_convergence(engine, setup):
