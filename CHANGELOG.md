@@ -8,10 +8,13 @@ What changed for people who use the dechatter widget and command line. The forma
 
 ### Fixed
 
-- A pass whose stretch of the recording is silent (the recording stopped before the last
-  passes) is now "missing", with no verdict. Before, it was analysed to a prominence of
-  NaN, which made the round's results unreadable: the widget said "Unexpected token 'N'
-  … is not valid JSON". Results and widget replies now refuse NaN and infinity outright.
+- A pass the widget's run cut, but whose stretch of the recording is silent or cut off (the
+  recording stopped before the last passes), now says "no cut heard", with no verdict, and
+  the next round still starts behind its face. Before, a silent stretch was analysed to a
+  prominence of NaN, which made the round's results unreadable: the widget said
+  "Unexpected token 'N' … is not valid JSON". Results and widget replies now refuse NaN and
+  infinity outright, and a session 0.5.0 saved NaN into opens again, with those readings
+  dropped, so its round can be analysed again.
 
 ## [0.5.0] - 2026-11-23
 

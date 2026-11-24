@@ -115,6 +115,28 @@ def test_a_reply_never_carries_a_value_json_cannot_hold():
     assert reply["error"].startswith("internal error in state: ValueError")
 
 
+def test_a_session_0_5_0_wrote_nan_into_still_opens_and_analyses_again(engine):
+    """0.5.0 analysed a silent cut window to NaN and saved it; the widget must still read
+    such a session, so the round can be analysed again."""
+    engine.call("plan", NAME, "fresh")
+    engine.run_round(1)
+    path = session.round_dir(engine.root / NAME, 1) / session.RESULTS_FILE
+    data = json.loads(path.read_text(encoding="utf-8"))
+    silent, overruled = data["passes"][-1], data["passes"][-2]
+    silent.update(prominence_db=float("nan"), excess_db=float("nan"), detected="stable")
+    silent.update(verdict="stable")
+    overruled.update(prominence_db=float("nan"), detected="stable", verdict="unstable")
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")  # as 0.5.0 wrote it
+
+    passes = engine.call("state", NAME)["rounds"][0]["passes"]
+    assert (passes[-1]["verdict"], passes[-1]["prominence_db"]) == (None, None)
+    # A verdict set by hand is the operator's, not the reading's: it stays.
+    assert (passes[-2]["verdict"], passes[-2]["prominence_db"]) == ("unstable", None)
+
+    passes = engine.call("analyze", NAME, 1)["rounds"][0]["passes"]
+    assert all(p["prominence_db"] is not None for p in passes if p["status"] == "analysed")
+
+
 def test_session_runs_to_convergence(engine, setup):
     state = engine.call("state", NAME)
     assert state["next"] == "plan" and state["rounds"] == []

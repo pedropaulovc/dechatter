@@ -208,9 +208,10 @@ on, and a verdict can be set by hand.
 When the widget ran the round, it recorded where every cut and every dwell is, and those
 windows are used as they are: the cut from where the cutter meets the stock to where it
 leaves it, without any time the machine was held, and the dwell before it as the air
-reference. A pass the run never reached is "not run". A pass whose window holds no sound at
-all, because the recording stopped before it, is "missing", with no verdict. A run that
-ended before its first cut is not analysed, and the round stays planned to run again.
+reference. A pass the run never reached is "not run". A pass the run cut, but whose window
+holds no sound to analyse, because the recording stopped before it, is "no cut heard", with
+no verdict; its face still counts as moved on. A run that ended before its first cut is not
+analysed, and the round stays planned to run again.
 
 A recording made otherwise (the command line, a phone) is searched for its cuts by their
 level over the spindle's own noise around them, since the spindle gets louder as it speeds

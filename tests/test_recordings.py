@@ -398,10 +398,20 @@ def test_a_cut_no_louder_than_the_spindle_in_the_air_is_not_called_stable(setup)
     assert face == pytest.approx(plan.face_y_start_mm + plan.consumed_mm)
 
 
-@pytest.mark.parametrize("ending", ["went silent", "stopped"])
-def test_a_recording_that_ends_before_the_last_pass_leaves_it_unheard(ending, setup, tmp_path):
-    """Found in a widget run: the microphone stopped before the last passes, and their
-    windows, all digital silence, analysed to a NaN prominence that broke results.json."""
+@pytest.mark.parametrize(
+    "ending",
+    [
+        # The fix: the windows go on over a silent capture (detect.Silent), which analysed
+        # to a NaN prominence that broke results.json.
+        "went silent",
+        # A regression check of the older path: the capture is cut short, so the last
+        # window is too short to analyse (detect.TooShort).
+        "stopped",
+    ],
+)
+def test_a_recording_that_ends_before_the_last_pass_still_moves_the_face(ending, setup, tmp_path):
+    """Found in a widget run: the microphone stopped before the last passes. The widget saw
+    the machine cut them, so their face moved, though there is nothing of them to hear."""
     from test_plan import round1
 
     plan = round1(setup)
@@ -409,14 +419,16 @@ def test_a_recording_that_ends_before_the_last_pass_leaves_it_unheard(ending, se
     recording = synth.record(plan, seed=3)
     end = int((contact[-2][1] + 0.5) * synth.RATE)  # just after the next-to-last cut
     if ending == "went silent":
-        recording[end:] = 0.0  # the run's windows go on over a silent capture
+        recording[end:] = 0.0
     else:
         recording = recording[:end]
     results = session.analyze(plan, recording, synth.RATE, "r.wav", Thresholds(), timeline=timeline)
     last = results.passes[-1]
-    assert last.status is PassStatus.MISSING and last.status in session.UNHEARD
+    assert last.status is PassStatus.QUIET and last.status not in session.UNHEARD
     assert (last.verdict, last.prominence_db, last.excess_db) == (None, None, None)
     assert {p.status for p in results.passes[:-1]} == {PassStatus.ANALYSED}
+    face, _ = session.face_after(session.Round(Path("r"), plan, results))
+    assert face == pytest.approx(plan.face_y_start_mm + plan.consumed_mm)
     path = tmp_path / session.RESULTS_FILE
     results.save(path)
     assert session.Results.load(path) == results

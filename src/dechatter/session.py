@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import math
 import shutil
 import uuid
 from dataclasses import asdict, dataclass
@@ -66,8 +67,9 @@ class PassStatus(StrEnum):
     # have run unheard, so a verdict may still be set by hand.
     LIKELY_NOT_RUN = "likely not run"
     NOT_RUN = "not run"  # the widget's run never reached it (or never touched the stock)
-    # Run, but its cut was no louder than the spindle in the air and sounded stable: it may
-    # have cut nothing. Its face still moved, so it counts as cut; a verdict may be set by hand.
+    # Run, but its cut was no louder than the spindle in the air and sounded stable, or the
+    # widget saw it cut where the recording holds nothing to hear: it may have cut nothing.
+    # Its face still moved, so it counts as cut; a verdict may be set by hand.
     QUIET = "no cut heard"
 
 
@@ -136,16 +138,29 @@ class Results:
         passes = tuple(
             PassResult(
                 **{
-                    **p,
+                    **_finite(p),
                     "kind": PassKind(p["kind"]),
                     "status": PassStatus(p["status"]),
-                    "verdict": Verdict(p["verdict"]) if p["verdict"] else None,
-                    "detected": Verdict(p["detected"]) if p["detected"] else None,
                 }
             )
             for p in data.pop("passes")
         )
         return Results(**{**data, "thresholds": Thresholds(**data["thresholds"]), "passes": passes})
+
+
+def _finite(p: dict) -> dict:
+    """A saved pass, its verdicts parsed, without the NaN 0.5.0 wrote for a silent cut: that
+    reading measured nothing, so its numbers and the detector's verdict are dropped (a
+    verdict set by hand stays), and the round can be read and analysed again."""
+    verdict = Verdict(p["verdict"]) if p["verdict"] else None
+    detected = Verdict(p["detected"]) if p["detected"] else None
+    void = [k for k, v in p.items() if isinstance(v, float) and not math.isfinite(v)]
+    if not void:
+        return {**p, "verdict": verdict, "detected": detected}
+    log.warning("pass %s: %s not a number: its reading is dropped", p["id"], ", ".join(void))
+    if verdict is detected:
+        verdict = None
+    return {**p, **dict.fromkeys(void), "verdict": verdict, "detected": None}
 
 
 @dataclass(frozen=True)
@@ -485,10 +500,13 @@ def analyze(
             )
         except (detect.TooShort, detect.Silent) as exc:
             log.warning("pass %d: %s", p.id, exc)
-            # Too short to hear, or silent (the recording stopped before it): not found in the
-            # recording. A cut stopped part-way still left its step on the face, heard or not.
-            short = PassStatus.ABORTED if place.status is PassStatus.ABORTED else PassStatus.MISSING
-            results.append(dataclasses.replace(base, status=short))
+            # Too short to hear, or silent (the recording stopped before it). A cut stopped
+            # part-way still left its step on the face, heard or not. So did one the widget
+            # saw the machine make: "no cut heard". Found by sound, it is not in the recording.
+            status = PassStatus.QUIET if windowed else PassStatus.MISSING
+            if place.status is PassStatus.ABORTED:
+                status = PassStatus.ABORTED
+            results.append(dataclasses.replace(base, status=status))
             continue
         over_air = None
         if air_end - air_start >= MIN_AIR_S:
