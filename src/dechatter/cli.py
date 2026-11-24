@@ -107,23 +107,30 @@ def _print_round(session_dir: Path, plan: Plan) -> None:
     tests = [p for p in plan.passes if p.kind is PassKind.TEST]
     print(
         f"round {plan.round}, {plan.axial_depth_mm:g} mm deep: {len(tests)} test cuts, "
-        f"about {plan.run_time_s / 60:.0f} min, "
-        f"uses {plan.consumed_mm:.1f} mm of stock width"
+        f"about {plan.run_time_s / 60:.0f} min"
     )
-    if plan.reface_mm > 0:
-        print(
-            f"  faces the top down {plan.reface_mm:g} mm first, to Z{-plan.top_mm:g}"
-            " (keep the zero; start recording at the M0 after it)"
-        )
-    if plan.lanes > 1:
-        first, last = lane_x_mm(
-            load_setup(session.round_dir(session_dir, plan.round) / session.SETUP_FILE),
-            plan.lane,
-            plan.lanes,
-        )
-        fresh = plan.face_y_start_mm == 0 and plan.lane > 1
+    setup = load_setup(session.round_dir(session_dir, plan.round) / session.SETUP_FILE)
+    for number, leg in enumerate(plan.legs):
+        if leg.reface_mm > 0 and number == 0:
+            print(
+                f"  first faces the top down {leg.reface_mm:g} mm, to Z{-leg.top_mm:g} "
+                "(keep the zero; start recording at the M0 after it)"
+            )
+        if leg.reface_mm > 0 and number > 0:
+            print(
+                f"  then faces the top down {leg.reface_mm:g} mm, to Z{-leg.top_mm:g} (keep the "
+                "zero; pause the recording at the M0 before it, resume it at the M0 after it)"
+            )
+        where = "front face" if plan.lanes == 1 else f"lane {leg.lane} of {plan.lanes}"
+        if plan.lanes > 1:
+            first, last = lane_x_mm(setup, leg.lane, plan.lanes)
+            where += f", X{first:g} to X{last:g}"
+        fresh = leg.face_y_start_mm == 0 and (leg.lane > 1 or leg.top_mm > 0)
         fresh = " (a fresh face: keep the same zero)" if fresh else ""
-        print(f"  lane {plan.lane} of {plan.lanes}, X{first:g} to X{last:g}{fresh}")
+        print(
+            f"  {where}: Y{leg.face_y_start_mm:g} to Y{leg.face_y_end_mm:.2f}, passes "
+            f"{leg.passes[0].id}-{leg.passes[-1].id}{fresh}"
+        )
     for p in tests:
         chance = "" if p.p_stable is None else f"  P(stable) {p.p_stable:.2f}"
         chip = "" if p.chip_load_mm is None else f"  {p.chip_load_mm:g} mm/tooth"

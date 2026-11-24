@@ -1221,27 +1221,31 @@ def test_import_refuses_archives_that_are_not_a_session(engine):
     assert not (engine.root.parent / "outside").exists()
 
 
-def test_a_round_moves_on_to_the_next_lane_when_its_face_runs_out(engine):
+def test_a_round_goes_on_into_the_next_lane_when_its_face_runs_out(engine):
     form = engine.call("setup_form", NAME)["values"]
     form["stock"]["lanes"] = 2
     form["stock"]["width_mm"] = 20.0
     engine.call("save_setup", NAME, json.dumps(form))
     state = engine.call("plan", NAME, "same")
     first = state["rounds"][-1]
-    assert (first["lane"], first["lanes"], first["face_y_start_mm"]) == (1, 2, 0.0)
-    assert first["lane_x_mm"] == [0.0, form["stock"]["length_mm"] / 2]
+    assert first["lanes"] == 2
+    assert [(leg["lane"], leg["face_y_start_mm"]) for leg in first["legs"]] == [(1, 0.0)]
+    assert first["legs"][0]["lane_x_mm"] == [0.0, form["stock"]["length_mm"] / 2]
     state = engine.run_round(first["round"])
 
     state = engine.call("plan", NAME, "same")
     second = state["rounds"][-1]
-    # The first lane's face had little width left: the round starts a fresh lane, which
-    # the first one bounds, and keeps the same zero.
-    assert (second["lane"], second["face_y_start_mm"]) == (2, 0.0)
-    assert second["face_y_end_mm"] <= first["face_y_end_mm"] + 1e-9
+    # What the first lane's face has left is used first; then the round goes on in a fresh
+    # lane, which the first one bounds, under the same zero.
+    legs = second["legs"]
+    assert [leg["lane"] for leg in legs] == [1, 2]
+    assert legs[0]["face_y_start_mm"] == pytest.approx(first["legs"][0]["face_y_end_mm"])
+    assert legs[1]["face_y_start_mm"] == 0.0
+    assert legs[1]["face_y_end_mm"] <= legs[0]["face_y_end_mm"] + 1e-9
     plan = Plan.load(session.round_dir(engine.root / NAME, second["round"]) / session.PLAN_FILE)
-    assert plan.lane_cap_mm == pytest.approx(first["face_y_end_mm"])
+    assert plan.legs[1].lane_cap_mm == pytest.approx(legs[0]["face_y_end_mm"])
     program = session.round_dir(engine.root / NAME, second["round"]) / session.PROGRAM_FILE
-    assert "lane 2 of 2" in program.read_text(encoding="utf-8")
+    assert "(LANE CHANGE: lane 2 of 2" in program.read_text(encoding="utf-8")
 
     # Changing the lanes once a round was cut would change what was measured.
     form["stock"]["lanes"] = 3
@@ -1267,41 +1271,86 @@ def test_automatic_lanes_are_settled_by_the_first_round(engine):
     assert engine.call("plan", NAME, "same")["rounds"][-1]["lanes"] == lanes
 
 
-def run_rounds_until_faced(engine, form) -> tuple[dict, dict]:
-    """Save `form`, then plan and run rounds on the same block until one faces the top down;
-    answer the last round before it and that one."""
-    engine.call("save_setup", NAME, json.dumps(form))
-    before = None
-    for _ in range(8):
-        state = engine.call("plan", NAME, "same")
-        latest = state["rounds"][-1]
-        if latest["reface_mm"] > 0:
-            return before, latest
-        before = latest
-        engine.run_round(latest["round"])
-    pytest.fail("never faced the top")
+def faced(r: dict) -> list[dict]:
+    """The legs of a round that start by facing the top down."""
+    return [leg for leg in r["legs"] if leg["reface_mm"] > 0]
 
 
-def test_with_its_height_given_the_top_is_faced_down_once_the_lanes_are_used(engine):
+# Three lanes on a narrow block: round 1 fills them all and faces the top down partway. Long
+# lanes keep each cut long enough that one stopped part-way is still heard.
+SPILL = {"lanes": 3, "length_mm": 120.0, "width_mm": 5.0, "height_mm": 40.0}
+
+
+def test_once_every_lane_is_used_the_round_faces_the_top_midway_and_goes_on(engine, setup):
     form = engine.call("setup_form", NAME)["values"]
-    form["stock"].update(lanes=2, width_mm=8.0, height_mm=40.0, thickness_mm=12.0)
+    form["stock"].update(SPILL)
+    engine.call("save_setup", NAME, json.dumps(form))
     depth = form["cut"]["axial_depth_mm"]
-    before, faced = run_rounds_until_faced(engine, form)
-    # Only once the last lane had no room left, the top comes down below every cut, and
-    # the round starts again at the first lane, at Y0, under the same zero.
-    assert before["lane"] == 2
-    assert faced["reface_mm"] == pytest.approx(depth + plan.REFACE_EXTRA_MM)
-    assert faced["top_mm"] == pytest.approx(faced["reface_mm"])
-    assert (faced["lane"], faced["face_y_start_mm"]) == (1, 0.0)
-    program = engine.call("program", NAME, faced["round"], "mm")
+    first = engine.call("plan", NAME, "same")["rounds"][-1]
+    legs = first["legs"]
+    # Every lane in turn; only then the top comes down below the cuts, and the round goes
+    # on at the first lane under the same zero.
+    assert [leg["lane"] for leg in legs] == [1, 2, 3, 1, 2]
+    step = depth + plan.REFACE_EXTRA_MM
+    assert [leg["reface_mm"] for leg in legs] == pytest.approx([0, 0, 0, step, 0])
+    assert [leg["top_mm"] for leg in legs] == pytest.approx([0, 0, 0, step, step])
+    program = engine.call("program", NAME, first["round"], "mm")
     lines = program.splitlines()
-    assert any(line.startswith("(FACING FIRST") for line in lines)
-    stop = lines.index("M0 (top faced: start the recording now, then resume)")
-    assert stop < min(i for i, line in enumerate(lines) if line.startswith("(pass "))
-    bottom = -(faced["top_mm"] + depth)
-    assert f"G1 Z{bottom:g} F{form['program']['plunge_feed_mm_min']:g}" in program
-    state = engine.run_round(faced["round"])
-    assert state["rounds"][-1]["analysed"]
+    pause = lines.index("M0 (the top is faced next: pause the recording now, then resume)")
+    resume = lines.index("M0 (top faced: resume the recording now, then resume)")
+    before = lines.index(
+        next(line for line in lines if line.startswith(f"(pass {legs[3]['first_pass'] - 1} "))
+    )
+    after = lines.index(
+        next(line for line in lines if line.startswith(f"(pass {legs[3]['first_pass']} "))
+    )
+    assert before < pause < resume < after
+    assert f"G1 Z{-(step + depth):g} F{form['program']['plunge_feed_mm_min']:g}" in lines[after:]
+
+    # Recorded as the program asks, paused through the facing: every cut on its own pass.
+    state = engine.run_round(first["round"])
+    for p in state["rounds"][-1]["passes"]:
+        truth = MACHINE.chatters(p["rpm"], p["width_mm"], setup.tool.flutes, depth)
+        assert p["status"] == "analysed"
+        assert p["kind"] != "test" or p["verdict"] == ("unstable" if truth else "stable")
+
+    # The next round starts where this one ended: on the new top, in the lane it ended in,
+    # or the fresh lane after it, cut back no further.
+    ended = session.face_after(session.load_rounds(engine.root / NAME)[-1])
+    assert (ended.lane, ended.top_mm) == (2, pytest.approx(step))
+    second = engine.call("plan", NAME, "same")["rounds"][-1]
+    start = second["legs"][0]
+    assert start["top_mm"] == pytest.approx(step) and start["reface_mm"] == 0
+    plan_2 = Plan.load(session.round_dir(engine.root / NAME, second["round"]) / session.PLAN_FILE)
+    if start["lane"] == ended.lane:
+        assert start["face_y_start_mm"] == pytest.approx(ended.y_mm)
+    else:
+        assert (start["lane"], start["face_y_start_mm"]) == (ended.lane + 1, 0.0)
+        assert plan_2.legs[0].lane_cap_mm == pytest.approx(ended.y_mm)
+
+
+def test_a_round_stopped_before_its_facing_goes_on_where_it_stopped(engine):
+    form = engine.call("setup_form", NAME)["values"]
+    form["stock"].update(SPILL)
+    engine.call("save_setup", NAME, json.dumps(form))
+    first = engine.call("plan", NAME, "same")["rounds"][-1]
+    planned = Plan.load(session.round_dir(engine.root / NAME, first["round"]) / session.PLAN_FILE)
+    assert [leg.reface_mm > 0 for leg in planned.legs[:4]] == [False, False, False, True]
+    # Stopped in the second lane, before the facing.
+    leg = planned.legs[1]
+    cut = leg.passes[1]
+    state = engine.run_round(first["round"], abort_in_pass=cut.id)
+    statuses = [p["status"] for p in state["rounds"][-1]["passes"]]
+    assert statuses[cut.id] == "aborted" and set(statuses[cut.id + 1 :]) == {"likely not run"}
+
+    # The next round clears the step there, on the top as it was (the facing never came),
+    # and moves on from that lane.
+    second = engine.call("plan", NAME, "same")["rounds"][-1]
+    start = second["legs"][0]
+    widths = [p.width_mm for p in leg.passes if p.id < cut.id]
+    assert (start["lane"], start["top_mm"], start["reface_mm"]) == (leg.lane, 0.0, 0.0)
+    assert start["face_y_start_mm"] == pytest.approx(sum(widths))
+    assert second["passes"][0]["kind"] == "cleanup"
 
 
 def test_without_room_to_face_the_top_down_fresh_stock_is_asked_for(engine):
@@ -1319,7 +1368,7 @@ def test_without_room_to_face_the_top_down_fresh_stock_is_asked_for(engine):
         engine.call("plan", NAME, "same")
     form["stock"]["height_mm"] = 3 * depth
     engine.call("save_setup", NAME, json.dumps(form))
-    assert engine.call("plan", NAME, "same")["rounds"][-1]["reface_mm"] > 0
+    assert faced(engine.call("plan", NAME, "same")["rounds"][-1])
 
 
 def test_a_deeper_depth_faces_the_top_down_instead_of_asking_for_fresh_stock(engine):
@@ -1346,10 +1395,24 @@ def test_a_deeper_depth_faces_the_top_down_instead_of_asking_for_fresh_stock(eng
         if state["next_depth_mm"] == 5.0:
             break
     assert state["next_depth_mm"] == 5.0
-    # The face is flat only down to 4 mm: the top comes down below that first.
-    faced = engine.call("plan", NAME, "same")["rounds"][-1]
-    assert faced["depth_mm"] == 5.0
-    assert faced["reface_mm"] == pytest.approx(4.0 + plan.REFACE_EXTRA_MM)
+    # The face is flat only down to 4 mm: the top comes down below that first, before the
+    # recording starts, and the round starts again at the first lane.
+    deeper = engine.call("plan", NAME, "same")["rounds"][-1]
+    assert deeper["depth_mm"] == 5.0
+    first = deeper["legs"][0]
+    assert first["reface_mm"] == pytest.approx(4.0 + plan.REFACE_EXTRA_MM)
+    assert (first["lane"], first["face_y_start_mm"], first["top_mm"]) == (
+        1,
+        0.0,
+        first["reface_mm"],
+    )
+    lines = engine.call("program", NAME, deeper["round"], "mm").splitlines()
+    assert any(line.startswith("(FACING FIRST") for line in lines)
+    stop = lines.index("M0 (top faced: start the recording now, then resume)")
+    assert stop < min(i for i, line in enumerate(lines) if line.startswith("(pass "))
+    bottom = -(first["top_mm"] + 5.0)
+    assert f"G1 Z{bottom:g} F{form['program']['plunge_feed_mm_min']:g}" in lines
+    assert engine.run_round(deeper["round"], machine=machine)["rounds"][-1]["analysed"]
 
 
 def test_a_sweep_that_does_not_fit_whole_is_never_cut_short(engine, setup):

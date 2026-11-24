@@ -19,8 +19,11 @@ from .bayes import Observation
 from .config import Setup, SetupFile, SetupSource, load_setup, setup_source
 from .detect import Thresholds, Verdict
 from .plan import (
-    REFACE_EXTRA_MM,
+    DEPTH_TOLERANCE_MM,
+    FRESH,
     Envelope,
+    Face,
+    Leg,
     PassKind,
     Plan,
     PlanError,
@@ -28,7 +31,6 @@ from .plan import (
     SchemaError,
     assemble,
     auto_lanes,
-    fitting,
     grid_tests,
     mrr_mm3_min,
     sweep_tests,
@@ -207,9 +209,6 @@ def load_rounds(session: Path) -> list[Round]:
     return rounds
 
 
-DEPTH_TOLERANCE_MM = 1e-6
-
-
 def _tests(rounds: list[Round], wanted) -> list[Observation]:
     """Classified test cuts of the rounds whose depth `wanted` accepts, as they were made.
 
@@ -330,19 +329,29 @@ def next_stage(setup: Setup, env: Envelope, rounds: list[Round], found: list[Sta
     return stage
 
 
-def face_after(last: Round) -> tuple[float, float]:
-    """(front face Y, width of the step an aborted pass left on it) after a round was run."""
+def _last_heard(r: Round) -> int | None:
+    """The index of the last pass a round's run got to, as heard; None if none was."""
+    attempted = [i for i, p in enumerate(r.results.passes) if p.status not in UNHEARD]
+    return attempted[-1] if attempted else None
+
+
+def face_after(last: Round) -> Face:
+    """Where the stock stands after a round was run: on the lane of the last pass heard, its
+    face and the step an aborted pass left on it, with the top that leg was cut from. With
+    no pass heard, where the round started (after the facing it starts with, if any)."""
     if last.results is None:
         raise SessionError(f"{last.path.name} has no results; run `dechatter analyze` first")
-    widths = [p.width_mm for p in last.plan.passes]
-    attempted = [i for i, p in enumerate(last.results.passes) if p.status not in UNHEARD]
-    start = last.plan.face_y_start_mm
-    if not attempted:
-        return start, 0.0
-    final = attempted[-1]
+    final = _last_heard(last)
+    if final is None:
+        start = last.plan.legs[0]
+        return Face(start.lane, start.face_y_start_mm, 0.0, start.lane_cap_mm, start.top_mm)
+    number, place = last.plan.leg_of(final)
+    leg = last.plan.legs[number]
+    widths = [p.width_mm for p in leg.passes]
+    y = leg.face_y_start_mm + sum(widths[:place])
     if last.results.passes[final].status is PassStatus.ABORTED:
-        return start + sum(widths[:final]), widths[final]
-    return start + sum(widths[: final + 1]), 0.0
+        return Face(leg.lane, y, widths[place], leg.lane_cap_mm, leg.top_mm)
+    return Face(leg.lane, y + widths[place], 0.0, leg.lane_cap_mm, leg.top_mm)
 
 
 @dataclass(frozen=True)
@@ -567,26 +576,25 @@ def _rounds_to_plan_after(session: Path, source: SetupFile) -> list[Round]:
     return rounds
 
 
-@dataclass(frozen=True)
-class _Face:
-    """Where a round could cut: a lane's face as it stands, and the top it is cut from."""
-
-    face: float
-    remnant: float
-    lane: int
-    cap: float | None
-    top: float = 0.0
-    reface: float = 0.0
+def _reached(r: Round) -> tuple[Leg, ...]:
+    """The legs of a round its run got to: up to that of its last pass heard (the first, if
+    none was), or every leg of a round never analysed."""
+    if r.results is None:
+        return r.plan.legs
+    final = _last_heard(r)
+    return r.plan.legs[: 1 if final is None else r.plan.leg_of(final)[0] + 1]
 
 
-def _since_top(rounds: list[Round]) -> list[Round]:
-    """The rounds cut on the top as it stands: since the block was mounted or last faced."""
-    since = []
+def _cut_since_top(rounds: list[Round]) -> tuple[float, ...]:
+    """The depths cut into the top as it stands: since the block was mounted or last faced,
+    the depth of every leg a run got to."""
+    cut = []
     for r in reversed(rounds):
-        since.append(r)
-        if r.plan.face_y_start_mm == 0 and r.plan.lane == 1:
-            break
-    return since
+        for leg in reversed(_reached(r)):
+            cut.append(r.plan.axial_depth_mm)
+            if leg.face_y_start_mm == 0 and leg.lane == 1:
+                return tuple(cut)
+    return tuple(cut)
 
 
 def _place(
@@ -599,84 +607,25 @@ def _place(
     planner: PlannerKind,
     tests: list,
 ) -> Plan:
-    """Lay the tests out on the face as it stands, and write the round.
+    """Lay the tests out on the stock from where the last round left it, and write the round.
 
-    The round may cut, cheapest first: the lane it is on, the next lane (a fresh face at
-    Y0 once the stock is in lanes), or, with stock.height_mm given, a fresh top: the round
-    first faces the top down below every cut made on it, and starts again at the first
-    lane. It takes the first that has room for all its tests, else the one with room for
-    most. A chip-load sweep must fit whole: cut short, its heaviest chip loads would go
-    untried and the lightest read as a limit.
+    The round fills what is left of the lane it is on, then the lanes after it, and with
+    stock.height_mm given, faces the top down and starts again at the first lane, for as long
+    as it has tests left and the top can come down (see plan.assemble).
     """
     setup = source.setup
     number = rounds[-1].plan.round + 1 if rounds else 1
     # The lanes are settled by the session's first round: an automatic count must not move
     # with a speed limit changed since.
     lanes = rounds[-1].plan.lanes if rounds else auto_lanes(setup, env)
+    face, cut = FRESH, ()
+    if rounds and stock is Stock.SAME:
+        face = face_after(rounds[-1])
+        # A top whose first lane is still whole at Y0 was not cut into.
+        if face.y_mm > 0 or face.lane > 1:
+            cut = _cut_since_top(rounds)
     at = at_depth(setup, depth_mm)
-    if not rounds or stock is Stock.FRESH:
-        options = [_Face(0.0, 0.0, 1, None)]
-        refused = ""
-    else:
-        last = rounds[-1].plan
-        face, remnant = face_after(rounds[-1])
-        cut = _since_top(rounds)
-        shallowest = min(r.plan.axial_depth_mm for r in cut)
-        options = []
-        refused = ""
-        if (face > 0 or last.lane > 1) and depth_mm > shallowest + DEPTH_TOLERANCE_MM:
-            refused = (
-                f"round {number} would cut {depth_mm:g} mm deep, but this block's face is "
-                f"only flat down to {shallowest:g} mm"
-            )
-        else:
-            options.append(_Face(face, remnant, last.lane, last.lane_cap_mm, last.top_mm))
-            if last.lane < lanes and face > 0:
-                options.append(_Face(0.0, 0.0, last.lane + 1, face, last.top_mm))
-        if face > 0 or last.lane > 1:
-            reface = max(r.plan.axial_depth_mm for r in cut) + REFACE_EXTRA_MM
-            top = last.top_mm + reface
-            height = setup.stock.height_mm
-            if height is not None and top + depth_mm + setup.program.clearance_mm <= height:
-                options.append(_Face(0.0, 0.0, 1, None, top, reface))
-    room = [fitting(at, env, o.face, o.remnant, tests, o.cap) for o in options]
-    whole = [o for o, n in zip(options, room, strict=True) if n == len(tests)]
-    if whole:
-        chosen = whole[0]
-    elif planner is PlannerKind.SWEEP or not room or max(room) == 0:
-        chosen = None
-    else:
-        chosen = options[room.index(max(room))]
-    if chosen is None:
-        if setup.stock.height_mm is None:
-            hint = (
-                "Mount fresh stock and plan with new stock, or give the stock's height above "
-                "the vise jaws ([stock] height_mm) so dechatter can face the top down itself"
-            )
-        else:
-            hint = "The top cannot come down further: mount fresh stock and plan with new stock"
-        if refused:
-            raise PlanError(f"{refused}. {hint}.")
-        what = (
-            f"the chip-load sweep needs room for all its {len(tests)} cuts"
-            if planner is PlannerKind.SWEEP and room and max(room) > 0
-            else "stock exhausted"
-        )
-        raise PlanError(f"{what}: no face left has room for them. {hint}.")
-    plan = assemble(
-        at,
-        env,
-        number,
-        planner,
-        chosen.face,
-        chosen.remnant,
-        tests,
-        lane=chosen.lane,
-        lanes=lanes,
-        lane_cap_mm=chosen.cap,
-        top_mm=chosen.top,
-        reface_mm=chosen.reface,
-    )
+    plan = assemble(at, env, number, planner, tests, face=face, cut_mm=cut, lanes=lanes)
     _write_round(session, source.text, at, plan)
     return plan
 

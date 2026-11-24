@@ -965,15 +965,18 @@ function renderStep() {
     render();
   };
   const unknownUnits = cnc.link === 'ready' && cnc.units === null;
+  const [first, ...later] = round.legs;
+  const midFacings = later.filter((leg) => leg.reface_mm > 0);
   step.append(
-    el('p', {}, `Round ${round.round}: ${tests} test cuts ${length(round.depth_mm, units(), { mmToo: true })} deep, about ${minutes(round.run_time_s)} plus rapids.${laneText(round)} The front face ends at Y ${length(round.face_y_end_mm, units(), { mmToo: true })}.`),
+    el('p', {}, `Round ${round.round}: ${tests} test cuts ${length(round.depth_mm, units(), { mmToo: true })} deep, about ${minutes(round.run_time_s)} plus rapids. ${legsText(round)}`),
     el('ol', {},
-      el('li', {}, round.reface_mm > 0
-        ? `First the program faces the top down ${length(round.reface_mm, units(), { mmToo: true })}, to Z ${length(-round.top_mm, units(), { mmToo: true })}, and starts again at the first lane. Keep the zero the block was first cut with (X at the left end, Y on the front face as first mounted, Z on the top as first mounted). The facing is not analysed.`
-        : round.top_mm > 0 || (round.lane > 1 && round.face_y_start_mm === 0)
+      el('li', {}, first.reface_mm > 0
+        ? `First the program faces the top down ${length(first.reface_mm, units(), { mmToo: true })}, to Z ${length(-first.top_mm, units(), { mmToo: true })}, and starts again at the first lane. Keep the zero the block was first cut with (X at the left end, Y on the front face as first mounted, Z on the top as first mounted). The facing is not analysed.`
+        : first.top_mm > 0 || (first.lane > 1 && first.face_y_start_mm === 0)
           ? 'Keep the zero the block was first cut with (X at the left end of the stock, Y on its front face as first mounted, Z on its top as first mounted).'
           : 'Zero X at the left end of the stock, Y on its front face, Z on top.'),
       el('li', {}, start, ' runs the round from here, one move at a time, and records it. Keep this tab open.', ...(unknownUnits ? [' cncjs has not reported G20 or G21 yet; the machine is in ', declare] : [])),
+      ...midFacings.map((leg) => el('li', {}, `Before pass ${leg.first_pass}, with ${round.lanes > 1 ? 'every lane' : 'the face'} used, the program faces the top down ${length(leg.reface_mm, units(), { mmToo: true })}, to Z ${length(-leg.top_mm, units(), { mmToo: true })}, and goes on at the first lane with the same zero, without stopping. The recording runs on; the facing is not analysed.`)),
       ...(state.spindle === 'manual' ? [el('li', {}, `Before each of its ${speedChanges(round)} spindle speeds the round stops; set the speed shown here and press Continue.`)] : []),
     ),
   );
@@ -985,13 +988,36 @@ function renderStep() {
   }
 }
 
-// Where along the stock a round cuts, when the stock is in lanes.
-function laneText(round) {
-  if (!round.lanes || round.lanes === 1) {
-    return '';
+// Where on the stock a leg of a round cuts: its lane, when the stock is in lanes.
+function legPlace(round, leg) {
+  if (round.lanes === 1) {
+    return 'the front face';
   }
-  const [first, last] = round.lane_x_mm;
-  return ` It cuts lane ${round.lane} of ${round.lanes}, X ${length(first, units())} to ${length(last, units())}.`;
+  const [x0, x1] = leg.lane_x_mm;
+  return `lane ${leg.lane} of ${round.lanes} (X ${length(x0, units())} to ${length(x1, units())})`;
+}
+
+// Where along the stock a round cuts, leg by leg, and where it faces the top down.
+function legsText(round) {
+  const parts = round.legs.map((leg, i) => {
+    const faces = `from Y ${length(leg.face_y_start_mm, units())} to ${length(leg.face_y_end_mm, units(), { mmToo: true })}`;
+    if (i === 0) {
+      return `It cuts ${legPlace(round, leg)} ${faces}`;
+    }
+    if (leg.reface_mm > 0) {
+      return `then, from pass ${leg.first_pass}, ${legPlace(round, leg)} below the faced top ${faces}`;
+    }
+    return `then, from pass ${leg.first_pass}, ${legPlace(round, leg)} ${faces}`;
+  });
+  return `${parts.join('; ')}.`;
+}
+
+// A row before each leg of a round in more than one: where its passes cut.
+function legRow(round, leg) {
+  const faced = leg.reface_mm > 0 ? `Top faced down ${length(leg.reface_mm, units())}, then ` : '';
+  const place = legPlace(round, leg);
+  const text = `${faced}${faced ? place : place[0].toUpperCase() + place.slice(1)}, from Y ${length(leg.face_y_start_mm, units())}`;
+  return el('tr', { className: 'leg' }, el('td', { colSpan: 6 }, text));
 }
 
 function verdictCell(round, pass) {
@@ -1032,9 +1058,14 @@ function renderRound() {
     return;
   }
   const kind = round.planner === 'sweep' ? ' (chip-load sweep)' : '';
-  $('round-title').textContent = `Round ${round.round}${kind}${round.analysed ? ' results' : ''}, ${length(round.depth_mm, units(), { mmToo: true })} deep${round.lanes > 1 ? `, lane ${round.lane} of ${round.lanes}` : ''}`;
+  const lanes = round.legs.map((leg) => leg.lane);
+  const where = round.lanes > 1 ? `, ${lanes.length > 1 ? 'lanes' : 'lane'} ${lanes.join(', ')} of ${round.lanes}` : '';
+  const faced = round.legs.slice(1).some((leg) => leg.reface_mm > 0) ? ', top faced midway' : '';
+  $('round-title').textContent = `Round ${round.round}${kind}${round.analysed ? ' results' : ''}, ${length(round.depth_mm, units(), { mmToo: true })} deep${where}${faced}`;
+  const starts = new Map(round.legs.length > 1 ? round.legs.map((leg) => [leg.first_pass, leg]) : []);
   $('passes').replaceChildren(
-    ...round.passes.map((p) =>
+    ...round.passes.flatMap((p) => [
+      ...(starts.has(p.id) ? [legRow(round, starts.get(p.id))] : []),
       el('tr', { className: p.kind === 'test' ? '' : 'prep' },
         el('td', {}, String(p.id)),
         el('td', {}, String(p.rpm)),
@@ -1043,7 +1074,7 @@ function renderRound() {
         el('td', {}, p.p_stable === null ? '' : p.p_stable.toFixed(2)),
         verdictCell(round, p),
       ),
-    ),
+    ]),
   );
 }
 

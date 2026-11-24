@@ -6,6 +6,26 @@ What changed for people who use the dechatter widget and command line. The forma
 
 ## [Unreleased]
 
+### Changed
+
+- A round uses the stock left in every lane before the top is faced down. It fills what
+  is left of the lane it starts on, then goes on into the next lane and the ones after it,
+  each a fresh face at Y0 with its own truing pass, within the same program; only once
+  every lane is used (and `height_mm` is given) does it face the top down, partway through
+  if need be, and go on at the first lane below the new top. Before, a round that did not
+  fit what its lane had left or the single next lane faced the whole top down, wasting
+  those lanes and every lane after them. A chip-load sweep may now span lanes, still only
+  whole. The program comments each lane change and each facing; `dechatter plan`, the
+  widget and the report list the lanes a round cuts, the pass each starts at, and where the
+  top is faced. The next round starts in the lane the last one ended in.
+- From the command line, a program that faces the top down partway stops (`M0`) before
+  and after the facing: pause the recording through it, so the cuts found by their sound
+  follow on as planned. The widget records on through it and leaves it out of the analysis.
+- **Breaking:** sessions planned before this version do not load: a round's plan now holds
+  the lanes it runs across. dechatter says the round was written by an older dechatter;
+  start a new session. Sessions planned by this version cannot be opened by dechatter
+  0.5.0.
+
 ### Fixed
 
 - A pass the widget's run cut, but whose stretch of the recording is silent or cut off (the

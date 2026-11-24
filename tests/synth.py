@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 
 import numpy as np
 
@@ -83,6 +84,13 @@ def _cut(
     return out
 
 
+class Facing(StrEnum):
+    """Whether a recording holds the program facing the top down."""
+
+    PAUSED = "paused"  # the recorder was paused through it, as the program asks
+    HEARD = "heard"  # it ran on through it, as the widget's does
+
+
 def record(
     plan: Plan,
     machine: Machine = DEFAULT_MACHINE,
@@ -92,6 +100,7 @@ def record(
     speed_change_s: float = 0.0,
     air_s: Sequence[float] | None = None,
     in_air: frozenset[int] = frozenset(),
+    facing: Facing = Facing.PAUSED,
 ) -> np.ndarray:
     """The recording of running `plan`: silence, then per pass rapid, dwell, lead-in, cut.
 
@@ -101,12 +110,19 @@ def record(
     that has to line up with a real program run; the default guesses 2 s of rapids. With
     `air_s` there is no leading silence: the spindle is heard from the first sample. The
     passes in `in_air` (indices) move as planned but cut nothing: no stock was where they ran.
+    With `facing` HEARD, each facing of the top is in the recording, as long as it takes,
+    right before the first pass after it.
     """
     rng = np.random.default_rng(seed)
     parts = [0.0005 * rng.standard_normal(0 if air_s is not None else 3 * RATE)]
+    faced = {leg.passes[0].id: leg.face_s for leg in plan.legs if leg.reface_mm > 0}
     previous_rpm = None
     for index, p in enumerate(plan.passes):
         spindle_hz = p.rpm * (1 + machine.rpm_error) / 60
+        if facing is Facing.HEARD and p.id in faced:
+            # The whole top at a quarter of the cutter: louder than any test cut, and chatter.
+            quarter = plan.diameter_mm / 4
+            parts.append(_cut(faced[p.id], spindle_hz, plan.flutes, quarter, True, machine, rng))
         if speed_change_s and p.rpm != previous_rpm:
             parts.append(0.3 * rng.standard_normal(int(0.3 * RATE)))
             parts.append(_air(speed_change_s, spindle_hz, machine, rng))

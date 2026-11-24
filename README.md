@@ -34,7 +34,8 @@ one found keeps a fair chance of being stable. The results list the best cuts of
 together.
 
 The depths run deepest first because a shallower cut leaves the face flat only above its own
-depth. Planning a deeper cut on such a block is refused: mount fresh stock for it.
+depth. A deeper cut is never planned on such a block's cut lanes: it needs fresh stock, or
+the top faced down (see [Facing the top down](#facing-the-top-down)).
 
 ## Use in cncjs
 
@@ -160,7 +161,9 @@ dechatter plan al-10mm          # writes al-10mm/round-01/program.nc
 ```
 
 Set the work zero at the left end of the stock, on its front face, at the top. Start one
-continuous recording, run the program, stop recording after `M30`. Then:
+continuous recording, run the program, stop recording after `M30`. If the program faces the
+top down partway, it stops (`M0`) before and after the facing: pause the recording through
+it (see [Facing the top down](#facing-the-top-down)). Then:
 
 ```sh
 dechatter analyze al-10mm recording.wav   # classifies each pass
@@ -211,7 +214,9 @@ leaves it, without any time the machine was held, and the dwell before it as the
 reference. A pass the run never reached is "not run". A pass the run cut, but where nothing
 could be analysed (its window silent or too short, as when the recording stopped first), is
 "no cut heard", with no verdict; its face still counts as moved on. A run that ended before
-its first cut is not analysed, and the round stays planned to run again.
+its first cut is not analysed, and the round stays planned to run again. Facing the top
+down, wherever in the round it comes, is in the recording but in no window, so it is never
+analysed.
 
 A recording made otherwise (the command line, a phone) is searched for its cuts by their
 level over the spindle's own noise around them, since the spindle gets louder as it speeds
@@ -294,35 +299,48 @@ the wizard shows the number it works out. `lanes` in `[stock]` (Lanes along X, u
 Advanced in the wizard's Stock step) sets it by hand. The session's first round settles it:
 it stays fixed even if a later change to the speed limits would allow more. The lanes are
 used one after another, starting at the end the cutter meets first (the left end in
-conventional milling, the right in climb). When a lane's face
-has room for fewer of a round's cuts than a fresh lane would, the round moves to the next
-lane: a new face at `Y0`, at the same height above the vise jaws as the first, with the same
-work zero. Each pass then cuts one lane: it starts a cutter diameter clear of the lane
-before, which is already cut back, and stops just short of the next lane, still untouched,
-then backs off the face (the last lane runs out past the end of the stock as usual). A
-lane is never cut further back than the one before it, since the cutter crosses that one
-on its way in, and each lane must be at least twice the cutter diameter long. A deeper
-depth still needs fresh stock, since the cutter would cross the earlier lanes below where
-they were cut. The number of lanes cannot change once a round was cut.
+conventional milling, the right in climb). A round takes its cuts in order (narrowest
+first; with a manual spindle, each speed's together) into what is left of the lane it
+starts on, until the next cut does not fit; then it goes on in the next lane, and the one
+after that, within the same program. Each new lane is a fresh face at `Y0`, at the same
+height above the vise jaws as the first, with the same work zero, and starts with its own
+truing pass. Each pass cuts one lane: it starts a cutter diameter clear of the lane before,
+which is already cut back, and stops just short of the next lane, still untouched, then
+backs off the face (the last lane runs out past the end of the stock as usual). A lane is
+never cut further back than the one before it, since the cutter crosses that one on its
+way in, and each lane must be at least twice the cutter diameter long. A deeper depth
+still needs fresh stock (or the top faced down), since the cutter would cross the earlier
+lanes below where they were cut. The number of lanes cannot change once a round was cut.
+The program says in a comment where it changes lane; `dechatter plan`, the widget's round
+and the report list the lanes a round cuts and the pass each starts at. The next round
+starts where the last pass heard left the stock, in whichever lane that was.
 
 ### Facing the top down
 
 Given how far the top of the stock (where Z0 is set) stands above anything the cutter must
 not reach (`height_mm` in `[stock]`, the wizard's Height above the jaws), dechatter faces the
 top down itself once every lane is used, or when a deeper depth comes after a shallower one.
-The round's program starts by taking the top down below the deepest cut made on it (plus
-0.2 mm), in levels of at most `face_depth_mm` (1 mm) and rows `face_width_mm` (a quarter of
-the cutter) apart, from the front face to the back (`thickness_mm`, or the width used) and
-past both ends, at the round's first speed. Then it stops (`M0`) and the round starts again
-at the first lane, below the new top, with the same zero: no remounting, no re-zeroing. It
-does so as long as the next cut's bottom stays the clearance above that height; then it
-asks for fresh stock. The widget does not analyse the facing; from the command line, start
-recording at that stop.
+The program takes the top down below the deepest cut made on it (plus 0.2 mm), in levels of
+at most `face_depth_mm` (1 mm) and rows `face_width_mm` (a quarter of the cutter) apart,
+from the front face to the back (`thickness_mm`, or the width used) and past both ends, at
+the speed of the cut that comes next. Then the round goes on at the first lane, below the
+new top, with the same zero: no remounting, no re-zeroing. That can happen at the start of
+a round or partway, when the lanes run out with cuts still to make, and again if those fill
+the new top too. It does so as long as the next cut's bottom stays the clearance above that
+height; past that the round keeps the cuts that fit, and the next one asks for fresh stock.
+The run time covers every facing.
 
-A chip-load sweep is planned only where all its cuts fit, on a lane, a fresh lane or a faced
-top: cut short by the stock, its heaviest chip loads would go untried and the last one tried
-would read as a limit. A sweep whose every chip load stayed stable says so: its limit lies
-above them.
+Facing is no test cut, and must not be analysed as one. The widget records on through it
+and knows it from the windows it recorded: no pass's cut is in it. A recording from the
+command line is searched for its cuts by sound, so it must not hold the facing: the program
+stops (`M0`) after facing at its start, to start the recording then, and before and after
+facing partway, to pause the recording through it. The cuts on either side then follow on
+in the recording as they do in the plan.
+
+A chip-load sweep is planned only where all its cuts fit, in what the lanes have left, on
+the lanes after them or on a faced top: cut short by the stock, its heaviest chip loads
+would go untried and the last one tried would read as a limit. A sweep whose every chip
+load stayed stable says so: its limit lies above them.
 
 ## Development
 

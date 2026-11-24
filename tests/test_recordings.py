@@ -74,10 +74,16 @@ def test_cuts_are_found_against_the_local_spindle_floor_and_kept_in_order(round_
     assert all(index > max(found.matches) for index in NOT_RUN[round_name])
 
 
-def schedule(plan: Plan, rapid_s: float = 2.0) -> tuple[list, list[tuple[float, float]]]:
-    """A timeline as the widget writes it for synth.record(plan), and the true cut times."""
+def schedule(
+    plan: Plan, rapid_s: float = 2.0, facing: synth.Facing = synth.Facing.PAUSED
+) -> tuple[list, list[tuple[float, float]]]:
+    """A timeline as the widget writes it for synth.record(plan, facing=facing), and the true
+    cut times."""
     t, timeline, contact = 3.0, [{"t": 1000.0, "event": "record"}], []
+    faced = {leg.passes[0].id: leg.face_s for leg in plan.legs if leg.reface_mm > 0}
     for p in plan.passes:
+        if facing is synth.Facing.HEARD:
+            t += faced.get(p.id, 0.0)
         dwell = (t + rapid_s, t + rapid_s + plan.dwell_s)
         start = t + rapid_s + plan.dwell_s + p.lead_in_s
         contact.append((start, start + p.expected_cut_s))
@@ -164,7 +170,7 @@ def test_cuts_longer_than_a_minute_are_found_too(setup):
 
     plan = round1(setup)
     long = tuple(dataclasses.replace(p, expected_cut_s=90.0) for p in plan.passes[:4])
-    plan = dataclasses.replace(plan, passes=long)
+    plan = dataclasses.replace(plan, legs=(dataclasses.replace(plan.legs[0], passes=long),))
     recording = synth.record(plan, seed=5)
     found = audio.find_cuts(recording, synth.RATE, plan)
     assert sorted(found.matches) == [0, 1, 2, 3]
@@ -314,8 +320,8 @@ def test_a_cut_stopped_just_after_contact_keeps_its_step(setup):
     results = session.analyze(plan, recording, synth.RATE, "r.wav", Thresholds(), timeline=stopped)
     # Too short to hear, but the cutter reached the face: aborted, no verdict.
     assert results.passes[3].status is PassStatus.ABORTED and results.passes[3].verdict is None
-    face, remnant = session.face_after(session.Round(None, plan, results))
-    assert remnant == plan.passes[3].width_mm
+    face = session.face_after(session.Round(None, plan, results))
+    assert face.remnant_mm == plan.passes[3].width_mm
 
     # Stopped during the lead-in: the cutter never met the stock.
     cut3["end"] = cut3["start"] + plan.passes[3].lead_in_s / 2
@@ -350,9 +356,10 @@ def test_a_hold_before_contact_then_stop_cuts_nothing():
     assert 2 not in session.placements_from_timeline(plan, stopped)
     results = session.analyze(plan, recording, synth.RATE, "r.wav", Thresholds(), timeline=stopped)
     assert results.passes[2].status is PassStatus.NOT_RUN
-    face, remnant = session.face_after(session.Round(None, plan, results))
+    face = session.face_after(session.Round(None, plan, results))
     widths = [p.width_mm for p in plan.passes]
-    assert (face, remnant) == pytest.approx((plan.face_y_start_mm + sum(widths[:2]), 0.0))
+    start = plan.legs[0].face_y_start_mm
+    assert (face.y_mm, face.remnant_mm) == pytest.approx((start + sum(widths[:2]), 0.0))
 
 
 @pytest.mark.parametrize(
@@ -394,8 +401,8 @@ def test_a_cut_no_louder_than_the_spindle_in_the_air_is_not_called_stable(setup)
             assert p.status is PassStatus.ANALYSED and p.verdict is not None, p
             assert p.over_air_db > session.QUIET_DB
     # The face still moved through them: the next round starts behind them.
-    face, _ = session.face_after(session.Round(Path("r"), plan, results))
-    assert face == pytest.approx(plan.face_y_start_mm + plan.consumed_mm)
+    face = session.face_after(session.Round(Path("r"), plan, results))
+    assert face.y_mm == pytest.approx(plan.legs[-1].face_y_end_mm)
 
 
 @pytest.mark.parametrize(
@@ -427,8 +434,37 @@ def test_a_recording_that_ends_before_the_last_pass_still_moves_the_face(ending,
     assert last.status is PassStatus.QUIET and last.status not in session.UNHEARD
     assert (last.verdict, last.prominence_db, last.excess_db) == (None, None, None)
     assert {p.status for p in results.passes[:-1]} == {PassStatus.ANALYSED}
-    face, _ = session.face_after(session.Round(Path("r"), plan, results))
-    assert face == pytest.approx(plan.face_y_start_mm + plan.consumed_mm)
+    face = session.face_after(session.Round(Path("r"), plan, results))
+    assert face.y_mm == pytest.approx(plan.legs[-1].face_y_end_mm)
     path = tmp_path / session.RESULTS_FILE
     results.save(path)
     assert session.Results.load(path) == results
+
+
+def assert_heard_right(plan: Plan, results, contact: list[tuple[float, float]] | None = None):
+    for index, (p, result) in enumerate(zip(plan.passes, results.passes, strict=True)):
+        assert result.status is PassStatus.ANALYSED, p.id
+        truth = synth.DEFAULT_MACHINE.chatters(p.rpm, p.width_mm, plan.flutes, plan.axial_depth_mm)
+        assert (result.verdict is Verdict.UNSTABLE) == truth, p.id
+        if contact is not None:
+            assert result.start_s == pytest.approx(contact[index][0], abs=0.01), p.id
+
+
+def test_cuts_are_put_on_their_passes_when_the_top_is_faced_midway(write_setup):
+    from test_plan import spilled
+
+    _, plan = spilled(write_setup)
+    faced = [n for n, leg in enumerate(plan.legs) if leg.reface_mm > 0]
+    assert faced and faced[0] > 0 and plan.legs[faced[0]].face_s > 60
+
+    # The widget records on through the facing, a long loud chatter; its windows place
+    # every cut, and the facing, in none of them, is never analysed.
+    timeline, contact = schedule(plan, facing=synth.Facing.HEARD)
+    heard = synth.record(plan, seed=3, facing=synth.Facing.HEARD)
+    results = session.analyze(plan, heard, synth.RATE, "r.wav", Thresholds(), timeline=timeline)
+    assert_heard_right(plan, results, contact)
+
+    # From the command line, the recording paused through the facing as the program says:
+    # the cuts found by their sound alone fall on the right passes, across every leg.
+    paused = synth.record(plan, seed=3)
+    assert_heard_right(plan, session.analyze(plan, paused, synth.RATE, "r.wav", Thresholds()))

@@ -159,13 +159,21 @@ class App:
             "planner": r.plan.planner,
             "program": self.program_name(r),
             "run_time_s": round(r.plan.run_time_s),
-            "face_y_start_mm": r.plan.face_y_start_mm,
-            "face_y_end_mm": round(r.plan.face_y_start_mm + r.plan.consumed_mm, 2),
-            "lane": r.plan.lane,
             "lanes": r.plan.lanes,
-            "lane_x_mm": list(lane_x_mm(self.setup, r.plan.lane, r.plan.lanes)),
-            "top_mm": r.plan.top_mm,
-            "reface_mm": r.plan.reface_mm,
+            # Where the round cuts, in the order it runs: from each leg's first pass on, one
+            # lane's face, with the top faced down first where `reface_mm` says so.
+            "legs": [
+                {
+                    "lane": leg.lane,
+                    "lane_x_mm": list(lane_x_mm(self.setup, leg.lane, r.plan.lanes)),
+                    "face_y_start_mm": leg.face_y_start_mm,
+                    "face_y_end_mm": round(leg.face_y_end_mm, 2),
+                    "top_mm": leg.top_mm,
+                    "reface_mm": leg.reface_mm,
+                    "first_pass": leg.passes[0].id,
+                }
+                for leg in r.plan.legs
+            ],
             "analysed": r.results is not None,
             "has_recording": (r.path / RECORDING_FILE).exists(),
             "passes": passes,

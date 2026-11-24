@@ -93,6 +93,7 @@ th, td { padding: 2px 4px; text-align: right; border-bottom: 1px solid #eee; }
 th { color: #777; font-weight: normal; }
 th:last-child, td:last-child { text-align: left; }
 tr.prep td { color: #999; }
+tr.leg td { color: #555; font-style: italic; padding-top: 6px; }
 td.stable { color: #3c763d; }
 td.unstable { color: #a94442; font-weight: bold; }
 

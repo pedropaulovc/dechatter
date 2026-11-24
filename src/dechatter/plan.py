@@ -1,4 +1,5 @@
-"""Test plans: the ordered passes of one round, and the envelope that bounds them."""
+"""Test plans: the ordered passes of one round, where on the stock they run, and the
+envelope that bounds them."""
 
 from __future__ import annotations
 
@@ -7,6 +8,7 @@ import math
 from dataclasses import asdict, dataclass
 from datetime import date
 from enum import StrEnum
+from functools import cached_property
 from pathlib import Path
 
 import numpy as np
@@ -14,10 +16,13 @@ import numpy as np
 from . import materials
 from .config import Direction, Setup, SpindleControl
 
-SCHEMA = 2  # 2: dechatter 0.2.0 (planned_on, per-pass chip loads)
+# 2: dechatter 0.2.0 (planned_on, per-pass chip loads); 3: 0.6.0 (a round in legs, across
+# lanes and faced tops)
+SCHEMA = 3
 SPINDLE_EFFICIENCY = 0.8
 SPEED_TOLERANCE_RPM = 0.5
 WIDTH_TOLERANCE_MM = 1e-6
+DEPTH_TOLERANCE_MM = 1e-6
 
 
 class PlanError(RuntimeError):
@@ -58,6 +63,26 @@ class Pass:
 
 
 @dataclass(frozen=True)
+class Leg:
+    """Part of a round cut on one lane's face. With `reface_mm`, the program first takes the
+    top down that much, to `top_mm` below Z0, its feed moves taking `face_s`. Then the passes
+    cut the face back from `face_y_start_mm`, no further than `lane_cap_mm`: the face the lane
+    before it was left with (None: the stock's width)."""
+
+    lane: int
+    face_y_start_mm: float
+    passes: tuple[Pass, ...]
+    lane_cap_mm: float | None = None
+    top_mm: float = 0.0
+    reface_mm: float = 0.0
+    face_s: float = 0.0
+
+    @property
+    def face_y_end_mm(self) -> float:
+        return self.face_y_start_mm + sum(p.width_mm for p in self.passes)
+
+
+@dataclass(frozen=True)
 class Plan:
     round: int
     planner: PlannerKind
@@ -65,33 +90,34 @@ class Plan:
     diameter_mm: float
     axial_depth_mm: float
     chip_load_mm: float
-    face_y_start_mm: float
     dwell_s: float
     plunge_s: float  # feed move from the clearance plane down to depth, beside the stock
-    passes: tuple[Pass, ...]
+    # The passes in the order they run, in legs of one lane's face each: the round fills what
+    # is left of its lane, goes on into the lanes after it, and once every lane is used may
+    # face the top down and start again at the first lane (1 is the one the cutter meets first).
+    legs: tuple[Leg, ...]
     planned_on: str  # ISO date
-    # The lane of the stock the round cuts (1 is the first the cutter meets), of how many,
-    # and how far back its face may go: the face the lane before it was left with.
-    lane: int = 1
     lanes: int = 1
-    lane_cap_mm: float | None = None
-    # How far below Z0 the stock's top stands for this round, and how much of it the round
-    # faces off first to get there (0: none); facing's feed moves take `face_s`.
-    top_mm: float = 0.0
-    reface_mm: float = 0.0
-    face_s: float = 0.0
     schema: int = SCHEMA
 
-    @property
-    def consumed_mm(self) -> float:
-        return sum(p.width_mm for p in self.passes)
+    @cached_property
+    def passes(self) -> tuple[Pass, ...]:
+        return tuple(p for leg in self.legs for p in leg.passes)
+
+    def leg_of(self, index: int) -> tuple[int, int]:
+        """(leg, place in it) of the pass at `index` in `passes`."""
+        for number, leg in enumerate(self.legs):
+            if index < len(leg.passes):
+                return number, index
+            index -= len(leg.passes)
+        raise IndexError(index)
 
     @property
     def run_time_s(self) -> float:
-        """Feed moves and dwells. Rapids come on top and depend on the machine."""
+        """Feed moves and dwells, facing included. Rapids come on top and depend on the machine."""
         per_pass = self.dwell_s + self.plunge_s
         cuts = sum(per_pass + p.lead_in_s + p.expected_cut_s for p in self.passes)
-        return self.face_s + cuts
+        return sum(leg.face_s for leg in self.legs) + cuts
 
     def save(self, path: Path) -> None:
         # NaN and infinity are not JSON (the widget cannot read them back): refuse them here.
@@ -103,8 +129,18 @@ class Plan:
         data = json.loads(path.read_text(encoding="utf-8"))
         if data.get("schema") != SCHEMA:
             raise SchemaError(path, data.get("schema"), SCHEMA)
-        passes = tuple(Pass(**{**p, "kind": PassKind(p["kind"])}) for p in data.pop("passes"))
-        return Plan(**{**data, "planner": PlannerKind(data["planner"]), "passes": passes})
+        legs = tuple(
+            Leg(
+                **{
+                    **leg,
+                    "passes": tuple(
+                        Pass(**{**p, "kind": PassKind(p["kind"])}) for p in leg["passes"]
+                    ),
+                }
+            )
+            for leg in data.pop("legs")
+        )
+        return Plan(**{**data, "planner": PlannerKind(data["planner"]), "legs": legs})
 
 
 @dataclass(frozen=True)
@@ -328,19 +364,40 @@ def lane_budget_mm(setup: Setup, lane_cap_mm: float | None) -> float:
     return min(setup.stock.width_mm, math.inf if lane_cap_mm is None else lane_cap_mm)
 
 
-def _fit(
-    setup: Setup,
-    env: Envelope,
-    face_y_mm: float,
-    remnant_mm: float,
-    lane_cap_mm: float | None,
-    tests: list[tuple],
+@dataclass(frozen=True)
+class Face:
+    """Where cutting can go on: a lane's front face `y_mm` back from Y0, the step an aborted
+    pass left on it, how far back the lane may go (None: the stock's width), and how far below
+    Z0 the top stands."""
+
+    lane: int = 1
+    y_mm: float = 0.0
+    remnant_mm: float = 0.0
+    cap_mm: float | None = None
+    top_mm: float = 0.0
+
+
+FRESH = Face()  # fresh stock: the first lane's face at Y0, the top at Z0
+
+
+def cut_order(setup: Setup, tests: list[tuple]) -> list[tuple]:
+    """The tests in the order a round cuts them: narrowest first, a gradual ramp; with a manual
+    spindle each speed's together, lightest first, since every speed change is a stop at the
+    machine. Equal cuts keep their order: a chip-load sweep's, lightest first."""
+    if setup.machine.spindle is SpindleControl.MANUAL:
+        return sorted(tests, key=lambda t: (t[0], t[1]))
+    return sorted(tests, key=lambda t: (t[1], t[0]))
+
+
+def _fill(
+    setup: Setup, env: Envelope, face: Face, tests: list[tuple]
 ) -> tuple[list[tuple[float, float]], list[tuple]]:
-    """(face preparation, the tests that fit after it), narrowest tests first."""
-    prep = preparation_passes(setup, env, remnant_mm)
-    budget = lane_budget_mm(setup, lane_cap_mm) - face_y_mm - sum(w for _, w in prep)
+    """(face preparation, the tests that fit after it): `tests` in order, up to the first that
+    does not fit."""
+    prep = preparation_passes(setup, env, face.remnant_mm)
+    budget = lane_budget_mm(setup, face.cap_mm) - face.y_mm - sum(w for _, w in prep)
     kept = []
-    for test in sorted(tests, key=lambda t: (t[1], t[0])):
+    for test in tests:
         if test[1] > budget + 1e-9:
             break
         budget -= test[1]
@@ -348,16 +405,130 @@ def _fit(
     return prep, kept
 
 
-def fitting(
+def _leg(
     setup: Setup,
     env: Envelope,
-    face_y_mm: float,
-    remnant_mm: float,
+    lanes: int,
+    face: Face,
+    reface_mm: float,
+    prep: list[tuple[float, float]],
     tests: list[tuple],
-    lane_cap_mm: float | None = None,
-) -> int:
-    """How many of the tests a lane's face, as it stands, still has room for."""
-    return len(_fit(setup, env, face_y_mm, remnant_mm, lane_cap_mm, tests)[1])
+    first_id: int,
+) -> Leg:
+    """The leg that prepares `face`, after taking the top down `reface_mm` to it, and cuts
+    `tests` on it; its passes are numbered from `first_id`."""
+    if setup.machine.spindle is SpindleControl.MANUAL:
+        # Every speed change is a stop at the machine: prepare the face at the leg's first speed.
+        prep = [(tests[0][0], width) for _, width in prep]
+    planned = [
+        *[(PassKind.CLEANUP, rpm, width) for rpm, width in prep[:-1]],
+        (PassKind.TRUING, *prep[-1]),
+        *[(PassKind.TEST, *test) for test in tests],
+    ]
+    passes = []
+    y = face.y_mm
+    for kind, rpm, width, *rest in planned:
+        y += width
+        path = travel(setup, face.lane, lanes, y, width)
+        pass_id = first_id + len(passes)
+        passes.append(make_pass(setup, env, pass_id, kind, rpm, width, *rest, path=path))
+    # The top comes down at the leg's first speed: no extra spindle stop.
+    feed = env.chip_load_mm * setup.tool.flutes * passes[0].rpm
+    return Leg(
+        lane=face.lane,
+        face_y_start_mm=round(face.y_mm, 3),
+        passes=tuple(passes),
+        lane_cap_mm=None if face.cap_mm is None else round(face.cap_mm, 3),
+        top_mm=round(face.top_mm, 3),
+        reface_mm=round(reface_mm, 3),
+        face_s=round(facing_s(setup, facing_rows(setup, face.top_mm, reface_mm), feed), 2),
+    )
+
+
+def _lay_out(
+    setup: Setup,
+    env: Envelope,
+    tests: list[tuple],
+    face: Face,
+    cut_mm: tuple[float, ...],
+    lanes: int,
+) -> tuple[list[Leg], list[tuple]]:
+    """The legs the tests fill in cut order from `face` on, and the tests left over.
+
+    A leg takes the tests that fit on its face, up to the first that does not. The next leg
+    is the next lane: a fresh face at Y0, cut back no further than this one was. Once the
+    last lane is used, or the face is flat only above the round's depth (`cut_mm`: the depths
+    cut into the top as it stands), the top comes down below the deepest of those cuts, given
+    stock.height_mm and while the next cut's bottom stays the clearance above it, and the
+    round goes on at the first lane.
+    """
+    depth = setup.cut.axial_depth_mm
+    left = cut_order(setup, tests)
+    legs: list[Leg] = []
+    here, cut, reface = face, list(cut_mm), 0.0
+    while left:
+        flat = not cut or depth <= min(cut) + DEPTH_TOLERANCE_MM
+        prep, kept = _fill(setup, env, here, left) if flat else ([], [])
+        if kept:
+            first_id = sum(len(leg.passes) for leg in legs)
+            legs.append(_leg(setup, env, lanes, here, reface, prep, kept, first_id))
+            left = left[len(kept) :]
+            cut.append(depth)
+            reface = 0.0
+            here = Face(here.lane, legs[-1].face_y_end_mm, 0.0, here.cap_mm, here.top_mm)
+        if not left:
+            break
+        if flat and here.y_mm > 0 and here.lane < lanes:
+            here = Face(here.lane + 1, 0.0, 0.0, here.y_mm, here.top_mm)
+            continue
+        # Every lane of this top is used, or none would hold the next test (a lane after this
+        # one may go no further back): only a fresh top can.
+        height = setup.stock.height_mm
+        if height is None or not cut:
+            break
+        down = max(cut) + REFACE_EXTRA_MM
+        lower = Face(top_mm=here.top_mm + down)
+        if lower.top_mm + depth + setup.program.clearance_mm > height:
+            break
+        if not _fill(setup, env, lower, left)[1]:
+            break
+        here, cut, reface = lower, [], down
+    return legs, left
+
+
+def _no_room(
+    setup: Setup,
+    round_no: int,
+    tests: list[tuple],
+    face: Face,
+    cut_mm: tuple[float, ...],
+    lanes: int,
+    legs: list[Leg],
+) -> str:
+    if setup.stock.height_mm is None:
+        hint = (
+            "Mount fresh stock and plan with new stock, or give the stock's height above "
+            "the vise jaws ([stock] height_mm) so dechatter can face the top down itself"
+        )
+    else:
+        hint = "The top cannot come down further: mount fresh stock and plan with new stock"
+    if legs:
+        return (
+            f"the chip-load sweep needs room for all its {len(tests)} cuts: no face left has "
+            f"room for them. {hint}."
+        )
+    depth = setup.cut.axial_depth_mm
+    if cut_mm and depth > min(cut_mm) + DEPTH_TOLERANCE_MM:
+        return (
+            f"round {round_no} would cut {depth:g} mm deep, but this block's face is only flat "
+            f"down to {min(cut_mm):g} mm. {hint}."
+        )
+    room = lane_budget_mm(setup, face.cap_mm)
+    where = f" in lane {face.lane} of {lanes}" if lanes > 1 else ""
+    return (
+        f"stock exhausted: {max(room - face.y_mm, 0.0):.1f} mm left of {room:.1f} mm{where}, "
+        f"and no face after it has room. {hint}."
+    )
 
 
 def assemble(
@@ -365,49 +536,25 @@ def assemble(
     env: Envelope,
     round_no: int,
     planner: PlannerKind,
-    face_y_mm: float,
-    remnant_mm: float,
     tests: list[tuple],
     *,
-    lane: int = 1,
+    face: Face = FRESH,
+    cut_mm: tuple[float, ...] = (),
     lanes: int | None = None,
-    lane_cap_mm: float | None = None,
-    top_mm: float = 0.0,
-    reface_mm: float = 0.0,
 ) -> Plan:
-    """Order tests by increasing width (gradual ramp), prepend face preparation, fit the stock.
+    """Lay the tests out on the stock from `face` on, in legs that each prepare their face
+    first (see _lay_out), on the setup's lanes unless `lanes` says otherwise.
 
     A test is (rpm, width, P(stable)), or in a chip-load sweep (rpm, width, None, chip load),
-    already lightest first: equal widths keep their order. The round cuts lane `lane` of the
-    setup's lanes (unless `lanes` says otherwise), whose face stands at `face_y_mm`.
+    already lightest first. `cut_mm` are the depths cut into the top as it stands (none: it
+    is untouched). Tests left over once the stock runs out are dropped; but a chip-load sweep
+    must fit whole: cut short, its heaviest chip loads would go untried and the lightest read
+    as a limit.
     """
     lanes = lanes or auto_lanes(setup, env)
-    prep, kept = _fit(setup, env, face_y_mm, remnant_mm, lane_cap_mm, tests)
-    if not kept:
-        room = lane_budget_mm(setup, lane_cap_mm)
-        where = f" in lane {lane} of {lanes}" if lanes > 1 else ""
-        raise PlanError(
-            f"stock exhausted: {max(room - face_y_mm, 0.0):.1f} mm left of "
-            f"{room:.1f} mm{where}. Mount fresh stock and rerun with --new-stock."
-        )
-
-    if setup.machine.spindle is SpindleControl.MANUAL:
-        # Every speed change is a stop at the machine: run each speed's cuts together,
-        # lightest first, and prepare the face at the first of those speeds.
-        kept.sort(key=lambda t: (t[0], t[1]))
-        prep = [(kept[0][0], width) for _, width in prep]
-
-    planned = [
-        *[(PassKind.CLEANUP, rpm, width) for rpm, width in prep[:-1]],
-        (PassKind.TRUING, *prep[-1]),
-        *[(PassKind.TEST, *test) for test in kept],
-    ]
-    passes = []
-    face = face_y_mm
-    for kind, rpm, width, *rest in planned:
-        face += width
-        path = travel(setup, lane, lanes, face, width)
-        passes.append(make_pass(setup, env, len(passes), kind, rpm, width, *rest, path=path))
+    legs, left = _lay_out(setup, env, tests, face, cut_mm, lanes)
+    if not legs or (left and planner is PlannerKind.SWEEP):
+        raise PlanError(_no_room(setup, round_no, tests, face, cut_mm, lanes, legs))
     return Plan(
         round=round_no,
         planner=planner,
@@ -415,7 +562,6 @@ def assemble(
         diameter_mm=setup.tool.diameter_mm,
         axial_depth_mm=setup.cut.axial_depth_mm,
         chip_load_mm=env.chip_load_mm,
-        face_y_start_mm=round(face_y_mm, 3),
         dwell_s=setup.program.dwell_s,
         plunge_s=round(
             (setup.program.clearance_mm + setup.cut.axial_depth_mm)
@@ -423,21 +569,9 @@ def assemble(
             * 60,
             2,
         ),
-        passes=tuple(passes),
+        legs=tuple(legs),
         planned_on=date.today().isoformat(),
-        lane=lane,
         lanes=lanes,
-        lane_cap_mm=None if lane_cap_mm is None else round(lane_cap_mm, 3),
-        top_mm=round(top_mm, 3),
-        reface_mm=round(reface_mm, 3),
-        face_s=round(
-            facing_s(
-                setup,
-                facing_rows(setup, top_mm, reface_mm),
-                env.chip_load_mm * setup.tool.flutes * passes[0].rpm,
-            ),
-            2,
-        ),
     )
 
 
