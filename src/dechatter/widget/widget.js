@@ -1218,7 +1218,9 @@ function renderStep() {
     const settled = deep
       ? `${length(state.level_mm, units(), { mmToo: true })} width is settled. Next come cuts ${held(state.next_level_mm, { mmToo: true })}, starting from the depths that were stable.`
       : `${length(state.level_mm, units(), { mmToo: true })} depth is settled. Next come cuts ${held(state.next_level_mm, { mmToo: true })}, starting from the widths that were stable.`;
-    const next = moved ? settled : 'Plan the next cuts from what was measured.';
+    // A check of the other direction says nothing of whether its level is settled.
+    const afterCheck = state.rounds.at(-1)?.planner === 'check';
+    const next = moved && !afterCheck ? settled : 'Plan the next cuts from what was measured.';
     step.append(el('p', {}, seedPlanText() ?? (first ? 'Plan a coarse grid of test cuts.' : next)));
     step.append(el('p', {}, plan, ...(first ? [] : [' on the ', stock])));
     // A session an older dechatter converged may search on here: its check is on offer anyway.
@@ -1480,7 +1482,7 @@ function renderMap() {
 // the one asked for. A chip-load sweep's cuts stay off the map.
 function speedCell(round, pass) {
   const heard = pass.heard_rpm === null ? null : Math.round(pass.heard_rpm);
-  const mapped = pass.kind === 'test' && pass.verdict !== null && round.planner !== 'sweep';
+  const mapped = pass.kind === 'test' && pass.verdict !== null && !['sweep', 'check'].includes(round.planner);
   if (heard !== null && heard !== pass.rpm) {
     const use = mapped ? ': the map and the results use the speed heard' : '';
     return el('td', { title: `Asked for ${pass.rpm} rpm, heard ${heard} rpm in the cut${use}.` }, `${pass.rpm} → ${heard}`);

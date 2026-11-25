@@ -1069,9 +1069,15 @@ def _no_check(setup: Setup, level_mm: float | None) -> str:
 
 def check_of(setup: Setup, env: Envelope, best: StableCut) -> list:
     """The cuts a check of `best` makes, at the speed to ask for to cut it again (ask_rpm),
-    not the one heard in it: the dial goes back where it was."""
+    not the one heard in it: the dial goes back where it was. None where the power cap at
+    that speed trims the best cut itself (the speed stops changed since): such a check could
+    never answer for it."""
     at = at_level(setup, level_of(setup, best))
-    return check_tests(at, env, ask_rpm(env, best), engagement_of(setup, best))
+    size = engagement_of(setup, best)
+    tests = check_tests(at, env, ask_rpm(env, best), size)
+    if not any(abs(test[1] - size) <= ENGAGEMENT_TOLERANCE_MM for test in tests):
+        return []
+    return tests
 
 
 @dataclass(frozen=True)

@@ -315,13 +315,11 @@ def test_a_check_ramps_up_to_the_best_cut_and_a_step_beyond(setup, write_setup):
     # No step beyond the widest width searched, nor over the power cap.
     top = env.engagement_top_mm
     assert [t[1] for t in check_tests(setup, env, 4000.0, top)][-1] == top
-    weak = load_setup(write_setup(p=("spindle_power_hp = 2.0", "spindle_power_hp = 0.3")))
+    # 0.27 hp caps 4000 rpm between the 2 mm cut and the step beyond it.
+    weak = load_setup(write_setup(p=("spindle_power_hp = 2.0", "spindle_power_hp = 0.27")))
     weak_env = envelope(weak)
-    capped = check_tests(weak, weak_env, 4000.0, 2.0)
-    assert capped and all(
-        mrr_mm3_min(weak, weak_env, rpm, size) <= weak_env.mrr_limit_mm3_min
-        for rpm, size, _ in capped
-    )
+    assert [t[1] for t in check_tests(setup, env, 4000.0, 2.0)] == [1.0, 1.5, 2.0, 2.1]
+    assert [t[1] for t in check_tests(weak, weak_env, 4000.0, 2.0)] == [1.0, 1.5, 2.0]
     for bad in ("check_fractions = [0, 1]", "check_fractions = [1.2]", "check_steps_beyond = -1"):
         with pytest.raises(ConfigError, match="check_"):
             load_setup(

@@ -17,6 +17,7 @@ from .config import WATTS_PER_HP, Direction, SpindleControl, Vary, read_setup
 from .detect import Verdict
 from .gcode import MM_PER_INCH, Units
 from .plan import (
+    FOLLOW_UP,
     SPINDLE_EFFICIENCY,
     Milling,
     Order,
@@ -567,7 +568,7 @@ def render(session_dir: Path, units: Units) -> str:
                 )
             ran = p.kind is PassKind.TEST and result is not None
             if ran and not heard and result.status not in session.UNHEARD:
-                mapped = result.verdict is not None and r.plan.planner is not PlannerKind.SWEEP
+                mapped = result.verdict is not None and r.plan.planner not in FOLLOW_UP
                 heard = "not heard: mapped as asked" if mapped else "not heard"
             rows.append(
                 [

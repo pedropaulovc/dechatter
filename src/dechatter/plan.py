@@ -3,7 +3,6 @@ envelope that bounds them."""
 
 from __future__ import annotations
 
-import dataclasses
 import json
 import math
 from dataclasses import asdict, dataclass, replace
@@ -123,7 +122,7 @@ def cutting(setup: Setup, direction: Direction) -> Setup:
     """The setup, cutting in `direction`: lanes, travel and the program follow it."""
     if setup.cut.direction is direction:
         return setup
-    return dataclasses.replace(setup, cut=dataclasses.replace(setup.cut, direction=direction))
+    return replace(setup, cut=replace(setup.cut, direction=direction))
 
 
 @dataclass(frozen=True)
@@ -863,8 +862,9 @@ def _lay_out(
             break
         beyond = Face(here.lane + 1, 0.0, 0.0, here.y_mm, here.top_mm)
         further = here.y_mm > 0 and here.lane < open_here and not unfit
-        # A fresh lane has no face of its own yet: deepest first again, as on a fresh top.
-        ahead = cut_order(setup, left, lanes)
+        # A fresh lane is clear as deep as the lane before was cut at its start: the cuts no
+        # deeper than that first, deepest first, whatever this lane's face allowed.
+        ahead = cut_order(setup, left, lanes, _lane_floor(kind, beyond.lane, 0.0, cut))
         if further and _fill(setup, env, beyond, ahead, cut)[1]:
             here, left = beyond, ahead
             continue

@@ -4,6 +4,7 @@ or side milling on the front face."""
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import pytest
@@ -632,3 +633,34 @@ def test_full_width_slots_get_no_check_but_a_narrower_width_does():
         session.StableCut(300.0, 0.5, 1500.0, 3.0, 1500.0, session.SpeedSource.ASKED),
     ]
     assert [best.width_mm for best in session.to_check(setup, env, found, [])] == [3.0]
+
+
+def test_a_fresh_lane_takes_the_cuts_the_lane_before_cleared_first():
+    """Side milling deepest first: the next lane is clear only as deep as the lane before it
+    was cut, so the cuts no deeper than that go there first, and the deeper one gets a top
+    of its own instead of keeping them all off the lane."""
+    setup = slots(**SIDE, **TWO_LANES)
+    env = envelope(setup)
+    tests = [(1500.0, 1.25, None), (1500.0, 0.9, None), (1500.0, 0.6, None)]
+    face = Face(1, 45.0, 0.0, math.inf, 0.0)  # room for one more cut on lane 1
+    plan = assemble(setup, env, 3, PlannerKind.BAYES, tests, face=face, made=(Made(1, 5.0, 1.0),))
+    legs = [
+        (leg.lane, leg.reface_mm > 0, [p.depth_mm for p in leg.passes if p.kind is PassKind.TEST])
+        for leg in plan.legs
+    ]
+    assert legs == [(1, False, [0.9]), (2, False, [0.6]), (1, True, [1.25])]
+
+
+def test_no_check_is_offered_where_the_power_cap_trims_the_best_cut_itself():
+    """The speed stops changed since the best cut was asked at 1500 rpm: a check asks for the
+    stop nearest the 1600 heard, where the power cap leaves that cut out. Its lighter cuts
+    could never answer for it, so none is offered."""
+    stops = ("max_rpm = 2800", 'max_rpm = 2800\nspindle = "manual"\nspeed_stops_rpm = [1000, 2000]')
+    weak = ("spindle_power_hp = 2.0", "spindle_power_hp = 0.25")
+    setup = slots(**SIDE, p=weak, s=stops)
+    env = envelope(setup)
+    best = session.StableCut(1917.0, 2.0, 1600.0, 3.0, 1500.0, session.SpeedSource.HEARD)
+    assert session.ask_rpm(env, best) == 2000
+    assert [t[1] for t in check_tests(setup, env, 2000.0, 2.0)] == [1.0, 1.5]
+    assert session.check_of(setup, env, best) == []
+    assert session.to_check(setup, env, [best], []) == []
