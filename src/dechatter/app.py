@@ -49,10 +49,11 @@ class App:
         )
         self.setup = self.source.setup
         self.env = envelope(self.setup)
-        # The session this one was started from, if any: it must be the same tool assembly.
+        # The session this one was started from, if any: it must be the same tool assembly,
+        # but for a stickout still to confirm, which saving the wizard confirms and checks.
         self.seed = seeding.load(session_dir)
         if self.seed is not None:
-            seeding.check(self.seed, self.setup)
+            seeding.check(self.seed, self.setup, self.source.pending)
         self.recording_round: int | None = None
         self.discarded_round: int | None = None  # unrun round a setup change threw away
 
@@ -173,6 +174,10 @@ class App:
             "status": status,
             # What round 1 confirms of it at the level shown: "limits" or "speeds".
             "transfer": seeding.transfer(self.seed, at, self.env),
+            # Its stickout, which this session's must keep within the tolerance: shown while
+            # this one's is still to confirm on the machine, and so not yet compared.
+            "stickout_mm": self.seed.setup.tool.stickout_mm,
+            "stickout_tolerance_mm": seeding.STICKOUT_TOLERANCE_MM,
         }
 
     def _best_json(self, best: session.StableCut) -> dict:

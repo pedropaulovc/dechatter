@@ -25,10 +25,12 @@ from .audio import AudioError
 from .config import (
     TEMPLATE,
     ConfigError,
+    SetupSource,
     Vary,
     dump_setup,
     parse_setup,
     setup_defaults,
+    setup_source,
     setup_values,
     slot_wall_mm,
 )
@@ -42,6 +44,9 @@ log = logging.getLogger(__name__)
 class SetupLoad(StrEnum):
     LOADS = "loads"
     REFUSED = "refused"  # from dechatter 0.1.x, or damaged: only Delete applies
+    # Its seed keeps it from loading (damaged, or measured another assembly) and no round is
+    # planned: removing the seed (unseed) lets it load.
+    SEED_REFUSED = "seed_refused"
 
 
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
@@ -85,19 +90,8 @@ class Sessions:
             raise SessionError(f"session {name!r} already exists")
         text, seed = TEMPLATE, None
         if source:
-            origin = self._existing(source)
-            # The other session must open as it would in the widget, and its rounds belong
-            # to its setup: a setup changed by hand since they were cut measured other cuts.
-            measured = self._app(source).source
-            text = measured.text
-            rounds = session.load_rounds(origin)
-            session.check_measured(rounds, measured.setup)
-            passes = session.seed_passes(rounds)
-            if not passes:
-                raise SessionError(
-                    f"session {source!r} has no analysed cut with a verdict to start from"
-                )
-            seed = seeding.Seed(source, text, passes)
+            seed = self._seed_of(source)
+            text = seed.setup_text
         target.mkdir()
         try:
             (target / session.SETUP_FILE).write_text(text, encoding="utf-8")
@@ -108,8 +102,108 @@ class Sessions:
             shutil.rmtree(target, ignore_errors=True)
             raise
         if seed is not None:
-            log.info("%s: started from %d passes of %s", name, len(passes), source)
+            log.info("%s: started from %d passes of %s", name, len(seed.passes), source)
         return name
+
+    def _seed_of(self, source: str) -> seeding.Seed:
+        """What a session started from `source` keeps of it: its analysed passes that got a
+        verdict, with the setup they were measured with."""
+        origin = self._existing(source)
+        # The other session must open as it would in the widget, and its rounds belong to its
+        # setup: a setup changed by hand since they were cut measured other cuts.
+        measured = self._app(source).source
+        rounds = session.load_rounds(origin)
+        session.check_measured(rounds, measured.setup)
+        passes = session.seed_passes(rounds)
+        if not passes:
+            raise SessionError(
+                f"session {source!r} has no analysed cut with a verdict to start from"
+            )
+        return seeding.Seed(source, measured.text, passes)
+
+    def _before_round_1(self, target: Path, rule: str) -> None:
+        """Refuse a change to what a session starts from once a round is planned: its rounds
+        were planned, and its map built, with what it started from then."""
+        if session.contents(target).rounds:
+            raise SessionError(
+                f"session {target.name!r} has rounds, and {rule}. Reset it to discard them, or "
+                "create a new session"
+            )
+
+    def start_from(self, name: str, source: str) -> dict:
+        """Start a session that has no round yet from the session `source`; answer its state.
+
+        Unlike `create`, the session keeps its own setup, `[pending]` included: a prepared
+        session arrives with it. It must be the tool assembly `source` measured, but for a
+        stickout still to confirm on the machine, which saving the wizard confirms and checks.
+        `source` must hold an analysed cut as for `create`. To start from another session
+        instead, remove the seed first (`unseed`).
+        """
+        target = self._existing(name)
+        if source == name:
+            raise SessionError("a session cannot start from itself")
+        self._before_round_1(target, "a session's map can only be seeded before its first round")
+        app = self._app(name)  # its setup, and any seed it holds, must load
+        if app.seed is not None:
+            raise SessionError(
+                f"session {name!r} already starts from {app.seed.source}: choose Don't start "
+                f"from {app.seed.source} first"
+            )
+        if setup_source(app.source.text) is SetupSource.TEMPLATE:
+            # The example setup is no tool assembly to compare: New takes over the earlier
+            # session's setup instead.
+            raise SessionError(
+                f"session {name!r} still holds the example setup: fill it in with the setup "
+                "wizard first, or create the session with New, starting from the earlier one"
+            )
+        seed = self._seed_of(source)
+        pending = {at for at, _ in app.source.pending}
+        found = seeding.mismatches(seed.setup, app.setup, pending)
+        if found:
+            raise seeding.SeedError(
+                f"session {name!r} cannot start from {source}, which measured another tool "
+                f"assembly: {'; '.join(found)}. A stability map belongs to one machine, holder, "
+                "cutter and stickout"
+            )
+        path = target / seeding.SEED_FILE
+        try:
+            seed.save(path)
+            self._apps.pop(name, None)
+            shown = self.state(name)
+        except Exception:
+            # Not half a seed: the session goes on as it was, started on its own.
+            path.unlink(missing_ok=True)
+            self._apps.pop(name, None)
+            raise
+        later = " (its stickout once confirmed)" if seeding.STICKOUT in pending else ""
+        log.info("%s: started from %d passes of %s%s", name, len(seed.passes), source, later)
+        return shown
+
+    def unseed(self, name: str) -> dict:
+        """Stop a session that has no round yet starting from another; answer its state. Its
+        `seed.json` is removed, so round 1 is the grid; the setup stays as it is.
+
+        The seed is not read: one that is damaged, or measured another assembly than the
+        setup, so that the session does not load, can be removed too. A session that does not
+        load without it keeps it.
+        """
+        target = self._existing(name)
+        self._before_round_1(target, "a seed can only be removed before the first round")
+        path = target / seeding.SEED_FILE
+        if not path.exists():
+            raise SessionError(f"session {name!r} does not start from another session")
+        kept = path.read_bytes()
+        path.unlink()
+        self._apps.pop(name, None)
+        try:
+            shown = self.state(name)
+        except Exception:
+            # It may be the only copy of the earlier session's cuts.
+            path.write_bytes(kept)
+            self._apps.pop(name, None)
+            raise
+        log.info("%s: no longer starts from another session", name)
+        return shown
 
     def _existing(self, name: str) -> Path:
         """A session's directory, without reading anything in it: it may not load."""
@@ -148,11 +242,13 @@ class Sessions:
 
         The session it loads is kept, for the state asked next.
         """
-        self._existing(name)
+        target = self._existing(name)
         try:
             self._app(name)
         except EXPECTED as exc:
-            return {"status": SetupLoad.REFUSED, "reason": str(exc)}
+            removable = isinstance(exc, seeding.SeedError) and not session.contents(target).rounds
+            status = SetupLoad.SEED_REFUSED if removable else SetupLoad.REFUSED
+            return {"status": status, "reason": str(exc)}
         return {"status": SetupLoad.LOADS, "reason": ""}
 
     def delete(self, name: str) -> list[str]:

@@ -225,6 +225,10 @@ to confirm on the machine and plans nothing until they are: the setup wizard hig
 one with its note, opening the Advanced section that holds it, and saving the wizard writes
 the setup without `[pending]`. Export keeps the table while it is there.
 
+A prepared session can start from an earlier session in that browser measured on the same
+tool assembly: see [Starting from an earlier session](#starting-from-an-earlier-session). It
+keeps its own setup, `[pending]` included, and still plans nothing until the wizard is saved.
+
 ### Manual spindle
 
 If the spindle is started and set by hand, choose "me, by hand" on the wizard's first step
@@ -380,6 +384,24 @@ exported one there. The new session takes over that session's setup for you to c
 keeps a copy of its analysed test cuts that got a verdict (the detector's or one set by
 hand; a chip-load sweep is left out) with the setup they were measured with, in `seed.json`
 in its own folder. Export and Import carry it along, and the earlier session may be deleted.
+
+A session that has no round yet, such as a [prepared](#prepared-sessions) one, can start
+from an earlier session too: "Start from…", next to Setup, offers the same choice and
+Import. Unlike New, it keeps the session's own setup: only the analysed cuts and the setup
+they were measured with are written, to `seed.json`, so round 1 is the confirmation round
+below. It is refused, with the reason and nothing written, once the session has a round (a
+session's map can only be seeded before its first round; Reset discards the rounds), while
+it already starts from another, while it still holds the example setup (fill it in first, or
+use New), and when its setup is another tool assembly (below). A
+stickout the setup still marks under `[pending]` is a placeholder, so it is not compared
+then: the widget says it will be, and saving the wizard, which confirms it, refuses one more
+than 0.6 mm off the earlier session's, leaving the setup as it was. Until then the report
+says the stickout is still to confirm. Any other assembly field is compared as it stands,
+pending or not. Until round 1 is planned, "Don't start from …" in the same place removes
+`seed.json` after asking, and the session plans the coarse grid. It is offered too for a
+session that does not load because of its seed (damaged, or measured on another assembly),
+without reading it; a session that does not load without it keeps it. Once a round is
+planned, what a session started from is fixed.
 
 The setup may then change in what the new cuts differ in, but not in the assembly. Saving a
 setup with another machine name or weight, holder, cutter diameter (more than 0.05 mm),
