@@ -42,13 +42,21 @@ WORTH_REACHING = 0.5
 
 @dataclass(frozen=True)
 class Observation:
+    """A cut at the speed the spindle ran at. `asked_rpm` is the speed it was asked for
+    where `rpm` is the one heard in the cut; None where `rpm` is itself the speed asked for."""
+
     rpm: float
     engagement_mm: float
     verdict: Verdict
     chatter_hz: float | None = None
+    asked_rpm: float | None = None
     # Under 1: not cut in this session but carried over from the one it was started from
     # (see seeding). It counts as a cut misheard more often: misclassification ** weight.
     weight: float = 1.0
+
+    @property
+    def asked(self) -> float:
+        return self.rpm if self.asked_rpm is None else self.asked_rpm
 
 
 def made(observations: list[Observation]) -> list[Observation]:
@@ -114,9 +122,9 @@ DISPLAY_ENGAGEMENTS = 24
 
 
 def coarse(stability: StabilityMap) -> Coarse:
-    speeds = np.unique(
-        np.linspace(0, len(stability.speeds) - 1, DISPLAY_SPEEDS).round().astype(int)
-    )
+    # Evenly spaced in rpm, as the map is drawn: the speed stops make the axis uneven.
+    wanted = np.linspace(stability.speeds[0], stability.speeds[-1], DISPLAY_SPEEDS)
+    speeds = np.unique(np.abs(stability.speeds[:, None] - wanted[None, :]).argmin(axis=0))
     engagements = np.unique(
         np.linspace(0, len(stability.engagements) - 1, DISPLAY_ENGAGEMENTS).round().astype(int)
     )
@@ -141,6 +149,8 @@ def build_map(setup: Setup, env: Envelope, observations: list[Observation]) -> S
         env.engagements(engagement_step_mm(setup)),
         cfg.misclassification,
     )
+    # Each cut at the speed the spindle ran at, its reach a share of that speed. The chatter
+    # it made sets sweet spots by the true tooth passing, so they fall on the same speed axis.
     for obs in observations:
         stability.update(
             obs.rpm,
@@ -213,9 +223,10 @@ def mrr_grid(setup: Setup, env: Envelope, stability: StabilityMap) -> np.ndarray
 def best_stable(
     setup: Setup, env: Envelope, observations: list[Observation]
 ) -> list[tuple[float, Observation]]:
-    """Stable cuts made in this session, highest removal rate first, as (mm3/min, observation)."""
+    """Stable cuts made in this session, highest removal rate first, as (mm3/min, observation):
+    the rate of the feed each was cut at, programmed from the speed asked for."""
     stable = [o for o in made(observations) if o.verdict is Verdict.STABLE]
-    rated = [(float(mrr_mm3_min(setup, env, o.rpm, o.engagement_mm)), o) for o in stable]
+    rated = [(float(mrr_mm3_min(setup, env, o.asked, o.engagement_mm)), o) for o in stable]
     return sorted(rated, key=lambda pair: -pair[0])
 
 
@@ -243,17 +254,26 @@ def propose(
     p_measured = measured.p_stable()
     mrr = mrr_grid(setup, env, measured)
 
+    # With speed stops, a cut can only be made at one of them.
+    settable = env.settable(measured.speeds)[:, None]
     ranked = best_stable(setup, env, observations)
-    best = ranked[0][0] if ranked else float(mrr[-1, 0])
+    best = ranked[0][0] if ranked else float(mrr[settable[:, 0], 0].max())
     improvement = p_measured * np.clip(mrr / best - 1, 0, None)
 
     within_power = mrr <= env.mrr_limit_mm3_min
     reachable = p_measured >= WORTH_REACHING * cfg.probability_floor
-    if not np.any(within_power & reachable & (mrr > target_mm3_min)):
+    if not np.any(settable & within_power & reachable & (mrr > target_mm3_min)):
         return Proposal([], 0.0)
-    allowed = within_power & (p_measured >= cfg.probability_floor)
+    allowed = settable & within_power & (p_measured >= cfg.probability_floor)
+    lowest, highest = measured.speeds[0], measured.speeds[-1]
     for obs in made(observations):
-        allowed[measured.speed_index(obs.rpm), measured.engagement_index(obs.engagement_mm)] = False
+        # The cut is not made again: at the speed asked, nor at the speed heard, where each
+        # lies on the map (a spindle that ran off the speed asked can be heard beyond it, and
+        # the speed asked can lie between the search's bounds and its first step).
+        e = measured.engagement_index(obs.engagement_mm)
+        for rpm in {obs.asked, obs.rpm}:
+            if lowest <= rpm <= highest:
+                allowed[measured.speed_index(rpm), e] = False
 
     tests: list[tuple[float, float, float]] = []
     headline = 0.0

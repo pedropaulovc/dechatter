@@ -59,6 +59,9 @@ class Machine:
     min_rpm: int = 500
     name: str = ""
     spindle: SpindleControl = SpindleControl.PROGRAM
+    # A manual spindle whose speed control only comes to rest on certain speeds: the rpm of
+    # each, slowest first. Empty: any speed can be set.
+    speed_stops_rpm: tuple[int, ...] = ()
 
     @property
     def spindle_power_w(self) -> float:
@@ -213,19 +216,25 @@ def parse_setup(text: str, origin: str) -> Setup:
 
 PENDING = "pending"
 
-# The fields that go with one way of stepping the cut: the wizard shows them only then (the
-# `when` of its fields, in wizard.js).
+# The fields that go with one choice of another field, as `section.field` and its value: the
+# wizard shows them only then (the `when` of its fields, in wizard.js).
 ONLY_WITH = {
-    "cut.axial_depth_mm": Vary.WIDTH,
-    "cut.other_depths_mm": Vary.WIDTH,
-    "cut.width_max_mm": Vary.WIDTH,
-    "planner.round1_width_fractions": Vary.WIDTH,
-    "cut.radial_width_mm": Vary.DEPTH,
-    "cut.depth_max_mm": Vary.DEPTH,
-    "cut.other_widths_mm": Vary.DEPTH,
-    "program.slot_wall_mm": Vary.DEPTH,
-    "planner.round1_depth_fractions": Vary.DEPTH,
+    "cut.axial_depth_mm": ("cut.vary", Vary.WIDTH),
+    "cut.other_depths_mm": ("cut.vary", Vary.WIDTH),
+    "cut.width_max_mm": ("cut.vary", Vary.WIDTH),
+    "planner.round1_width_fractions": ("cut.vary", Vary.WIDTH),
+    "cut.radial_width_mm": ("cut.vary", Vary.DEPTH),
+    "cut.depth_max_mm": ("cut.vary", Vary.DEPTH),
+    "cut.other_widths_mm": ("cut.vary", Vary.DEPTH),
+    "program.slot_wall_mm": ("cut.vary", Vary.DEPTH),
+    "planner.round1_depth_fractions": ("cut.vary", Vary.DEPTH),
+    "machine.speed_stops_rpm": ("machine.spindle", SpindleControl.MANUAL),
 }
+
+
+def _value(setup: Setup, at: str) -> object:
+    section, key = at.split(".")
+    return getattr(getattr(setup, section), key)
 
 
 def _shown_fields() -> set[str]:
@@ -261,11 +270,11 @@ def _pending(entries: object, setup: Setup) -> Pending:
         seen.add(at)
         if at not in shown:
             raise ConfigError(f'[{PENDING}] "{at}" is not a setup field the wizard shows')
-        wanted = ONLY_WITH.get(at)
-        if wanted is not None and wanted is not setup.cut.vary:
+        choice, wanted = ONLY_WITH.get(at, (None, None))
+        if choice is not None and _value(setup, choice) is not wanted:
             raise ConfigError(
-                f'[{PENDING}] "{at}" does not apply with vary = "{setup.cut.vary}", so the '
-                "wizard never shows it"
+                f'[{PENDING}] "{at}" does not apply with {choice.split(".")[1]} = '
+                f'"{_value(setup, choice)}", so the wizard never shows it'
             )
         if not isinstance(note, str) or not note.strip():
             raise ConfigError(f'[{PENDING}] "{at}" needs a note in quotes: how to check it')
@@ -506,6 +515,7 @@ def _validate(setup: Setup) -> None:
         )
     if machine.min_rpm >= machine.max_rpm:
         raise ConfigError("[machine] min_rpm must be below max_rpm")
+    _validate_speed_stops(machine)
     for name in ("round1_width_fractions", "round1_depth_fractions"):
         fractions = getattr(setup.planner, name)
         if (
@@ -525,6 +535,25 @@ def _validate(setup: Setup) -> None:
         raise ConfigError("[planner] min_cut_s must be positive")
     if not 0 < setup.planner.chip_load_sweep_low < setup.planner.chip_load_sweep_high:
         raise ConfigError("[planner] need 0 < chip_load_sweep_low < chip_load_sweep_high")
+
+
+def _validate_speed_stops(machine: Machine) -> None:
+    stops = machine.speed_stops_rpm
+    if stops == ():
+        return
+    if machine.spindle is not SpindleControl.MANUAL:
+        raise ConfigError(
+            '[machine] speed_stops_rpm applies only with spindle = "manual": a program sets '
+            "any speed it asks for"
+        )
+    whole = isinstance(stops, tuple) and all(type(s) is int for s in stops)
+    if not whole or list(stops) != sorted(set(stops)):
+        raise ConfigError("[machine] speed_stops_rpm must list whole rpm, slowest first, each once")
+    if stops[0] < machine.min_rpm or stops[-1] > machine.max_rpm:
+        raise ConfigError(
+            f"[machine] speed_stops_rpm must lie within min_rpm and max_rpm "
+            f"({machine.min_rpm}..{machine.max_rpm} rpm)"
+        )
 
 
 TEMPLATE = """\

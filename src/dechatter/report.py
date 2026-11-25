@@ -26,7 +26,7 @@ from .plan import (
     envelope,
     feed_mm_min,
 )
-from .session import PassStatus, Round, SpindleFit, VerdictSource
+from .session import PassStatus, Round, SpeedSource, SpindleFit, VerdictSource
 
 REPORT_FILE = session.REPORT_FILE
 CUTS_PER_DEPTH = 3
@@ -145,8 +145,11 @@ def _map_svg(
     cell_w, cell_h = width_px / len(rpm), height_px / len(mm)
 
     def x(value: float) -> float:
+        # A spindle that ran off the speed asked can be heard just beyond the speeds searched:
+        # its cut is drawn at the edge.
         span = rpm[-1] - rpm[0] or 1.0
-        return LEFT + (value - rpm[0]) / span * (width_px - cell_w) + cell_w / 2
+        inside = min(max(value, rpm[0]), rpm[-1])
+        return LEFT + (inside - rpm[0]) / span * (width_px - cell_w) + cell_w / 2
 
     def y(value: float) -> float:
         span = mm[-1] - mm[0] or 1.0
@@ -231,7 +234,11 @@ def _seed_section(seed: seeding.Seed, status, setup, env, units: Units) -> str:
         rows.append(
             [
                 f"{c.source.round}.{c.source.id}",
-                str(c.source.rpm),
+                (
+                    f"{c.source.rpm} as asked: not heard"
+                    if c.source.heard_rpm is None
+                    else f"{c.source.heard_rpm:.0f}"
+                ),
                 _length(c.source.width_mm, units),
                 _length(c.source.depth_mm, units),
                 _verdict(c.source.verdict),
@@ -264,7 +271,7 @@ The seed is {_e(SEED_STATUS[status])}.</p>
         _table(
             [
                 "Round.pass there",
-                "rpm",
+                "Heard there (rpm)",
                 "Width there",
                 "Depth there",
                 "Verdict there",
@@ -336,25 +343,34 @@ def render(session_dir: Path, units: Units) -> str:
     for level in sorted({session.level_of(setup, c) for c in found}, reverse=True):
         rows = []
         for best in [c for c in found if session.level_of(setup, c) == level][:CUTS_PER_DEPTH]:
+            heard = "not heard" if best.speed is SpeedSource.ASKED else f"{best.rpm:.0f}"
+            ask = session.ask_rpm(env, best)
+            # As made, unless the speed stops changed since: then at the stop to set now.
+            rate = best.mrr_mm3_min * ask / best.asked_rpm
             rows.append(
                 [
-                    f"{best.rpm:.0f}",
+                    heard,
+                    f"{ask:.0f}",
                     _length(session.engagement_of(setup, best), units),
-                    _feed(feed_mm_min(setup, env, best.rpm), units),
-                    _rate(best.mrr_mm3_min, units),
-                    power(best.mrr_mm3_min),
+                    _feed(feed_mm_min(setup, env, ask), units),
+                    _rate(rate, units),
+                    power(rate),
                 ]
             )
-        speed = "Set the spindle to (rpm)" if manual else "Speed (rpm)"
+        speed = "Set the spindle to (rpm)" if manual else "Asked (rpm)"
         recommended.append(
             f"<h3>{_e(_length(level, units))} {HELD[deep]}</h3>"
-            + _table([speed, STEPPED[deep], "Feed", "Removal rate", "Spindle power"], rows)
+            + _table(
+                ["Heard (rpm)", speed, STEPPED[deep], "Feed", "Removal rate", "Spindle power"],
+                rows,
+            )
         )
     if not recommended:
         recommended.append("<p>No stable cut has been measured yet.</p>")
     for sweep in session.sweeps(rounds, env):
+        heard = "" if sweep.heard_rpm is None else f" (heard {sweep.heard_rpm:.0f})"
         where = (
-            f"Chip-load sweep, round {sweep.round}: {sweep.rpm:.0f} rpm, "
+            f"Chip-load sweep, round {sweep.round}: {sweep.rpm:.0f} rpm{heard}, "
             f"{_length(sweep.width_mm, units)} wide, {_length(sweep.depth_mm, units)} deep"
         )
         found_load = sweep.stable_chip_load_mm
@@ -442,13 +458,25 @@ def render(session_dir: Path, units: Units) -> str:
             by_hand = result is not None and session.verdict_source(result) is (
                 VerdictSource.OPERATOR
             )
+            heard, cut_load = "", ""
+            if result is not None and session.heard_rpm(result) is not None:
+                heard = f"{session.heard_rpm(result):.0f}"
+                cut_load = _length(
+                    session.chip_load_cut_mm(result, p.feed_mm_min, r.plan.flutes), units, 3
+                )
+            ran = p.kind is PassKind.TEST and result is not None
+            if ran and not heard and result.status not in session.UNHEARD:
+                mapped = result.verdict is not None and r.plan.planner is not PlannerKind.SWEEP
+                heard = "not heard: mapped as asked" if mapped else "not heard"
             rows.append(
                 [
                     str(p.id),
                     f"{p.kind.value}, control" if p.expected is Verdict.UNSTABLE else p.kind.value,
                     str(p.rpm),
+                    heard,
                     _length(r.plan.engagement_mm(p), units),
                     _length(p.chip_load_mm or r.plan.chip_load_mm, units, 3),
+                    cut_load,
                     _feed(p.feed_mm_min, units),
                     "" if result is None else result.status.value,
                     verdict,
@@ -468,9 +496,11 @@ def render(session_dir: Path, units: Units) -> str:
                 [
                     "Pass",
                     "Kind",
-                    "rpm",
+                    "Asked (rpm)",
+                    "Heard (rpm)",
                     STEPPED[deep],
                     "Chip load",
+                    "Chip load cut",
                     "Feed",
                     "Status",
                     "Verdict",
@@ -500,15 +530,18 @@ def render(session_dir: Path, units: Units) -> str:
 <section>
 <h2>Recommended cuts</h2>
 <p class="note">The session stepped the {STEPPED[deep].lower()} of cut. The best stable cuts
-measured at each {"width" if deep is Vary.DEPTH else "depth"}, most material removed first.
-{"The spindle is set by hand: set the speed shown. " if manual else ""}Power is
+measured at each {"width" if deep is Vary.DEPTH else "depth"}, most material removed first,
+each at the spindle speed heard in it ("not heard": none was found, and the speed asked for
+stands in). {"The spindle is set by hand: set the speed shown. " if manual else ""}Feed,
+removal rate and power follow the speed asked for, as the program feeds it. Power is
 the spindle's estimated draw, and its share of the rated {machine.spindle_power_hp:g} hp.</p>
 {"".join(recommended)}
 </section>
 <section>
 <h2>Stability map</h2>
 <p class="note">White: likely stable (at least {cfg.min_probability:.0%}). Dark: likely chatter.
-Grey: not settled by the cuts made. Circles are stable cuts, crosses chatter.{seeded_note}</p>
+Grey: not settled by the cuts made. Circles are stable cuts, crosses chatter, each at the
+spindle speed heard in it, or where none was heard, the speed asked for.{seeded_note}</p>
 {"".join(maps)}
 </section>
 {seed_section}

@@ -13,7 +13,7 @@ from test_app import NAME, Engine
 
 from dechatter import bayes, seeding, session
 from dechatter.bayes import Observation
-from dechatter.config import Direction, Vary, load_setup
+from dechatter.config import Direction, SpindleControl, Vary, load_setup
 from dechatter.detect import Thresholds, Verdict
 from dechatter.plan import PassKind, Plan, PlannerKind, envelope, grid_tests
 from dechatter.seeding import Carry, Seed, SeedPass, SeedStatus
@@ -444,6 +444,64 @@ def test_limits_scale_with_the_specific_energy_and_the_arc_of_engagement(setup, 
     )
     assert seeding.carry(slotted, slotted.passes[0], slots) is Carry.SAME
     assert seeding.equivalent_mm(slotted, slotted.passes[0], slots) == pytest.approx(1.0)
+
+
+def test_a_seed_pass_carries_over_at_the_speed_heard_in_it(measured):
+    engine = measured
+    folder = session.round_dir(engine.root / NAME, 1)
+    results = Results.load(folder / session.RESULTS_FILE)
+    # The fastest, widest cut: heard a little slower, it stays inside the search.
+    tests = [p for p in results.passes if p.kind is PassKind.TEST]
+    first = max(tests, key=lambda p: (p.rpm, p.width_mm))
+    heard = round(first.rpm * 0.98, 1)
+    passes = tuple(
+        dataclasses.replace(p, spindle_hz=heard / 60) if p is first else p for p in results.passes
+    )
+    dataclasses.replace(results, passes=passes).save(folder / session.RESULTS_FILE)
+
+    Engine(engine.root).call("create", NEW, NAME)
+    seed = seeding.load(engine.root / NEW)
+    made = next(p for p in seed.passes if (p.round, p.id) == (1, first.id))
+    assert (made.rpm, made.heard_rpm, made.speed) == (first.rpm, heard, heard)
+    assert all(p.heard_rpm is None and p.speed == p.rpm for p in seed.passes if p != made)
+
+    setup = load_setup(engine.root / NEW / session.SETUP_FILE)
+    placed = [c for c in seeding.carried(seed, setup, envelope(setup)) if c.source == made]
+    assert placed[0].observation.rpm == heard
+
+
+def test_a_confirmation_round_is_planned_on_the_speed_stops(setup, write_setup):
+    text = write_setup().read_text(encoding="utf-8")
+    seed = Seed(
+        "earlier",
+        text,
+        passes((4000, 2.0, 5.0, Verdict.STABLE), (4000, 3.0, 5.0, Verdict.UNSTABLE)),
+    )
+    assert seeding.confirmation(seed, setup, envelope(setup))[0][0] == 4000
+    by_hand = dataclasses.replace(
+        setup,
+        machine=dataclasses.replace(
+            setup.machine, spindle=SpindleControl.MANUAL, speed_stops_rpm=(2500, 3800, 4500)
+        ),
+    )
+    env = envelope(by_hand)
+    tests = seeding.confirmation(seed, by_hand, env)
+    assert tests[0][0] == 3800, "the predicted best cut at the stop nearest its speed"
+    assert {t[0] for t in tests} <= set(env.speed_stops_rpm)
+    # So are the grid's sizes at the best speeds, where only the speeds carry over.
+    slots = dataclasses.replace(
+        by_hand,
+        cut=dataclasses.replace(
+            by_hand.cut,
+            vary=Vary.DEPTH,
+            radial_width_mm=by_hand.tool.diameter_mm,
+            depth_max_mm=5.0,
+            axial_depth_mm=None,
+        ),
+    )
+    assert seeding.transfer(seed, slots, envelope(slots)) is seeding.Transfer.SPEEDS
+    speeds = {t[0] for t in seeding.confirmation(seed, slots, envelope(slots))}
+    assert speeds and speeds <= set(envelope(slots).speed_stops_rpm)
 
 
 def test_a_rejected_seed_shows_even_where_the_power_cap_leaves_no_grid(measured):

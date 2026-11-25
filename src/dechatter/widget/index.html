@@ -84,7 +84,7 @@
       <h2 id="round-title"></h2>
       <table>
         <thead>
-          <tr><th>#</th><th>rpm</th><th id="passes-size">width</th><th>feed</th><th>P</th><th>result</th></tr>
+          <tr><th>#</th><th title="Asked for, then heard in the cut where they differ">rpm</th><th id="passes-size">width</th><th>feed</th><th>P</th><th>result</th></tr>
         </thead>
         <tbody id="passes"></tbody>
       </table>
@@ -94,14 +94,15 @@
       <h2 id="map-title">Stability map</h2>
       <canvas id="map" width="320" height="180"></canvas>
       <p class="muted legend">
-        Green is likely stable, red likely chatter. Dots are stable cuts, crosses chatter.<span id="seed-legend" hidden></span>
+        Green is likely stable, red likely chatter. Dots are stable cuts, crosses chatter,
+        each at the spindle speed heard in it.<span id="seed-legend" hidden></span>
       </p>
     </section>
 
     <section id="best-section" hidden>
       <h2>Best stable cuts <button id="download-report" type="button">Download report</button></h2>
       <table>
-        <thead><tr><th>rpm</th><th>width</th><th>depth</th><th>feed</th><th>removal</th></tr></thead>
+        <thead><tr><th>speed</th><th>width</th><th>depth</th><th>feed</th><th>removal</th></tr></thead>
         <tbody id="best"></tbody>
       </table>
       <p id="sweep-result" class="muted legend" hidden></p>

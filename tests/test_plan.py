@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import re
 from pathlib import Path
 
 import pytest
 
-from dechatter import gcode
+from dechatter import bayes, gcode
+from dechatter.bayes import Observation
 from dechatter.config import ConfigError, load_setup, parse_setup
+from dechatter.detect import Verdict
 from dechatter.plan import (
     REFACE_EXTRA_MM,
     SCHEMA,
@@ -20,6 +23,7 @@ from dechatter.plan import (
     PlannerKind,
     Top,
     assemble,
+    auto_lanes,
     cut_order,
     envelope,
     facing_rows,
@@ -166,6 +170,85 @@ def test_manual_spindle_pauses_once_per_speed_and_never_commands_the_spindle(wri
 def test_manual_spindle_tests_the_same_cuts_as_program_control(setup, write_setup):
     cuts = lambda plan: sorted((p.rpm, p.width_mm) for p in plan.passes if p.kind is PassKind.TEST)  # noqa: E731
     assert cuts(round1(load_setup(write_setup(**MANUAL)))) == cuts(round1(setup))
+
+
+# A dial that rests on these speeds only; 1000 rpm lies below the template's search.
+STOPS = (1000, 1513, 1839, 1950, 2275, 2380, 2482, 2590, 2692, 2795, 4000)
+
+
+def with_stops(write_setup, stops=STOPS, spindle="manual"):
+    listed = ", ".join(str(stop) for stop in stops)
+    return write_setup(
+        s=('spindle = "program"', f'spindle = "{spindle}"'),
+        t=("weight_kg = 250", f"weight_kg = 250\nspeed_stops_rpm = [{listed}]"),
+    )
+
+
+def test_speed_stops_are_the_only_speeds_planned_and_each_stop_is_named(write_setup):
+    setup = load_setup(with_stops(write_setup))
+    env = envelope(setup)
+    assert env.speed_stops_rpm == STOPS[1:], "only the stops inside the search"
+    assert set(STOPS[1:]) <= set(env.speeds(setup.planner.speed_step_rpm))
+
+    plan = round1(setup)
+    tested = sorted({p.rpm for p in plan.passes if p.kind is PassKind.TEST})
+    assert {p.rpm for p in plan.passes} <= set(STOPS[1:])
+    assert len(tested) == setup.planner.round1_speeds
+    assert (tested[0], tested[-1]) == (1513, 4000), "spread from the slowest to the fastest"
+
+    seen = [
+        Observation(1950.0, 1.0, Verdict.STABLE),
+        Observation(2380.0, 2.5, Verdict.UNSTABLE, 950.0),
+        Observation(2477.0, 1.2, Verdict.STABLE, asked_rpm=2482.0),
+    ]
+    proposal = bayes.propose(setup, env, seen)
+    assert proposal.tests
+    assert {rpm for rpm, _, _ in proposal.tests} <= set(env.speed_stops_rpm)
+
+    asks = [b for b in gcode.blocks(plan, setup, MM) if b.step is gcode.Step.SET_SPINDLE]
+    assert [(b.rpm, b.stop, b.stops) for b in asks] == [
+        (rpm, STOPS.index(rpm) + 1, len(STOPS)) for rpm in tested
+    ]
+    program = gcode.render(plan, setup, MM).splitlines()
+    assert [line for line in program if line.startswith("M0")][0] == (
+        "M0 (set the spindle to 1513 rpm, speed stop 2 of 11 from the slowest, then resume)"
+    )
+
+    narrowed = dataclasses.replace(setup, cut=dataclasses.replace(setup.cut, speed_min_rpm=3000))
+    assert envelope(narrowed).speed_stops_rpm == (4000,)
+    with pytest.raises(PlanError, match="no speed stop"):
+        envelope(load_setup(with_stops(write_setup, (600, 1000))))
+
+    # The automatic lanes leave every cut long enough at the fastest stop, not at the top
+    # speed of the search, which no cut is planned at.
+    long = {"l": ("length_mm = 60.0", "length_mm = 600.0")}
+    free = load_setup(write_setup(**MANUAL, **long))
+    slow = dataclasses.replace(
+        setup,
+        stock=free.stock,
+        machine=dataclasses.replace(setup.machine, speed_stops_rpm=(1513, 1839)),
+    )
+    feed_mm_s = envelope(slow).chip_load_mm * slow.tool.flutes * 1839 / 60
+    assert auto_lanes(slow, envelope(slow)) == int(600.0 / (feed_mm_s * 6.0))
+    assert auto_lanes(slow, envelope(slow)) > auto_lanes(free, envelope(free))
+
+
+@pytest.mark.parametrize(
+    ("stops", "spindle", "message"),
+    [
+        ((1500, 2000), "program", 'only with spindle = "manual"'),
+        ((2000, 1500), "manual", "slowest first"),
+        ((1500, 1500), "manual", "each once"),
+        ((1500.5,), "manual", "whole rpm"),
+        ((400, 1500), "manual", r"within min_rpm and max_rpm \(500\.\.5000 rpm\)"),
+        ((1500, 5100), "manual", "within min_rpm and max_rpm"),
+    ],
+)
+def test_speed_stops_are_refused_unless_whole_sorted_in_range_and_set_by_hand(
+    write_setup, stops, spindle, message
+):
+    with pytest.raises(ConfigError, match=message):
+        load_setup(with_stops(write_setup, stops, spindle))
 
 
 def test_unknown_setup_key_is_rejected(write_setup):

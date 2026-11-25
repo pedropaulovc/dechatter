@@ -89,7 +89,7 @@ class App:
         shown = bayes.coarse(stability)
 
         found = session.best_cuts(self.setup, self.env, rounds)
-        sweep = session.swept(found, session.sweeps(rounds, self.env))
+        sweep = session.swept(self.env, found, session.sweeps(rounds, self.env))
         upcoming, next_level = Next.PLAN, fixed_mm(self.setup)
         planner = PlannerKind.CONFIRM if status is SeedStatus.UNCONFIRMED else PlannerKind.GRID
         if rounds and rounds[-1].results is None:
@@ -123,6 +123,8 @@ class App:
                 "chip_load_mm": self.env.chip_load_mm,
             },
             "spindle": self.setup.machine.spindle,
+            # A manual spindle's speed stops, slowest first; empty: any speed can be set.
+            "speed_stops_rpm": list(self.setup.machine.speed_stops_rpm),
             # What the session steps: "width" at each depth in `levels_mm`, or "depth" at each
             # width in it. `level_mm` is the one the map and the observations are at.
             "vary": self.setup.cut.vary,
@@ -137,8 +139,14 @@ class App:
             "recording_round": self.recording_round,
             "discarded_round": self.discarded_round,
             "rounds": [self._round_json(r) for r in rounds],
+            # Each cut at the speed heard in it, else (asked_rpm None) at the one asked for.
             "observations": [
-                {"rpm": o.rpm, "engagement_mm": o.engagement_mm, "verdict": o.verdict}
+                {
+                    "rpm": o.rpm,
+                    "asked_rpm": o.asked_rpm,
+                    "engagement_mm": o.engagement_mm,
+                    "verdict": o.verdict,
+                }
                 for o in observations
             ],
             # The session this one was started from, and its cuts as they carry over to the
@@ -148,16 +156,7 @@ class App:
                 {"rpm": o.rpm, "engagement_mm": o.engagement_mm, "verdict": o.verdict}
                 for o in seeded
             ],
-            "best": [
-                {
-                    "rpm": best.rpm,
-                    "width_mm": best.width_mm,
-                    "depth_mm": best.depth_mm,
-                    "feed_mm_min": round(feed_mm_min(self.setup, self.env, best.rpm)),
-                    "mrr_cm3_min": round(best.mrr_mm3_min / 1000, 2),
-                }
-                for best in found[:TOP_RESULTS]
-            ],
+            "best": [self._best_json(best) for best in found[:TOP_RESULTS]],
             "map": {
                 "speeds": shown.speeds.tolist(),
                 "engagements": shown.engagements.round(2).tolist(),
@@ -174,6 +173,21 @@ class App:
             "status": status,
             # What round 1 confirms of it at the level shown: "limits" or "speeds".
             "transfer": seeding.transfer(self.seed, at, self.env),
+        }
+
+    def _best_json(self, best: session.StableCut) -> dict:
+        # The speed to ask for to make it again: the one asked for, unless the speed stops
+        # changed since. A chip-load sweep of it runs there; feed and rate are at it.
+        ask = session.ask_rpm(self.env, best)
+        return {
+            "rpm": best.rpm,
+            "asked_rpm": best.asked_rpm,
+            "speed": best.speed,
+            "ask_rpm": ask,
+            "width_mm": best.width_mm,
+            "depth_mm": best.depth_mm,
+            "feed_mm_min": round(feed_mm_min(self.setup, self.env, ask)),
+            "mrr_cm3_min": round(best.mrr_mm3_min * ask / best.asked_rpm / 1000, 2),
         }
 
     def _round_json(self, r: session.Round) -> dict:
@@ -198,6 +212,14 @@ class App:
                     "prominence_db": result.prominence_db if result else None,
                     "over_air_db": result.over_air_db if result else None,
                     "spindle_fit": session.spindle_fit(result) if result else None,
+                    # The speed heard in the cut, where it was (else the asked one is mapped),
+                    # and the chip load cut at it.
+                    "heard_rpm": session.heard_rpm(result) if result else None,
+                    "chip_load_cut_mm": session.chip_load_cut_mm(
+                        result, p.feed_mm_min, r.plan.flutes
+                    )
+                    if result
+                    else None,
                 }
             )
         return {
@@ -232,6 +254,7 @@ class App:
         return {
             "round": sweep.round,
             "rpm": sweep.rpm,
+            "heard_rpm": sweep.heard_rpm,
             "width_mm": sweep.width_mm,
             "depth_mm": sweep.depth_mm,
             "session_chip_load_mm": sweep.session_chip_load_mm,

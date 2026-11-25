@@ -28,10 +28,27 @@ What changed for people who use the dechatter widget and command line. The forma
   of the predicted cuts come out the other way, the earlier passes are dropped and the grid
   follows. Another machine, holder, cutter or a stickout more than 0.6 mm off is refused
   with the reason.
+- **Speed stops** for a manual spindle whose speed control only comes to rest on certain
+  speeds: list them in the wizard's Speeds the spindle rests on (`speed_stops_rpm` in
+  `[machine]`, whole rpm, slowest first, within `min_rpm` and `max_rpm`; refused with
+  `spindle = "program"`). Every round, the confirmation round of a session started from an
+  earlier one included, plans its cuts only at the stops inside the session's speed limits,
+  and each stop of the round names the speed stop to set ("speed stop 5 of 9, counting from
+  the slowest"), in the widget and in the program's `M0` comment. The stops only bound the
+  search, so they may change after a round was cut.
 
 ### Changed
 
 - New asks for the session's name in a dialog of the widget instead of a browser prompt.
+- Each analysed pass now goes on the stability map, into the best cuts, the chip-load sweep
+  and the report at the spindle speed the detector found in its cut, with the speed asked for
+  beside it, instead of at the speed asked for; so do the passes a session started from an
+  earlier one carries over. A manual dial set off by most of a stop no longer moves a cut into
+  or out of a stable pocket, and the chatter-frequency sweet spots line up with the cuts. A
+  pass with no speed found (no cut heard, or "speed?") stays at the speed asked for, and the
+  widget and the report say so. Feeds stay as programmed; the report's round log adds the
+  speed heard and the chip load cut at it. Sessions saved by 0.7.0 open as before, with their
+  cuts moved to the speeds heard.
 
 ## [0.7.0] - 2026-11-24
 

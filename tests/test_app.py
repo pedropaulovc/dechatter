@@ -19,7 +19,7 @@ from scipy import signal
 import dechatter
 from dechatter import browser, plan, session
 from dechatter.app import TIMELINE_FILE, App
-from dechatter.config import ONLY_WITH, ConfigError, Vary, load_setup, read_setup
+from dechatter.config import ONLY_WITH, ConfigError, SpindleControl, Vary, load_setup, read_setup
 from dechatter.detect import Verdict
 from dechatter.plan import Plan, envelope
 
@@ -176,6 +176,53 @@ def test_manual_spindle_session_converges_despite_the_stops_to_change_speed(engi
     assert state["best"][0]["mrr_cm3_min"] > 12
 
 
+def test_speed_stops_plan_only_there_and_every_cut_is_shown_at_the_speed_heard(engine):
+    stops = [1300, 1700, 2100, 2500, 2900, 3300, 3700, 4100, 4500, 4900]
+    form = engine.call("setup_form", NAME)["values"]
+    assert form["machine"]["speed_stops_rpm"] == []
+    form["machine"]["spindle"] = "manual"
+    form["machine"]["speed_stops_rpm"] = stops
+    assert engine.call("save_setup", NAME, json.dumps(form))["speed_stops_rpm"] == stops
+
+    state = engine.call("plan", NAME, "fresh")
+    assert {p["rpm"] for p in state["rounds"][0]["passes"]} <= set(stops)
+    asks = [s for s in engine.call("steps", NAME, 1, "mm") if s["step"] == "set-spindle"]
+    assert [(s["stop"], s["stops"]) for s in asks] == [
+        (stops.index(s["rpm"]) + 1, len(stops)) for s in asks
+    ]
+
+    # The simulated spindle runs 2% slow: every cut is placed where it was heard.
+    state = engine.run_round(1, speed_change_s=12.0)
+    tests = [p for p in state["rounds"][0]["passes"] if p["kind"] == "test"]
+    for p in tests:
+        assert p["heard_rpm"] == pytest.approx(p["rpm"] * (1 + MACHINE.rpm_error), abs=3)
+        assert p["chip_load_cut_mm"] == pytest.approx(
+            p["chip_load_mm"] / (1 + MACHINE.rpm_error), rel=0.01
+        )
+    assert sorted(o["rpm"] for o in state["observations"]) == sorted(p["heard_rpm"] for p in tests)
+    assert {o["asked_rpm"] for o in state["observations"]} <= set(stops)
+    best = state["best"][0]
+    assert best["speed"] == "heard" and best["ask_rpm"] == best["asked_rpm"]
+    assert best["rpm"] == pytest.approx(best["asked_rpm"] * (1 + MACHINE.rpm_error), abs=3)
+    assert best["feed_mm_min"] == round(
+        state["summary"]["chip_load_mm"] * state["summary"]["flutes"] * best["asked_rpm"]
+    )
+
+    page = engine.call("report_html", NAME, "mm")
+    assert "<th>Asked (rpm)</th><th>Heard (rpm)</th>" in page
+    first = tests[0]
+    assert f"<td>{first['rpm']}</td><td>{first['heard_rpm']:.0f}</td>" in page
+    assert "<th>Heard (rpm)</th><th>Set the spindle to (rpm)</th>" in page
+    assert f"<td>{best['rpm']:.0f}</td><td>{best['ask_rpm']:.0f}</td>" in page
+
+    # The stops only bound the search: they may change once a round was cut.
+    form["machine"]["speed_stops_rpm"] = [*stops, 5000]
+    assert engine.call("save_setup", NAME, json.dumps(form))["speed_stops_rpm"][-1] == 5000
+    form["machine"]["spindle"] = "program"
+    with pytest.raises(RuntimeError, match='only with spindle = "manual"'):
+        engine.call("save_setup", NAME, json.dumps(form))
+
+
 def test_a_shallower_depth_is_tried_from_the_stable_widths_and_wins_where_the_machine_allows(
     engine, setup
 ):
@@ -324,6 +371,7 @@ def test_a_prepared_session_plans_only_once_its_pending_values_are_confirmed(eng
         ('"vise.height_mm" = "no such section"', "not a setup field"),
         ('"planner.power_fraction" = "the wizard never shows it"', "not a setup field"),
         ('"cut.radial_width_mm" = "hidden when the width is stepped"', 'vary = "width"'),
+        ('"machine.speed_stops_rpm" = "read the tachometer"', 'spindle = "program"'),
         ('"stock.height_mm" = 25', "needs a note"),
         ('"stock.height_mm" = "  "', "needs a note"),
         ('"stock.height_mm" = {}', "needs a note"),
@@ -345,11 +393,16 @@ def test_pending_is_a_table_and_takes_unquoted_dotted_keys_too(engine):
     assert read_setup(dotted, session.SETUP_FILE).pending == (("stock.height_mm", "calipers"),)
 
 
-def test_the_fields_pending_refuses_by_vary_are_those_the_wizard_hides():
+def test_the_fields_pending_refuses_by_choice_are_those_the_wizard_hides():
     wizard = (Path(dechatter.__file__).parent / "widget" / "wizard.js").read_text(encoding="utf-8")
-    hidden = re.findall(r"at: '([^']+)', when: STEPS_(WIDTH|DEPTH)", wizard)
+    hidden = re.findall(r"at: '([^']+)', when: (STEPS_WIDTH|STEPS_DEPTH|MANUAL_SPINDLE)", wizard)
     assert len(hidden) == wizard.count("when:"), "a field's `when` this test does not read"
-    assert {at: Vary(when.lower()) for at, when in hidden} == ONLY_WITH
+    choices = {
+        "STEPS_WIDTH": ("cut.vary", Vary.WIDTH),
+        "STEPS_DEPTH": ("cut.vary", Vary.DEPTH),
+        "MANUAL_SPINDLE": ("machine.spindle", SpindleControl.MANUAL),
+    }
+    assert {at: choices[when] for at, when in hidden} == ONLY_WITH
 
 
 def files(folder) -> dict:
@@ -489,8 +542,9 @@ def test_cuts_at_the_grid_edges_count_whatever_the_steps(engine):
     assert max(p["width_mm"] for p in tests) == 4.8
     assert len(state["observations"]) == len(tests)
     edge = {(p["rpm"], p["verdict"]) for p in tests if p["width_mm"] == 4.8}
+    # Each observation is at the speed heard; it was asked for at the plan's.
     assert edge == {
-        (o["rpm"], o["verdict"]) for o in state["observations"] if o["engagement_mm"] == 4.8
+        (o["asked_rpm"], o["verdict"]) for o in state["observations"] if o["engagement_mm"] == 4.8
     }
     measured = {(p["rpm"], p["width_mm"]) for p in tests}
     state = engine.call("plan", NAME, "same")
@@ -506,7 +560,7 @@ def test_cuts_at_the_grid_edges_count_whatever_the_steps(engine):
     state = engine.call("save_setup", NAME, json.dumps(form))
     assert state["discarded_round"] == 2
     assert len(state["observations"]) == len(tests)
-    assert min(o["rpm"] for o in state["observations"]) == 1250
+    assert min(o["asked_rpm"] for o in state["observations"]) == 1250
 
 
 def test_export_works_even_when_the_report_cannot_be_made(engine):
@@ -1130,7 +1184,7 @@ def test_a_chip_load_sweep_follows_convergence_and_stays_off_the_map(engine, set
     assert sweep["planner"] == "sweep" and state["next"] == "run"
     tests = [p for p in sweep["passes"] if p["kind"] == "test"]
     assert 4 <= len(tests) <= 5
-    assert {(p["rpm"], p["width_mm"]) for p in tests} == {(best["rpm"], best["width_mm"])}
+    assert {(p["rpm"], p["width_mm"]) for p in tests} == {(best["ask_rpm"], best["width_mm"])}
     assert sweep["level_mm"] == best["depth_mm"]
     loads = [p["chip_load_mm"] for p in tests]
     session_load = sweep["passes"][0]["chip_load_mm"]  # the truing pass runs at it
@@ -1149,7 +1203,8 @@ def test_a_chip_load_sweep_follows_convergence_and_stays_off_the_map(engine, set
     found = state["sweep"]
     assert found["chip_load_mm"] == loads[-1], "the simulated machine ignores chip load"
     assert found["untopped"], "every chip load tried was stable: no limit found"
-    assert found["feed_mm_min"] == round(loads[-1] * setup.tool.flutes * best["rpm"])
+    assert found["feed_mm_min"] == round(loads[-1] * setup.tool.flutes * best["ask_rpm"])
+    assert found["heard_rpm"] == pytest.approx(best["ask_rpm"] * (1 + MACHINE.rpm_error), abs=3)
 
     # Chatter at the third chip load: the result is the one before it.
     third = tests[2]["id"]
@@ -1238,7 +1293,8 @@ def test_the_report_holds_the_results_on_one_offline_page(engine, setup):
     # Inches first, mm beside; the manual spindle's speed to set.
     width_in = best["width_mm"] / 25.4
     assert f"{width_in:.4f} in ({best['width_mm']:.2f} mm)" in page
-    assert "Set the spindle to (rpm)" in page and f"<td>{best['rpm']}</td>" in page
+    assert "Set the spindle to (rpm)" in page
+    assert f"<td>{best['rpm']:.0f}</td><td>{best['ask_rpm']:.0f}</td>" in page
     assert page.count("<svg") == len({r["level_mm"] for r in state["rounds"]})
     assert page.count("<td>by hand</td>") == 1
     rounds = len(state["rounds"])

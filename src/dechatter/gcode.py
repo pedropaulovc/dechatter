@@ -71,6 +71,19 @@ class Block:
     target: dict[str, float] | None = None
     leg: int | None = None  # the plan's leg; facing belongs to the leg it lowers the top for
     rows_after: int | None = None  # FACE: the facing's rows still to come after this one
+    # SET_SPINDLE on a machine with speed stops: which stop `rpm` is, 1 the slowest, of how many.
+    stop: int | None = None
+    stops: int | None = None
+
+
+def _set_spindle(setup: Setup, rpm: int, pass_id: int | None, leg: int) -> Block:
+    """A manual spindle's stop to set the speed, naming the speed stop where `rpm` is one."""
+    stops = setup.machine.speed_stops_rpm
+    if rpm not in stops:
+        return Block(Step.SET_SPINDLE, (), pass_id, rpm, leg=leg)
+    return Block(
+        Step.SET_SPINDLE, (), pass_id, rpm, leg=leg, stop=stops.index(rpm) + 1, stops=len(stops)
+    )
 
 
 def blocks(plan: Plan, setup: Setup, units: Units) -> list[Block]:
@@ -110,7 +123,7 @@ def blocks(plan: Plan, setup: Setup, units: Units) -> list[Block]:
             # The top comes down at the leg's first speed: no extra spindle stop.
             first = leg.passes[0]
             if manual and first.rpm != spindle_rpm:
-                found.append(Block(Step.SET_SPINDLE, (), None, first.rpm, leg=number))
+                found.append(_set_spindle(setup, first.rpm, None, number))
             if not manual:
                 spindle = (f"M3 S{first.rpm}",)
                 found.append(Block(Step.SPINDLE, spindle, None, first.rpm, leg=number))
@@ -163,7 +176,7 @@ def blocks(plan: Plan, setup: Setup, units: Units) -> list[Block]:
             if not manual:
                 found.append(Block(Step.SPINDLE, (f"M3 S{p.rpm}",), p.id, p.rpm, leg=number))
             if manual and p.rpm != spindle_rpm:
-                found.append(Block(Step.SET_SPINDLE, (), p.id, p.rpm, leg=number))
+                found.append(_set_spindle(setup, p.rpm, p.id, number))
             spindle_rpm = p.rpm
             found += [
                 Block(
@@ -200,6 +213,11 @@ def blocks(plan: Plan, setup: Setup, units: Units) -> list[Block]:
 
 
 def _file_lines(block: Block, plan: Plan) -> list[str]:
+    if block.step is Step.SET_SPINDLE and block.stop is not None:
+        return [
+            f"M0 (set the spindle to {block.rpm} rpm, speed stop {block.stop} of {block.stops} "
+            "from the slowest, then resume)"
+        ]
     if block.step is Step.SET_SPINDLE:
         return [f"M0 (set the spindle to {block.rpm} rpm, then resume)"]
     if block.step is Step.DWELL:
