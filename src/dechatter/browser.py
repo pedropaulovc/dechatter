@@ -339,6 +339,10 @@ class Sessions:
         self._app(name).plan_sweep(Stock(stock))
         return self.state(name)
 
+    def plan_check(self, name: str, stock: str, level_mm: float | None = None) -> dict:
+        self._app(name).plan_check(Stock(stock), level_mm)
+        return self.state(name)
+
     def program(self, name: str, number: int, machine_units: str) -> str:
         """The round's program for a machine in `machine_units` ("mm" or "in")."""
         return self._app(name).program(number, gcode.Units(machine_units))

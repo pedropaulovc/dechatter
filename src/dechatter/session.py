@@ -16,10 +16,21 @@ import numpy as np
 
 from . import audio, bayes, detect, gcode, seeding
 from .bayes import Observation
-from .config import Setup, SetupFile, SetupSource, Vary, load_setup, setup_source
+from .config import (
+    Direction,
+    Setup,
+    SetupFile,
+    SetupSource,
+    Vary,
+    full_width,
+    load_setup,
+    setup_source,
+)
 from .detect import Thresholds, Verdict
 from .plan import (
     DEPTH_TOLERANCE_MM,
+    ENGAGEMENT_TOLERANCE_MM,
+    FOLLOW_UP,
     FRESH,
     Envelope,
     Face,
@@ -32,13 +43,18 @@ from .plan import (
     PlannerKind,
     Reach,
     SchemaError,
+    Start,
     Top,
     assemble,
     auto_lanes,
+    check_tests,
+    cut_direction,
     cut_size,
+    cutting,
     fixed_mm,
     grid_tests,
     mrr_mm3_min,
+    other_direction,
     sweep_tests,
 )
 from .seeding import Seed, SeedPass, SeedStatus
@@ -270,16 +286,27 @@ def load_rounds(session: Path) -> list[Round]:
     session, with what to do: start a new session for an older one, else repair it."""
     rounds = []
     for plan_path in sorted(session.glob(f"round-*/{PLAN_FILE}")):
-        plan = _read(plan_path, Plan.load)
-        if not plan_path.with_name(SETUP_FILE).exists():
+        setup_path = plan_path.with_name(SETUP_FILE)
+        if not setup_path.exists():
             raise SessionError(
                 f"{plan_path.parent.name}/{SETUP_FILE} is missing: the copy of the setup the "
                 "round was planned from. Put it back, or remove the round"
             )
+        plan = _read(plan_path, Plan.load)
+        if plan.direction is None:
+            # Planned by dechatter 0.7.0 or older, when every round cut as its setup said.
+            direction = _read(setup_path, load_setup).cut.direction
+            plan = dataclasses.replace(plan, direction=direction)
         results_path = plan_path.with_name(RESULTS_FILE)
         results = _read(results_path, Results.load) if results_path.exists() else None
         rounds.append(Round(plan_path.parent, plan, results))
     return rounds
+
+
+def as_planned(r: Round) -> Setup:
+    """The setup a round was planned from, at the round's own level and cutting in its
+    direction: what its program follows."""
+    return cutting(at_level(planned_with(r), r.plan.fixed_mm), r.plan.direction)
 
 
 def _tests(rounds: list[Round], wanted) -> list[Observation]:
@@ -287,12 +314,12 @@ def _tests(rounds: list[Round], wanted) -> list[Observation]:
     at the speed heard in each cut, else at the one asked for (see heard_rpm).
 
     A round's level is what its test cuts share: the depth, or where the session steps the
-    depth, the width. A chip-load sweep is left out: its cuts are not at the session's chip
-    load.
+    depth, the width. The rounds that follow convergence are left out: a chip-load sweep's
+    cuts are not at the session's chip load, and a check's not in its direction.
     """
     found = []
     for r in rounds:
-        if r.results is None or r.plan.planner is PlannerKind.SWEEP:
+        if r.results is None or r.plan.planner in FOLLOW_UP:
             continue
         if not wanted(r.plan.fixed_mm):
             continue
@@ -426,11 +453,12 @@ class Stage:
 
 def seed_passes(rounds: list[Round]) -> tuple[SeedPass, ...]:
     """What another session may start from: every test cut with a verdict, the detector's
-    or one set by hand, as it was made, with the speed heard in it. A chip-load sweep is left
-    out, as from the map."""
+    or one set by hand, as it was made, with the speed heard in it. A chip-load sweep and a
+    check of the other direction are left out, as from the map: a seed carries the session's
+    own direction."""
     found = []
     for r in rounds:
-        if r.results is None or r.plan.planner is PlannerKind.SWEEP:
+        if r.results is None or r.plan.planner in FOLLOW_UP:
             continue
         planned = {p.id: p for p in r.plan.passes}
         found += [
@@ -830,15 +858,16 @@ def _faced_at_stop(r: Round) -> bool:
     return final is None or final < r.plan.first_index(faced)
 
 
-def _made_since_top(rounds: list[Round]) -> tuple[Made, ...]:
+def _cut_since_top(rounds: list[Round]) -> list[tuple[Round, Made]]:
     """The passes cut into the top as it stands: since the block was mounted or last faced,
     every pass a run got to (every pass of a leg none was heard in, or of a round never
-    analysed), with how far from Y0 it reached, how deep it went, and whether it was stopped
-    part-way."""
+    analysed), latest first, with how far from Y0 it reached, how deep it went, and whether
+    it was stopped part-way; each with its round, its lane counted from the end the round's
+    direction meets first."""
     made = []
     for r in reversed(rounds):
         if _faced_at_stop(r):
-            return tuple(made)
+            return made
         final = None if r.results is None else _last_heard(r)
         results = () if r.results is None else r.results.passes
         stopped = {p.id for p in results if p.status is PassStatus.ABORTED}
@@ -851,10 +880,50 @@ def _made_since_top(rounds: list[Round]) -> tuple[Made, ...]:
             for p in passes:
                 y += p.width_mm + leg.wall_mm
                 reach = Reach.PART if p.id in stopped else Reach.END
-                made.append(Made(leg.lane, y, p.depth_mm, r.plan.milling, reach))
-            if leg.face_y_start_mm == 0 and leg.lane == 1:
-                return tuple(made)
-    return tuple(made)
+                made.append((r, Made(leg.lane, y, p.depth_mm, r.plan.milling, reach)))
+            # The top began here: faced down, or nothing was cut into it before this round.
+            if leg.reface_mm > 0 or (number == 0 and r.plan.start is Start.FRESH):
+                return made
+    return made
+
+
+def _stock_left(
+    rounds: list[Round], direction: Direction
+) -> tuple[Face, tuple[Made, ...], int | None]:
+    """Where a round cutting in `direction` goes on, on the stock the last round left: the
+    face, the passes cut into the top as it stands (lanes counted from the end `direction`
+    meets first), and how many lanes from that end it may use (None: all).
+
+    Each direction uses the lanes from the end it meets first, so the two work towards each
+    other: a round goes on from where the last round in its direction on this top left the
+    stock (the first lane at Y0 if none did), up to the lane before the first that holds a
+    cut made the other way. With no lane left, it faces the top down or needs fresh stock.
+    A single lane is the exception: every pass runs the stock's whole length, from the air
+    beyond one end to the air beyond the other, so either direction goes on along its face.
+    """
+    last = rounds[-1]
+    face = face_after(last)
+    lanes = last.plan.lanes
+    cuts = _cut_since_top(rounds)
+    made = tuple(
+        m if r.plan.direction is direction else dataclasses.replace(m, lane=lanes + 1 - m.lane)
+        for r, m in cuts
+    )
+    if lanes == 1:
+        whole = face.y_mm == 0 and face.remnant_mm == 0
+        return face, () if whole else made, None
+    others = [
+        m.lane for (r, _), m in zip(cuts, made, strict=True) if r.plan.direction is not direction
+    ]
+    lanes_open = min(others) - 1 if others else None
+    if last.plan.direction is not direction:
+        mine = next((r for r, _ in cuts if r.plan.direction is direction), None)
+        resume = mine is not None and face.top is Top.FLAT
+        face = face_after(mine) if resume else Face(top_mm=face.top_mm, top=face.top)
+    if lanes_open is None and face.y_mm == 0 and face.lane == 1 and face.remnant_mm == 0:
+        # A top whose first lane is still whole at Y0 was not cut into.
+        made = ()
+    return face, made, lanes_open
 
 
 def _place(
@@ -871,21 +940,22 @@ def _place(
 
     The round fills what is left of the lane it is on, then the lanes after it, and with
     stock.height_mm given, faces the top down and starts again at the first lane, for as long
-    as it has tests left and the top can come down (see plan.assemble).
+    as it has tests left and the top can come down (see plan.assemble). A round in the other
+    direction than the last starts its lanes from the other end (see _stock_left).
     """
     setup = source.setup
     number = rounds[-1].plan.round + 1 if rounds else 1
     # The lanes are settled by the session's first round: an automatic count must not move
     # with a speed limit changed since.
     lanes = rounds[-1].plan.lanes if rounds else auto_lanes(setup, env)
-    face, made = FRESH, ()
+    direction = cut_direction(setup, planner)
+    face, made, lanes_open = FRESH, (), None
     if rounds and stock is Stock.SAME:
-        face = face_after(rounds[-1])
-        # A top whose first lane is still whole at Y0 was not cut into.
-        if face.y_mm > 0 or face.lane > 1:
-            made = _made_since_top(rounds)
-    at = at_level(setup, level_mm)
-    plan = assemble(at, env, number, planner, tests, face=face, made=made, lanes=lanes)
+        face, made, lanes_open = _stock_left(rounds, direction)
+    at = cutting(at_level(setup, level_mm), direction)
+    plan = assemble(
+        at, env, number, planner, tests, face=face, made=made, lanes=lanes, lanes_open=lanes_open
+    )
     _write_round(session, source.text, at, plan)
     return plan
 
@@ -951,6 +1021,55 @@ def to_sweep(
     if not found or sweep is not None:
         return None
     return found[0] if _sweep_of(setup, env, found[0]) else None
+
+
+def plan_check(
+    session: Path, source: SetupFile, env: Envelope, stock: Stock, level_mm: float | None = None
+) -> Plan:
+    """The best cut of one level, in a ramp up to it and beyond (see plan.check_tests), cut
+    in the other direction than the session's: the level `level_mm`, or the first, in
+    session order, still to check.
+
+    Offered once the session has a stable cut at a level, converged or not: a session
+    measured by an older dechatter whose planner would now search on still gets its check.
+    Its cuts are kept apart from the stability map, which belongs to the session's direction.
+    """
+    rounds = _rounds_to_plan_after(session, source)
+    if not rounds:
+        raise PlanError("no round has been cut yet: there is no best cut to check")
+    face_after(rounds[-1])  # the last round must have been analysed
+    setup = source.setup
+    offers = to_check(setup, env, best_cuts(setup, env, rounds), checks(rounds))
+    chosen = [
+        best
+        for best in offers
+        if level_mm is None or abs(level_of(setup, best) - level_mm) <= DEPTH_TOLERANCE_MM
+    ]
+    if not chosen:
+        raise PlanError(_no_check(setup, level_mm))
+    best = chosen[0]
+    tests = check_of(setup, env, best)
+    level = level_of(setup, best)
+    return _place(session, source, env, rounds, stock, level, PlannerKind.CHECK, tests)
+
+
+def _no_check(setup: Setup, level_mm: float | None) -> str:
+    other = other_direction(setup.cut.direction)
+    if level_mm is not None and full_width(at_level(setup, level_mm)):
+        return (
+            "a full-width slot cuts climb on one side and conventional on the other at once: "
+            "there is no other direction to check"
+        )
+    where = "" if level_mm is None else f" at {level_mm:g} mm"
+    return (
+        f"no cut{where} is left to check {other}: every level's best stable cut has been "
+        "checked, or none was measured there"
+    )
+
+
+def check_of(setup: Setup, env: Envelope, best: StableCut) -> list:
+    at = at_level(setup, level_of(setup, best))
+    return check_tests(at, env, best.rpm, engagement_of(setup, best))
 
 
 @dataclass(frozen=True)
@@ -1034,6 +1153,109 @@ def swept(env: Envelope, found: list[StableCut], done: list[Sweep]) -> Sweep | N
         if same:
             return sweep
     return None
+
+
+@dataclass(frozen=True)
+class CheckCut:
+    """One cut of a check of the other direction, and what was heard."""
+
+    rpm: int
+    width_mm: float
+    depth_mm: float
+    feed_mm_min: float
+    status: PassStatus
+    verdict: Verdict | None
+
+
+@dataclass(frozen=True)
+class Check:
+    """What a check of the other direction found at one level, its cuts lightest first."""
+
+    round: int
+    direction: Direction
+    vary: Vary
+    level_mm: float
+    cuts: tuple[CheckCut, ...]
+
+    def engagement_mm(self, cut: CheckCut) -> float:
+        return cut.depth_mm if self.vary is Vary.DEPTH else cut.width_mm
+
+    @property
+    def held(self) -> CheckCut | None:
+        """The heaviest cut that held, with every lighter one heard; None when none did. A
+        cut the run never got to says nothing: a round stopped once a cut chattered leaves
+        the rest unrun, the lighter ones too where it ran deepest first."""
+        stable = None
+        for cut in self.cuts:
+            if cut.verdict is None and cut.status in UNHEARD:
+                continue
+            if cut.verdict is not Verdict.STABLE:
+                break
+            stable = cut
+        return stable
+
+
+def checks(rounds: list[Round]) -> list[Check]:
+    """The analysed checks of the other direction, oldest first."""
+    found = []
+    for r in rounds:
+        if r.plan.planner is not PlannerKind.CHECK or r.results is None:
+            continue
+        heard = {p.id: p for p in r.results.passes}
+        tests = sorted(
+            (p for p in r.plan.passes if p.kind is PassKind.TEST), key=r.plan.engagement_mm
+        )
+        cuts = []
+        for p in tests:
+            result = heard.get(p.id)
+            status = PassStatus.NOT_RUN if result is None else result.status
+            verdict = None if result is None else result.verdict
+            cuts.append(CheckCut(p.rpm, p.width_mm, p.depth_mm, p.feed_mm_min, status, verdict))
+        found.append(
+            Check(r.plan.round, r.plan.direction, r.plan.vary, r.plan.fixed_mm, tuple(cuts))
+        )
+    return found
+
+
+def to_check(
+    setup: Setup, env: Envelope, found: list[StableCut], done: list[Check]
+) -> list[StableCut]:
+    """The best cut of each level, in session order, that no check of the other direction
+    has cut and heard yet (`found`: from best_cuts; `done`: from checks). A level of
+    full-width slots has none to check: a slot cuts climb on one side and conventional on
+    the other at once."""
+    offers = []
+    for level in levels(setup):
+        if full_width(at_level(setup, level)):
+            continue
+        at = [c for c in found if abs(level_of(setup, c) - level) <= DEPTH_TOLERANCE_MM]
+        if not at or any(_cut_by(setup, check, at[0]) for check in done):
+            continue
+        if check_of(setup, env, at[0]):
+            offers.append(at[0])
+    return offers
+
+
+def _cut_by(setup: Setup, check: Check, best: StableCut) -> bool:
+    """Whether a check answered for `best` in the other direction: it heard that cut, or a
+    lighter one (or the cut itself) chatter at its speed, which settles it without cutting
+    it. A check stopped before telling either way is offered again."""
+    if abs(check.level_mm - level_of(setup, best)) > DEPTH_TOLERANCE_MM:
+        return False
+    size = engagement_of(setup, best)
+    for cut in check.cuts:
+        if cut.rpm != round(best.rpm):
+            continue
+        same = (
+            abs(cut.width_mm - best.width_mm) <= ENGAGEMENT_TOLERANCE_MM
+            and abs(cut.depth_mm - best.depth_mm) <= DEPTH_TOLERANCE_MM
+        )
+        if same and cut.verdict is not None:
+            return True
+        lighter = check.engagement_mm(cut) <= size + ENGAGEMENT_TOLERANCE_MM
+        if lighter and cut.verdict is Verdict.UNSTABLE:
+            return True
+    return False
 
 
 # The setup fields that may change once a round was cut. They move the program around the

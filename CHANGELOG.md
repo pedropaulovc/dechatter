@@ -43,6 +43,21 @@ What changed for people who use the dechatter widget and command line. The forma
   already starts from another, or on another tool assembly. A stickout still to confirm under
   `[pending]` is compared only when saving the wizard confirms it. "Don't start from …"
   removes the seed again before round 1.
+- **Check the other direction**: once a depth (or, stepping the depth, a width) has a best
+  cut, the widget offers a climb check, or a conventional one in a climb session. It cuts
+  that cut at its speed in the other direction, in a ramp at `check_fractions` of its width
+  or depth (0.5, 0.75 and 1 by default) and then `check_steps_beyond` steps beyond it (1; 0
+  for none), both new Advanced planner settings, lightest first (deepest first on the front
+  face of a session that steps the depth, as the stock demands) and inside the power cap.
+  Pick the depth to check; each is a round of its own. The check is offered before
+  convergence too, so a session converged by an older dechatter and imported gets its check
+  without more rounds of the map. Its verdicts never change the map, nor seed a session
+  started from this one: the widget and the report show a separate climb (or conventional)
+  check table of which cuts held. Full-width slots get no check, since a slot cuts both ways
+  at once. A check uses the lanes from the other end of the stock, and each direction goes
+  on from where its own last round left it.
+- The wizard's Direction field, the run instructions and the program of every climbing round
+  warn that climb milling needs a machine without backlash (ball screws).
 
 ### Changed
 
@@ -56,6 +71,10 @@ What changed for people who use the dechatter widget and command line. The forma
   widget and the report say so. Feeds stay as programmed; the report's round log adds the
   speed heard and the chip load cut at it. Sessions saved by 0.7.0 open as before, with their
   cuts moved to the speeds heard.
+- `plan.json` is schema 4: it records the direction a round cut in (`direction`) and whether
+  its first leg started on stock no earlier round had cut (`start`). Plans written by older
+  versions still load, as cut in their setup's direction; a session holding rounds planned
+  by this version opens only in this version or later.
 
 ## [0.7.0] - 2026-11-24
 

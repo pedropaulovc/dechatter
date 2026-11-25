@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 
 from . import __version__, bayes, materials, seeding, session
-from .config import WATTS_PER_HP, SpindleControl, Vary, read_setup
+from .config import WATTS_PER_HP, Direction, SpindleControl, Vary, read_setup
 from .detect import Verdict
 from .gcode import MM_PER_INCH, Units
 from .plan import (
@@ -59,6 +59,22 @@ CARRY = {
     seeding.Carry.CONVERTED: "converted by equal load",
     seeding.Carry.SPEEDS: "speed only",
 }
+
+
+def _planner_name(plan: Plan) -> str:
+    if plan.planner is PlannerKind.CHECK:
+        return f"{plan.direction} check"
+    return PLANNER_NAMES[plan.planner]
+
+
+def _heard(cut: session.CheckCut) -> str:
+    """What a check's cut did, as its table says."""
+    if cut.status in session.UNHEARD and cut.verdict is None:
+        return "not run"
+    if cut.verdict is None:
+        return "not heard"
+    return "held" if cut.verdict is Verdict.STABLE else "chatter"
+
 
 STABLE_FILL, UNSURE_FILL, CHATTER_FILL = "#ffffff", "#c8c8c8", "#555555"
 
@@ -110,7 +126,9 @@ def _where(plan: Plan, units: Units) -> str:
     """Where a round cuts, as it goes: its lanes, and where it faces the top down."""
     parts = []
     for number, leg in enumerate(plan.legs):
-        lane = f"lane {leg.lane} of {plan.lanes}" if plan.lanes > 1 else ""
+        # Lanes count from the end the cutter meets first: the right one when it climbs.
+        end = " from the right" if plan.direction is Direction.CLIMB else ""
+        lane = f"lane {leg.lane} of {plan.lanes}{end}" if plan.lanes > 1 else ""
         faced = f"top faced down {_length(leg.reface_mm, units)}" if leg.reface_mm > 0 else ""
         start = leg.passes[0].id
         if number == 0:
@@ -297,6 +315,71 @@ The seed is {_e(SEED_STATUS[status])}.</p>
 </section>"""
 
 
+def _check_section(setup, check: session.Check, found, units: Units, power) -> str:
+    """A check of the other direction: which of its cuts held, the session's best marked."""
+    deep = check.vary
+    best = next(
+        (c for c in found if abs(session.level_of(setup, c) - check.level_mm) <= 1e-6), None
+    )
+    rows = []
+    for cut in check.cuts:
+        size = _length(check.engagement_mm(cut), units)
+        same = (
+            best is not None
+            and cut.rpm == round(best.rpm)
+            and abs(check.engagement_mm(cut) - session.engagement_of(setup, best)) <= 1e-6
+        )
+        mrr = cut.width_mm * cut.depth_mm * cut.feed_mm_min
+        rows.append(
+            [
+                str(cut.rpm),
+                f"{size} (the best {setup.cut.direction} cut)" if same else size,
+                _feed(cut.feed_mm_min, units),
+                _rate(mrr, units),
+                power(mrr),
+                _heard(cut),
+            ]
+        )
+    held = check.held
+    if held is None and any(cut.verdict is Verdict.STABLE for cut in check.cuts):
+        summary = (
+            f"In {check.direction} milling the lightest cut run did not hold or was not heard, "
+            "so none counts as held from there up; each cut is below."
+        )
+    elif held is None:
+        summary = f"In {check.direction} milling no cut was heard to hold."
+    else:
+        reach = _length(check.engagement_mm(held), units)
+        size = "deep" if deep is Vary.DEPTH else "wide"
+        place = check.cuts.index(held)
+        rest = (
+            "every cut tried"
+            if held is check.cuts[-1]
+            else f"the next heavier one: {_heard(check.cuts[place + 1])}"
+        )
+        summary = f"In {check.direction} milling the cuts held up to {reach} {size}; {rest}."
+    title = (
+        f"{check.direction.capitalize()} check, round {check.round}: "
+        f"{_length(check.level_mm, units)} {HELD[deep]}"
+    )
+    return (
+        f"<h3>{_e(title)}</h3>"
+        f"<p>{_e(summary)} The map and the cuts above were measured {_e(setup.cut.direction)}; "
+        "these cuts do not change them.</p>"
+        + _table(
+            [
+                "Speed (rpm)",
+                STEPPED[deep],
+                "Feed",
+                "Removal rate",
+                "Spindle power",
+                check.direction.capitalize(),
+            ],
+            rows,
+        )
+    )
+
+
 def render(session_dir: Path, units: Units) -> str:
     """The session's report as one HTML document; lengths in `units`, with mm beside."""
     path = session_dir / session.SETUP_FILE
@@ -329,6 +412,7 @@ def render(session_dir: Path, units: Units) -> str:
                 f"holder {tool.holder or 'not given'}",
             ],
             ["Work material", cut.material],
+            ["Direction", f"{cut.direction}: the map and the recommended cuts"],
             [
                 "Varied",
                 "radial width, at each depth below"
@@ -422,6 +506,8 @@ def render(session_dir: Path, units: Units) -> str:
                 ],
             )
         )
+    for check in session.checks(rounds):
+        recommended.append(_check_section(setup, check, found, units, power))
 
     maps = []
     shown_levels = {r.plan.fixed_mm for r in rounds}
@@ -504,7 +590,7 @@ def render(session_dir: Path, units: Units) -> str:
         log.append(
             f"<h3>Round {r.plan.round}: {_e(_length(r.plan.fixed_mm, units))} {HELD[deep]}"
             f"{slots}{first}, "
-            f"{_e(PLANNER_NAMES[r.plan.planner])}, planned {_e(r.plan.planned_on)}"
+            f"{_e(_planner_name(r.plan))}, planned {_e(r.plan.planned_on)}"
             + _e(_where(r.plan, units))
             + f", {state}</h3>"
             + _table(

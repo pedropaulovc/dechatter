@@ -18,7 +18,16 @@ import numpy as np
 from . import audio, bayes, gcode, seeding, session
 from .config import Setup, SetupSource, read_setup, setup_source
 from .detect import Thresholds, Verdict
-from .plan import PassKind, PlannerKind, envelope, feed_mm_min, fixed_mm, lane_x_mm
+from .plan import (
+    PassKind,
+    PlannerKind,
+    cutting,
+    envelope,
+    feed_mm_min,
+    fixed_mm,
+    lane_x_mm,
+    other_direction,
+)
 from .seeding import SeedStatus
 from .session import PassStatus, SessionError, Stock
 
@@ -36,7 +45,9 @@ class Next(StrEnum):
     PLAN = "plan"  # plan the first or the next round
     RUN = "run"  # a round is planned: load it, cut it, record it
     SWEEP = "sweep"  # converged; a chip-load sweep of the best cut is on offer
-    CONVERGED = "converged"  # converged, and the best cut's chip load swept
+    # Converged, the sweep run or not on offer; a check of the other direction is.
+    CHECK = "check"
+    CONVERGED = "converged"  # converged, and nothing more on offer
 
 
 class App:
@@ -106,10 +117,18 @@ class App:
             next_level, planner = stage.level_mm, stage.planner
         if upcoming is Next.CONVERGED and session.to_sweep(self.setup, self.env, found, sweep):
             upcoming = Next.SWEEP
+        # A check of the other direction is on offer wherever a level has a best cut to check,
+        # converged or not: a session an older dechatter converged may search on in this one.
+        done = session.checks(rounds)
+        offers = []
+        if rounds and rounds[-1].results is not None:
+            offers = session.to_check(self.setup, self.env, found, done)
+        if upcoming is Next.CONVERGED and offers:
+            upcoming = Next.CHECK
         template = setup_source(self.source.text) is SetupSource.TEMPLATE
         if upcoming is Next.PLAN and template:
             upcoming = Next.SETUP
-        if upcoming in (Next.PLAN, Next.SWEEP) and self.source.pending:
+        if upcoming in (Next.PLAN, Next.SWEEP, Next.CHECK) and self.source.pending:
             upcoming = Next.CONFIRM
 
         tool = self.setup.tool
@@ -164,6 +183,15 @@ class App:
                 "p": shown.p.round(3).tolist(),
             },
             "sweep": None if sweep is None else self._sweep_json(sweep),
+            # The checks of the other direction on offer, a level's best cut each, in session
+            # order; `cuts_mm` are the sizes in the dimension the session steps.
+            "check": None
+            if not offers
+            else {
+                "direction": other_direction(self.setup.cut.direction),
+                "offers": [self._offer_json(best) for best in offers],
+            },
+            "checks": [self._check_json(check) for check in done],
         }
 
     def _seed_json(self, at: Setup, status: SeedStatus) -> dict:
@@ -233,6 +261,9 @@ class App:
             "milling": r.plan.milling,
             "order": r.plan.order,
             "planner": r.plan.planner,
+            "direction": r.plan.direction,
+            # "in use": its first leg goes on on a top earlier rounds cut into, with their zero.
+            "start": r.plan.start,
             "program": self.program_name(r),
             "run_time_s": round(r.plan.run_time_s),
             "lanes": r.plan.lanes,
@@ -241,7 +272,9 @@ class App:
             "legs": [
                 {
                     "lane": leg.lane,
-                    "lane_x_mm": list(lane_x_mm(self.setup, leg.lane, r.plan.lanes)),
+                    "lane_x_mm": list(
+                        lane_x_mm(cutting(self.setup, r.plan.direction), leg.lane, r.plan.lanes)
+                    ),
                     "face_y_start_mm": leg.face_y_start_mm,
                     "face_y_end_mm": round(leg.face_y_end_mm, 2),
                     "top_mm": leg.top_mm,
@@ -271,6 +304,38 @@ class App:
             else round(sweep.mrr_mm3_min / 1000, 2),
         }
 
+    def _offer_json(self, best: session.StableCut) -> dict:
+        tests = session.check_of(self.setup, self.env, best)
+        return {
+            "level_mm": session.level_of(self.setup, best),
+            "rpm": best.rpm,
+            "width_mm": best.width_mm,
+            "depth_mm": best.depth_mm,
+            "cuts_mm": [round(test[1], 3) for test in tests],
+        }
+
+    def _check_json(self, check: session.Check) -> dict:
+        held = check.held
+        return {
+            "round": check.round,
+            "direction": check.direction,
+            "level_mm": check.level_mm,
+            # The heaviest cut that held with every lighter one, in the stepped dimension.
+            "held_mm": None if held is None else check.engagement_mm(held),
+            "cuts": [
+                {
+                    "rpm": cut.rpm,
+                    "width_mm": cut.width_mm,
+                    "depth_mm": cut.depth_mm,
+                    "feed_mm_min": round(cut.feed_mm_min),
+                    "mrr_cm3_min": round(cut.width_mm * cut.depth_mm * cut.feed_mm_min / 1000, 2),
+                    "status": cut.status,
+                    "verdict": cut.verdict,
+                }
+                for cut in check.cuts
+            ],
+        }
+
     def plan(self, stock: Stock) -> None:
         session.plan_next(self.session_dir, self.source, self.env, stock)
         self.discarded_round = None
@@ -279,13 +344,17 @@ class App:
         session.plan_sweep(self.session_dir, self.source, self.env, stock)
         self.discarded_round = None
 
+    def plan_check(self, stock: Stock, level_mm: float | None) -> None:
+        session.plan_check(self.session_dir, self.source, self.env, stock, level_mm)
+        self.discarded_round = None
+
     def _planned(self, number: int) -> tuple[session.Round, Setup]:
         target = self._round(number)
         return target, self._at(target)
 
     def _at(self, r: session.Round) -> Setup:
-        """The setup a round was planned from, at the round's own level."""
-        return session.at_level(session.planned_with(r), r.plan.fixed_mm)
+        """The setup a round was planned from, at the round's own level and direction."""
+        return session.as_planned(r)
 
     def program(self, number: int, units: gcode.Units) -> str:
         """The round's program in the machine's units. The file beside the plan is in mm."""

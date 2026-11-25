@@ -12,8 +12,10 @@ from .plan import (
     Pass,
     PassKind,
     Plan,
+    PlannerKind,
     facing_rows,
     lane_x_mm,
+    other_direction,
     travel,
 )
 
@@ -299,6 +301,23 @@ def _stop_rule(plan: Plan) -> str:
     return "(STOP RULE: on violent chatter feed-hold and abort. Later passes are heavier.)"
 
 
+def _direction_lines(plan: Plan, setup: Setup) -> list[str]:
+    """What the header says of the direction the passes feed in (the setup's, as `blocks`
+    follows it): a check's, and climb milling's demand."""
+    lines = []
+    direction = setup.cut.direction
+    feed = "-X from the right end" if direction is Direction.CLIMB else "+X from the left end"
+    if plan.planner is PlannerKind.CHECK:
+        lines.append(
+            f"({direction.upper()} CHECK: every pass cuts {direction}, feeding {feed}, the "
+            f"other way to the session's {other_direction(direction)} rounds; its verdicts "
+            "stay off the stability map)"
+        )
+    if direction is Direction.CLIMB:
+        lines.append("(CLIMB MILLING: needs a machine without backlash, such as ball screws)")
+    return lines
+
+
 def render(plan: Plan, setup: Setup, units: Units) -> str:
     """The plan's program in the machine's own units, so running it never changes them.
 
@@ -311,6 +330,7 @@ def render(plan: Plan, setup: Setup, units: Units) -> str:
         f"(tool: D{_n(plan.diameter_mm)} mm, {plan.flutes} flutes; {_held(plan)}; "
         f"{_n(plan.chip_load_mm)} mm per tooth)",
         "(WCS zero: X = left end of stock, Y = front face as first mounted, Z = top)",
+        *_direction_lines(plan, setup),
         *_leg_lines(plan, setup),
         _stop_rule(plan),
         MANUAL_NOTE if manual else "(the program starts, sets and stops the spindle)",

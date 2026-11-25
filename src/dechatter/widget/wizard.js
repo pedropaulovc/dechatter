@@ -37,7 +37,7 @@ const INFO = {
   'cut.radial_width_mm': `The width every test cut takes. The cutter diameter cuts full-width slots into the top of the stock, each in its own row along Y with a wall of stock between them. A narrower width mills the front face, deepest cut first: a face is clear only down to the shallowest cut made on it, so a deeper cut after a shallower one needs a faced top or fresh stock. ${FIXED}`,
   'cut.other_widths_mm': 'Tested after the widest width settles, widest first, starting from the depths that were stable there: a depth that is stable in a wider cut is stable in a narrower one.',
   'cut.depth_max_mm': `The deepest cut tried. The stock must be clear of jaws and parallels down past it. ${FREE}`,
-  'cut.direction': `Conventional or climb. The results apply to the direction tested. ${FIXED}`,
+  'cut.direction': `Conventional or climb. The map and the results apply to the direction tested. Once a level has a best cut, the widget offers a check of the other direction: that cut and its neighbours cut the other way, reported apart, as a zigzag face needs. Climb milling, in the session or in its check, needs a machine without backlash (ball screws): with backlash the cutter pulls the table into the cut. ${FIXED}`,
   'cut.width_max_mm': `The widest radial cut tried. Default: half the cutter diameter. ${FREE}`,
   'cut.chip_load_mm': `Feed per tooth, held constant for the whole session: feed = chip load × flutes × rpm. The default comes from the work material, the cutter diameter and the machine weight. Chatter barely depends on it, so the default is fine for mapping; the chip-load sweep offered once the map converges finds how far the best cut can be pushed. Very light chip loads make narrow cuts rub and squeal, which can pass for chatter. ${FIXED}`,
   'cut.speed_min_rpm': `The slowest test speed. Default: a quarter of the fastest, and no lower than the machine allows. ${FREE}`,
@@ -66,6 +66,8 @@ const INFO = {
   'planner.stop_improvement': 'Lower keeps searching for smaller gains, at the cost of more rounds.',
   'planner.chip_load_sweep_low': 'Once the map converges, the best cut can be run again at 5 chip loads, lightest first, from this many times the session\'s chip load up to the next setting. The power cap trims the heaviest. The result is the highest chip load that stayed stable. Its cuts do not change the map.',
   'planner.chip_load_sweep_high': 'The heaviest chip load of the sweep, as a multiple of the session\'s. Higher finds the limit of a stout tool, but the last passes may chatter hard: watch them, and feed-hold if a cut gets violent.',
+  'planner.check_fractions': 'The check of the other direction cuts a level\'s best cut at these fractions of its width (or depth), at the best cut\'s speed: lightest first, or deepest first where a session steps the depth on the front face, as the stock demands. The best cut itself is always among them. Start closer to it (say 0.8, 0.9, 1) when the margin to the first chatter was thin. Feed-hold when a cut chatters.',
+  'planner.check_steps_beyond': 'After the best cut, the check of the other direction cuts this many steps wider (or deeper), to see whether the other direction holds more. 0: none beyond the best cut. Default: 1.',
 };
 
 export const infoFor = (field, units) => {
@@ -143,7 +145,7 @@ export const STEPS = [
       { at: 'cut.radial_width_mm', when: STEPS_DEPTH, label: 'Radial width of cut', type: 'length', note: 'The cutter diameter cuts full-width slots into the top. Narrower mills the front face.' },
       { at: 'cut.depth_max_mm', when: STEPS_DEPTH, label: 'Deepest cut to try', type: 'length' },
       { at: 'cut.other_widths_mm', when: STEPS_DEPTH, label: 'Narrower widths to compare', type: 'lengths', optional: true, placeholder: 'none', note: 'Separated by commas. Tested afterwards, starting from the depths that were stable.' },
-      { at: 'cut.direction', label: 'Direction', type: 'choice', options: [['conventional', 'conventional'], ['climb', 'climb']] },
+      { at: 'cut.direction', label: 'Direction', type: 'choice', options: [['conventional', 'conventional'], ['climb', 'climb']], note: 'Climb milling (here, or in the check of the other direction) needs a machine without backlash: ball screws.' },
       { at: 'cut.width_max_mm', when: STEPS_WIDTH, section: 'advanced', label: 'Widest radial cut to try', type: 'length', optional: true, placeholder: 'half the diameter' },
       { at: 'cut.chip_load_mm', section: 'advanced', label: 'Chip load per tooth', type: 'length', optional: true, placeholder: 'from the material' },
       { at: 'cut.speed_min_rpm', section: 'advanced', label: 'Slowest speed to try', type: 'int', unit: 'rpm', optional: true, placeholder: 'a quarter of the fastest' },
@@ -183,6 +185,8 @@ export const STEPS = [
       { at: 'planner.stop_improvement', section: 'advanced', label: 'Stop when a cut would add less than', type: 'number', note: 'As a fraction of the best removal rate so far.' },
       { at: 'planner.chip_load_sweep_low', section: 'advanced', label: 'Chip-load sweep from', type: 'number', unit: '×', note: 'Times the session\'s chip load.' },
       { at: 'planner.chip_load_sweep_high', section: 'advanced', label: 'Chip-load sweep up to', type: 'number', unit: '×' },
+      { at: 'planner.check_fractions', section: 'advanced', label: 'Other-direction check at', type: 'list', note: 'Fractions of the best cut, separated by commas.' },
+      { at: 'planner.check_steps_beyond', section: 'advanced', label: 'Check steps beyond the best cut', type: 'int', min: 0 },
       { at: 'planner.min_cut_s', section: 'advanced', label: 'Shortest cut to listen to', type: 'number', unit: 's', note: 'Sets how many lanes the stock is split into, when that is left empty.' },
     ],
   },
@@ -252,7 +256,7 @@ function control(field, value, units, materials, placeholder, optional) {
   }
   input.type = 'number';
   input.step = field.type === 'int' ? '1' : 'any';
-  input.min = field.type === 'int' ? '1' : '0';
+  input.min = String(field.min ?? (field.type === 'int' ? 1 : 0));
   return input;
 }
 

@@ -9,7 +9,7 @@ import pytest
 
 from dechatter import bayes, gcode
 from dechatter.bayes import Observation
-from dechatter.config import ConfigError, load_setup, parse_setup
+from dechatter.config import ConfigError, Direction, load_setup, parse_setup
 from dechatter.detect import Verdict
 from dechatter.plan import (
     REFACE_EXTRA_MM,
@@ -21,10 +21,13 @@ from dechatter.plan import (
     Plan,
     PlanError,
     PlannerKind,
+    Start,
     Top,
     assemble,
     auto_lanes,
+    check_tests,
     cut_order,
+    cutting,
     envelope,
     facing_rows,
     grid_tests,
@@ -285,6 +288,76 @@ def test_a_chip_load_sweep_steps_lightest_first_inside_the_power_cap(setup, writ
     assert 0 < len(capped) < SWEEP_PASSES
     with pytest.raises(ConfigError, match="chip_load_sweep_low < chip_load_sweep_high"):
         load_setup(write_setup(s=("chip_load_sweep_high = 1.7", "chip_load_sweep_high = 0.5")))
+
+
+def test_a_check_ramps_up_to_the_best_cut_and_a_step_beyond(setup, write_setup):
+    env = envelope(setup)
+    tests = check_tests(setup, env, 4000.0, 2.0)
+    assert tests == [
+        (4000.0, 1.0, None),
+        (4000.0, 1.5, None),
+        (4000.0, 2.0, None),
+        (4000.0, 2.1, None),
+    ]
+
+    # The v6 record's ruling: 1.8, 2.0 and 2.2 mm, and nothing beyond the record.
+    record = load_setup(
+        write_setup(
+            s=(
+                "chip_load_sweep_high = 1.7",
+                "chip_load_sweep_high = 1.7\ncheck_fractions = [0.8, 0.9, 1.0]\n"
+                "check_steps_beyond = 0",
+            )
+        )
+    )
+    assert [t[1] for t in check_tests(record, envelope(record), 2400.0, 2.2)] == [1.8, 2.0, 2.2]
+
+    # No step beyond the widest width searched, nor over the power cap.
+    top = env.engagement_top_mm
+    assert [t[1] for t in check_tests(setup, env, 4000.0, top)][-1] == top
+    weak = load_setup(write_setup(p=("spindle_power_hp = 2.0", "spindle_power_hp = 0.3")))
+    weak_env = envelope(weak)
+    capped = check_tests(weak, weak_env, 4000.0, 2.0)
+    assert capped and all(
+        mrr_mm3_min(weak, weak_env, rpm, size) <= weak_env.mrr_limit_mm3_min
+        for rpm, size, _ in capped
+    )
+    for bad in ("check_fractions = [0, 1]", "check_fractions = [1.2]", "check_steps_beyond = -1"):
+        with pytest.raises(ConfigError, match="check_"):
+            load_setup(
+                write_setup(s=("chip_load_sweep_high = 1.7", f"chip_load_sweep_high = 1.7\n{bad}"))
+            )
+
+
+def test_a_check_cuts_the_other_way_on_the_lanes_from_the_other_end(write_setup):
+    setup = load_setup(write_setup(**{"l": ("width_mm = 30.0", "width_mm = 30.0\nlanes = 3")}))
+    env = envelope(setup)
+    climb = cutting(setup, Direction.CLIMB)
+    assert (
+        climb.cut.direction is Direction.CLIMB and cutting(setup, Direction.CONVENTIONAL) is setup
+    )
+    tests = check_tests(setup, env, 4000.0, 2.0)
+    # Conventional rounds used lane 1 (the left): climbing, it is lane 3, and only two are open.
+    made = (Made(3, 6.0, setup.cut.axial_depth_mm),)
+    plan = assemble(climb, env, 5, PlannerKind.CHECK, tests, made=made, lanes=3, lanes_open=2)
+    assert plan.direction is Direction.CLIMB and plan.start is Start.IN_USE
+    assert [leg.lane for leg in plan.legs] == [1]
+    assert lane_x_mm(climb, 1, 3) == (40.0, 60.0)
+    assert all(
+        x_end < 0 or x_end >= 40.0 - 1e-6
+        for _, x_end, _ in cutting_moves(gcode.render(plan, climb, MM))
+    )
+    assert "CLIMB CHECK" in gcode.render(plan, climb, MM)
+
+    # No lane left from that end, and no height to face the top down: fresh stock.
+    with pytest.raises(PlanError, match="cuts climb, using the lanes from the end"):
+        assemble(climb, env, 5, PlannerKind.CHECK, tests, made=made, lanes=3, lanes_open=0)
+    # The check must fit whole, as the chip-load sweep must.
+    narrow = Face(y_mm=setup.stock.width_mm - 3.0)
+    with pytest.raises(PlanError, match="climb check needs room for all its 4 cuts"):
+        assemble(
+            climb, env, 5, PlannerKind.CHECK, tests, face=narrow, made=made, lanes=3, lanes_open=1
+        )
 
 
 def test_a_setup_from_dechatter_0_1_is_refused_with_what_to_do():
@@ -676,6 +749,12 @@ def test_a_plan_of_0_5_0_or_before_loads_as_one_leg(write_setup, tmp_path):
     plunges = {(p.pop("depth_mm"), p.pop("plunge_s")) for p in single["passes"]}
     ((depth, plunge_s),) = plunges
     assert data.pop("fixed_mm") == depth == setup.cut.axial_depth_mm
+    # 0.7.0 and older recorded neither the direction a round cut in nor what it started on.
+    assert (data.pop("direction"), data.pop("start")) == ("conventional", "in use")
     schema_2 = {**data, **single, "axial_depth_mm": depth, "plunge_s": plunge_s, "schema": 2}
     (tmp_path / "old.json").write_text(json.dumps(schema_2))
-    assert Plan.load(tmp_path / "old.json") == plan
+    loaded = Plan.load(tmp_path / "old.json")
+    assert loaded.direction is None, "session.load_rounds fills it in from the setup"
+    assert loaded.start is Start.IN_USE, "lane 2 of 3: earlier rounds cut lane 1"
+    assert dataclasses.replace(loaded, direction=Direction.CONVENTIONAL) == plan
+    assert old.start is Start.IN_USE, "20.7 mm in: cut into before"
