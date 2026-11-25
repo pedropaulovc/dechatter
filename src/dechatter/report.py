@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 
 from . import __version__, bayes, materials, seeding, session
-from .config import WATTS_PER_HP, SpindleControl, Vary, load_setup
+from .config import WATTS_PER_HP, SpindleControl, Vary, read_setup
 from .detect import Verdict
 from .gcode import MM_PER_INCH, Units
 from .plan import (
@@ -222,10 +222,20 @@ def _map_svg(
     )
 
 
-def _seed_section(seed: seeding.Seed, status, setup, env, units: Units) -> str:
+def _seed_section(
+    seed: seeding.Seed, status, setup, env, units: Units, stickout_pending: bool
+) -> str:
     """The session this one was started from: what it measured, and how each of its passes
-    carries over to this session's own depth (or width)."""
+    carries over to this session's own depth (or width). `stickout_pending`: this session's
+    stickout is a placeholder still to confirm on the machine, not yet compared with it."""
     old = seed.setup
+    assembly = (
+        f"machine, holder and cutter (this session's stickout is still to confirm on the "
+        f"machine, and must then be within {seeding.STICKOUT_TOLERANCE_MM:g} mm of its "
+        f"{_length(old.tool.stickout_mm, units, 1)})"
+        if stickout_pending
+        else "machine, holder, cutter and stickout"
+    )
     vary = setup.cut.vary
     rows = []
     for c in seeding.carried(seed, setup, env):
@@ -260,7 +270,7 @@ def _seed_section(seed: seeding.Seed, status, setup, env, units: Units) -> str:
     return f"""<section>
 <h2>Seeded from {_e(seed.source)}</h2>
 <p class="note">This session was started from session {_e(seed.source)}, measured on the same
-machine, holder, cutter and stickout in {_e(old.cut.material)}, {_e(old.cut.direction.value)}
+{assembly} in {_e(old.cut.material)}, {_e(old.cut.direction.value)}
 milling. Its {len(seed.passes)} analysed passes are kept with this session and are not cuts
 of it. Each becomes the {STEPPED[vary].lower()} that loads the tool as much here (specific
 energy × depth × arc of engagement), and counts as a cut misheard as often as its last
@@ -289,7 +299,9 @@ The seed is {_e(SEED_STATUS[status])}.</p>
 
 def render(session_dir: Path, units: Units) -> str:
     """The session's report as one HTML document; lengths in `units`, with mm beside."""
-    setup = load_setup(session_dir / session.SETUP_FILE)
+    path = session_dir / session.SETUP_FILE
+    source = read_setup(path.read_text(encoding="utf-8"), path.name)
+    setup = source.setup
     env = envelope(setup)
     rounds = session.load_rounds(session_dir)
     machine, tool, cut, cfg = setup.machine, setup.tool, setup.cut, setup.planner
@@ -436,7 +448,10 @@ def render(session_dir: Path, units: Units) -> str:
             " cuts of that session as they carry over, not cut in this one, and counted for"
             " less."
         )
-    seed_section = "" if seed is None else _seed_section(seed, status, setup, env, units)
+    stickout_pending = seeding.STICKOUT in dict(source.pending)
+    seed_section = (
+        "" if seed is None else _seed_section(seed, status, setup, env, units, stickout_pending)
+    )
     if not maps:
         maps.append("<p>No round has been cut yet.</p>")
 

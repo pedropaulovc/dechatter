@@ -1132,8 +1132,35 @@ def test_a_reset_goes_ahead_when_the_report_cannot_be_removed(engine, monkeypatc
     assert not list((engine.root / NAME).glob(".discarded-*"))
 
 
+# Engine calls that only read the session folder (record_start and record_cancel keep what
+# they change in memory): every other call is flushed to IndexedDB by the worker.
+READS = {
+    "names",
+    "contents",
+    "setup_status",
+    "setup_form",
+    "setup_preview",
+    "state",
+    "program",
+    "steps",
+    "record_start",
+    "record_cancel",
+    "report_html",
+    "export_zip",
+}
+
+
+def test_the_worker_persists_every_engine_call_that_writes():
+    """A call missing from engine.js's WRITES changes files a reload then loses."""
+    source = (Path(dechatter.__file__).parent / "widget" / "engine.js").read_text("utf-8")
+    listed = re.search(r"const WRITES = new Set\(\[(.*?)\]\)", source).group(1)
+    writes = set(re.findall(r"'(\w+)'", listed))
+    calls = {name for name in vars(browser.Sessions) if not name.startswith("_")}
+    assert writes == calls - READS
+
+
 def test_reset_and_export_go_by_whether_the_setup_loads(engine):
-    assert engine.call("setup_status", NAME) == {"status": "loads", "reason": ""}
+    assert engine.call("setup_status", NAME) == {"status": "loads", "reason": "", "seeded": False}
     # Rounds that do not load leave the setup loading: the session can be exported and reset.
     engine.call("plan", NAME, "same")
     (session.round_dir(engine.root / NAME, 1) / session.SETUP_FILE).unlink()

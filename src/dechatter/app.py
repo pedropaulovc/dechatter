@@ -174,9 +174,10 @@ class App:
             "status": status,
             # What round 1 confirms of it at the level shown: "limits" or "speeds".
             "transfer": seeding.transfer(self.seed, at, self.env),
-            # Its stickout, which this session's must keep: shown while this one's is still
-            # to confirm on the machine, and so not yet compared.
+            # Its stickout, which this session's must keep within the tolerance: shown while
+            # this one's is still to confirm on the machine, and so not yet compared.
             "stickout_mm": self.seed.setup.tool.stickout_mm,
+            "stickout_tolerance_mm": seeding.STICKOUT_TOLERANCE_MM,
         }
 
     def _best_json(self, best: session.StableCut) -> dict:

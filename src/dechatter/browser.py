@@ -25,10 +25,12 @@ from .audio import AudioError
 from .config import (
     TEMPLATE,
     ConfigError,
+    SetupSource,
     Vary,
     dump_setup,
     parse_setup,
     setup_defaults,
+    setup_source,
     setup_values,
     slot_wall_mm,
 )
@@ -144,6 +146,13 @@ class Sessions:
                 f"session {name!r} already starts from {app.seed.source}: choose Don't start "
                 f"from {app.seed.source} first"
             )
+        if setup_source(app.source.text) is SetupSource.TEMPLATE:
+            # The example setup is no tool assembly to compare: New takes over the earlier
+            # session's setup instead.
+            raise SessionError(
+                f"session {name!r} still holds the example setup: fill it in with the setup "
+                "wizard first, or create the session with New, starting from the earlier one"
+            )
         seed = self._seed_of(source)
         pending = {at for at, _ in app.source.pending}
         found = seeding.mismatches(seed.setup, app.setup, pending)
@@ -169,16 +178,29 @@ class Sessions:
 
     def unseed(self, name: str) -> dict:
         """Stop a session that has no round yet starting from another; answer its state. Its
-        `seed.json` is removed, so round 1 is the grid; the setup stays as it is."""
+        `seed.json` is removed, so round 1 is the grid; the setup stays as it is.
+
+        The seed is not read: one that is damaged, or measured another assembly than the
+        setup, so that the session does not load, can be removed too. A session that does not
+        load without it keeps it.
+        """
         target = self._existing(name)
         self._before_round_1(target, "a seed can only be removed before the first round")
         path = target / seeding.SEED_FILE
         if not path.exists():
             raise SessionError(f"session {name!r} does not start from another session")
+        kept = path.read_bytes()
         path.unlink()
         self._apps.pop(name, None)
+        try:
+            shown = self.state(name)
+        except Exception:
+            # It may be the only copy of the earlier session's cuts.
+            path.write_bytes(kept)
+            self._apps.pop(name, None)
+            raise
         log.info("%s: no longer starts from another session", name)
-        return self.state(name)
+        return shown
 
     def _existing(self, name: str) -> Path:
         """A session's directory, without reading anything in it: it may not load."""
@@ -217,12 +239,15 @@ class Sessions:
 
         The session it loads is kept, for the state asked next.
         """
-        self._existing(name)
+        target = self._existing(name)
+        # Whether it starts from another, told without loading: a seed that keeps the session
+        # from loading can still be removed before round 1.
+        seeded = (target / seeding.SEED_FILE).exists()
         try:
             self._app(name)
         except EXPECTED as exc:
-            return {"status": SetupLoad.REFUSED, "reason": str(exc)}
-        return {"status": SetupLoad.LOADS, "reason": ""}
+            return {"status": SetupLoad.REFUSED, "reason": str(exc), "seeded": seeded}
+        return {"status": SetupLoad.LOADS, "reason": "", "seeded": seeded}
 
     def delete(self, name: str) -> list[str]:
         """Remove a session for good, whether or not it loads; answer the names left."""

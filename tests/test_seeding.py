@@ -116,6 +116,7 @@ def test_a_seeded_session_confirms_the_predicted_best_cut_instead_of_cutting_the
         "status": "unconfirmed",
         "transfer": "limits",
         "stickout_mm": 30.0,
+        "stickout_tolerance_mm": 0.6,
     }
     # The earlier cuts are on the map before any cut here, apart from this session's own.
     assert len(state["seeded"]) == cuts_there and state["observations"] == []
@@ -289,8 +290,24 @@ def test_a_damaged_seed_is_refused_with_what_to_do(measured):
     engine.call("create", NEW, NAME)
     (engine.root / NEW / seeding.SEED_FILE).write_text('{"schema": 99}', encoding="utf-8")
     status = Engine(engine.root).call("setup_status", NEW)
-    assert status["status"] == "refused"
+    assert status["status"] == "refused" and status["seeded"]
     assert "seed.json cannot be read (schema 99)" in status["reason"]
+    # Before round 1 it can be removed without being read, and the session loads again.
+    fresh = Engine(engine.root)
+    assert fresh.call("unseed", NEW)["seed"] is None
+    assert fresh.call("setup_status", NEW) == {"status": "loads", "reason": "", "seeded": False}
+
+
+def test_a_seed_is_kept_when_the_session_does_not_load_without_it(measured):
+    engine = measured
+    engine.call("create", NEW, NAME)
+    seed_file = engine.root / NEW / seeding.SEED_FILE
+    kept = seed_file.read_bytes()
+    (engine.root / NEW / session.SETUP_FILE).write_text("[machine\n", encoding="utf-8")
+    fresh = Engine(engine.root)
+    with pytest.raises(RuntimeError, match="setup.toml"):
+        fresh.call("unseed", NEW)
+    assert seed_file.read_bytes() == kept
 
 
 def test_a_seed_that_only_chattered_stays_on_the_map_and_round_1_is_the_grid(engine):
@@ -731,6 +748,10 @@ def test_a_prepared_session_starts_from_an_earlier_one_and_confirms_once_its_val
     }
     with pytest.raises(RuntimeError, match="values to confirm on the machine"):
         engine.call("plan", PREPARED, "fresh")
+    # The report claims no stickout it has not compared.
+    report = engine.call("report_html", PREPARED, "mm")
+    assert "machine, holder and cutter (this session's stickout is still to confirm" in report
+    assert "holder, cutter and stickout" not in report
     # Saving the wizard confirms the stickout, which is then checked: the placeholder is
     # another assembly, and the session stays as it was.
     values = engine.call("setup_form", PREPARED)["values"]
@@ -747,6 +768,7 @@ def test_a_prepared_session_starts_from_an_earlier_one_and_confirms_once_its_val
     assert (state["next"], state["next_planner"]) == ("plan", "confirm")
     state = engine.call("plan", PREPARED, "fresh")
     assert state["rounds"][0]["planner"] == "confirm"
+    assert "holder, cutter and stickout in" in engine.call("report_html", PREPARED, "mm")
 
     # Once a round is planned, what the session started from is fixed.
     with pytest.raises(RuntimeError, match="can only be seeded before its first round"):
@@ -772,6 +794,10 @@ def test_start_from_is_refused_with_the_reason_and_writes_nothing(measured):
         engine.call("start_from", NAME, NAME)
     with pytest.raises(RuntimeError, match="no session named 'missing'"):
         engine.call("start_from", "missing", NAME)
+    # One still on the example setup: fill it in, or use New, which takes the earlier setup.
+    engine.call("create", "blank")
+    with pytest.raises(RuntimeError, match="'blank' still holds the example setup"):
+        engine.call("start_from", "blank", NAME)
 
     # Another tool assembly. Only the stickout waits for the wizard: a flute count still to
     # confirm is compared as it stands.
@@ -786,7 +812,7 @@ def test_start_from_is_refused_with_the_reason_and_writes_nothing(measured):
     with pytest.raises(RuntimeError, match="no session named 'gone'"):
         engine.call("start_from", PREPARED, "gone")
 
-    for name in ("planned", PREPARED):
+    for name in ("planned", PREPARED, "blank"):
         assert not (engine.root / name / seeding.SEED_FILE).exists()
         assert engine.call("state", name)["seed"] is None
     assert (engine.root / PREPARED / session.SETUP_FILE).read_bytes() == written

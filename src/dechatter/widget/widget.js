@@ -61,6 +61,7 @@ let dialog = 'closed';
 // Whether the open session's setup loads ('loads' | 'refused'), as the engine checks it;
 // null with no session open. Reset and Export need it to load; the rounds need not.
 let setupStatus = null;
+let seededOnDisk = false; // whether it holds a seed.json, loaded or not; read with setupStatus
 let stockChoice = 'same'; // survives redraws: planning on the wrong face position cuts air or too deep
 // What the file picked next is imported for: 'open' it as a session, or 'seed' a session from
 // it in the New dialog.
@@ -146,14 +147,16 @@ async function openSession(name) {
 }
 
 // Whether a session's setup loads, apart from its rounds: a session whose rounds do not
-// load can still be reset and exported.
+// load can still be reset and exported. And whether it holds a seed, read or not: one that
+// keeps it from loading can still be removed before round 1.
 async function checkSetup(name) {
   requests += 1;
   render();
   try {
-    const { status } = await engine('setup_status', name);
+    const { status, seeded } = await engine('setup_status', name);
     if (name === current) {
       setupStatus = status;
+      seededOnDisk = seeded;
     }
   } catch (err) {
     if (name === current) {
@@ -271,6 +274,7 @@ async function startSessionFrom() {
     const next = await engine('start_from', name, $('new-from').value);
     if (name === current) {
       state = next;
+      editing = null;
     }
     closeInfo();
     $('new-dialog').close();
@@ -337,11 +341,16 @@ function goToStep(step) {
   preview(editing);
 }
 
+// Busy while the form loads: nothing may change what it shows (Start from, say) meanwhile.
 async function editSetup() {
+  requests += 1;
+  render();
   try {
     await openWizard();
   } catch (err) {
     showError(err.message);
+  } finally {
+    requestDone();
   }
   render();
 }
@@ -488,9 +497,16 @@ const ACTIONS = {
     get phrase() {
       return `Don't start from ${state?.seed?.source ?? 'the earlier session'}`;
     },
-    question: (name) => `Don't start ${name} from ${state.seed.source}? Its copy of ${state.seed.source}'s ${plural(state.seed.passes, 'analysed cut')} is removed, and round 1 is the coarse grid. Its setup stays as it is.`,
+    // `seed` as shown when asked; null when the session does not load (its seed may be why).
+    question: (name, held, seed) => (seed
+      ? `Don't start ${name} from ${seed.source}? Its copy of ${seed.source}'s ${plural(seed.passes, 'analysed cut')} is removed, and round 1 is the coarse grid. Its setup stays as it is.`
+      : `Don't start ${name} from the earlier session? Its seed.json, with that session's cuts, is removed. Its setup stays as it is.`),
     note: 'Start from can pick it again while it is in this browser, or Import it. Export keeps a copy as a zip.',
-    run: (name) => changeSession(name, 'unseed'),
+    // A session that did not load may load without its seed.
+    async run(name) {
+      await changeSession(name, 'unseed');
+      await checkSetup(name);
+    },
   },
 };
 
@@ -508,7 +524,8 @@ async function ask(action) {
     // A session whose setup does not load (from dechatter 0.1.x, or damaged) cannot be
     // exported; one whose rounds alone do not load can.
     const loads = setupStatus === 'loads';
-    $('confirm-question').textContent = question(name, await engine('contents', name));
+    const shown = state?.seed ?? null;
+    $('confirm-question').textContent = question(name, await engine('contents', name), shown);
     $('confirm-note').textContent = loads ? note : `${note.split('.')[0]}. This session cannot be exported: its setup does not load (it is from dechatter 0.1.x, or damaged).`;
     $('confirm-export').hidden = !loads;
     $('confirm-go').textContent = verb;
@@ -903,9 +920,26 @@ function renderSessions() {
   $('reset-session').disabled ||= setupStatus !== 'loads';
   // What a session starts from is chosen before its first round, and not while its wizard
   // is open: the wizard checks the tool assembly against it.
-  $('seed-session').hidden = !state || state.rounds.length > 0 || setupStatus !== 'loads';
-  $('seed-session').textContent = state?.seed ? ACTIONS.unseed.phrase : 'Start from…';
+  const offered = seedAction();
+  $('seed-session').hidden = offered === null;
+  $('seed-session').textContent = offered === 'unseed' ? ACTIONS.unseed.phrase : 'Start from…';
   $('seed-session').disabled = pinned || editing !== null;
+}
+
+// What the button beside Setup offers: 'start' from an earlier session or 'unseed', before
+// round 1; null otherwise. A seed that keeps the session from loading can still go (the
+// engine refuses if the session has rounds); the example setup is filled in first.
+function seedAction() {
+  if (state === null) {
+    return setupStatus === 'refused' && seededOnDisk ? 'unseed' : null;
+  }
+  if (setupStatus !== 'loads' || state.rounds.length > 0) {
+    return null;
+  }
+  if (state.seed) {
+    return 'unseed';
+  }
+  return state.next === 'setup' ? null : 'start';
 }
 
 // The session's tool and cut in one line, lengths in the machine's units, the session it was
@@ -1143,7 +1177,7 @@ function renderStep() {
     );
     // Start from left the placeholder stickout alone; the confirmed one must match.
     if (state.seed && 'tool.stickout_mm' in state.pending) {
-      step.append(el('p', {}, `Started from ${state.seed.source}, whose stickout was ${length(state.seed.stickout_mm, units(), { mmToo: true })}: saving the wizard checks the stickout against it, and refuses one more than ${length(0.6, units())} off.`));
+      step.append(el('p', {}, `Started from ${state.seed.source}, whose stickout was ${length(state.seed.stickout_mm, units(), { mmToo: true })}: saving the wizard checks the stickout against it, and refuses one more than ${length(state.seed.stickout_tolerance_mm, units(), { mmToo: true })} off.`));
     }
     step.append(
       el('p', {}, button('Open the setup wizard', editSetup, { className: 'primary' })),
@@ -1489,7 +1523,7 @@ $('new-import').onclick = () => {
 };
 $('new-from-row').append(...Object.values(info('new-from', 'Start from', START_FROM)));
 $('edit-setup').onclick = editSetup;
-$('seed-session').onclick = () => (state?.seed ? ask('unseed') : startFrom());
+$('seed-session').onclick = () => (seedAction() === 'unseed' ? ask('unseed') : startFrom());
 $('setup-back').onclick = previousStep;
 $('setup-form').onsubmit = (event) => {
   event.preventDefault();
