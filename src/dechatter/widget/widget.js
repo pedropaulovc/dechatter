@@ -62,9 +62,12 @@ let dialog = 'closed';
 // null with no session open. Reset and Export need it to load; the rounds need not.
 let setupStatus = null;
 let stockChoice = 'same'; // survives redraws: planning on the wrong face position cuts air or too deep
-// What the file picked next is imported for: 'open' it as a session, or 'seed' the session
-// being created in the New dialog.
+// What the file picked next is imported for: 'open' it as a session, or 'seed' a session from
+// it in the New dialog.
 let importing = 'open';
+// The session the New dialog starts from an earlier one (Start from), keeping its own setup;
+// '' while the dialog makes a new session.
+let startFor = '';
 
 // ---- engine (Python in a worker) -------------------------------------------------------
 
@@ -165,7 +168,26 @@ async function checkSetup(name) {
 // The New dialog: a name, and optionally an earlier session on the same tool assembly to
 // start from. While it is open the session shown cannot change.
 function newSession() {
+  openSourceDialog('');
+}
+
+// Start from: the same dialog, without a name, for the open session while it has no round.
+// It keeps its own setup (a prepared session arrives with one); the engine checks it is the
+// tool assembly the earlier session measured.
+function startFrom() {
+  openSourceDialog(current);
+}
+
+function openSourceDialog(name) {
+  startFor = name;
+  $('new-title').textContent = name
+    ? `Start ${name} from an earlier session on the same tool assembly. ${name} keeps its own setup.`
+    : 'New session: one per tool assembly and kind of cut.';
+  $('new-name-row').hidden = Boolean(name);
+  $('new-name').required = !name;
   $('new-name').value = '';
+  $('new-from').required = Boolean(name);
+  $('new-create').textContent = name ? 'Start' : 'Create';
   fillSources('');
   newError('');
   closeInfo();
@@ -182,10 +204,11 @@ function renderNew() {
   }
 }
 
+// The sessions to start from: any other in this browser. Start from has to pick one.
 function fillSources(chosen) {
   $('new-from').replaceChildren(
-    el('option', { value: '' }, 'nothing: plan the coarse grid'),
-    ...names.map((name) => el('option', { value: name }, name)),
+    el('option', { value: '' }, startFor ? 'choose a session' : 'nothing: plan the coarse grid'),
+    ...names.filter((name) => name !== startFor).map((name) => el('option', { value: name }, name)),
   );
   $('new-from').value = chosen;
 }
@@ -199,6 +222,10 @@ function newError(message) {
 // be opened, made or imported in between.
 async function createSession() {
   if (busy()) {
+    return;
+  }
+  if (startFor) {
+    await startSessionFrom();
     return;
   }
   const name = $('new-name').value.trim();
@@ -234,7 +261,29 @@ async function createSession() {
   }
 }
 
-// An exported session to start the new one from: stored in this browser like any import,
+// The open session is pinned while the dialog is open. On a refusal (another tool assembly,
+// a round planned meanwhile) the reason shows in the dialog, which stays open.
+async function startSessionFrom() {
+  const name = startFor;
+  requests += 1;
+  render();
+  try {
+    const next = await engine('start_from', name, $('new-from').value);
+    if (name === current) {
+      state = next;
+    }
+    closeInfo();
+    $('new-dialog').close();
+    showError('');
+  } catch (err) {
+    newError(err.message);
+  } finally {
+    requestDone();
+    render();
+  }
+}
+
+// An exported session to start from: stored in this browser like any import,
 // then chosen in the dialog.
 async function importSource(file) {
   if (busy()) {
@@ -381,25 +430,45 @@ function jobOf(name) {
   return run !== null && run.name === name;
 }
 
-// Why a session cannot be deleted or reset now; '' when it can.
-function busyRefusal(name, verb) {
+// Why a session cannot be deleted, reset or unseeded now; '' when it can. `phrase` says what
+// to do later: "Delete the session".
+function busyRefusal(name, phrase) {
   if (mic.recording) {
-    return `A round is being recorded. ${verb} the session after the job.`;
+    return `A round is being recorded. ${phrase} after the job.`;
   }
   if (jobOf(name)) {
-    return `A round of ${name} is running. ${verb} the session after it.`;
+    return `A round of ${name} is running. ${phrase} after it.`;
   }
   return '';
 }
 
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
+// Run a request that answers with the session's new state. On a refusal or failure the
+// session shows as the engine has it now.
+async function changeSession(name, method) {
+  try {
+    const after = await engine(method, name);
+    if (name === current) {
+      state = after;
+      editing = null;
+    }
+  } catch (err) {
+    if (name === current) {
+      state = await engine('state', name).catch(() => state);
+    }
+    throw err;
+  }
+}
+
 // Deleting removes the session; resetting discards its rounds and keeps its setup. Both ask
 // first, naming what goes, and offer Export. They read nothing but the folder, so a session
-// that does not load (from dechatter 0.1.x, or damaged) can go too.
+// that does not load (from dechatter 0.1.x, or damaged) can go too. Don't start from removes
+// a seed before round 1: the earlier session's cuts may not be in this browser to pick again.
 const ACTIONS = {
   delete: {
     verb: 'Delete',
+    phrase: 'Delete the session',
     question: (name, held) => `Delete session ${name}? It holds ${plural(held.rounds, 'round')} and ${plural(held.recordings, 'recording')}.`,
     note: 'Deleting cannot be undone. Export keeps a copy as a zip.',
     async run(name) {
@@ -409,30 +478,26 @@ const ACTIONS = {
   },
   reset: {
     verb: 'Reset',
+    phrase: 'Reset the session',
     question: (name, held) => `Reset session ${name}? Its ${plural(held.rounds, 'round')} and ${plural(held.recordings, 'recording')} are discarded; its setup stays, and planning starts again from round 1.`,
     note: 'Resetting cannot be undone. Export keeps a copy as a zip.',
-    // On a refusal or failure the session shows as the engine has it now.
-    async run(name) {
-      try {
-        const after = await engine('reset', name);
-        if (name === current) {
-          state = after;
-          editing = null;
-        }
-      } catch (err) {
-        if (name === current) {
-          state = await engine('state', name).catch(() => state);
-        }
-        throw err;
-      }
+    run: (name) => changeSession(name, 'reset'),
+  },
+  unseed: {
+    verb: "Don't start from it",
+    get phrase() {
+      return `Don't start from ${state?.seed?.source ?? 'the earlier session'}`;
     },
+    question: (name) => `Don't start ${name} from ${state.seed.source}? Its copy of ${state.seed.source}'s ${plural(state.seed.passes, 'analysed cut')} is removed, and round 1 is the coarse grid. Its setup stays as it is.`,
+    note: 'Start from can pick it again while it is in this browser, or Import it. Export keeps a copy as a zip.',
+    run: (name) => changeSession(name, 'unseed'),
   },
 };
 
 async function ask(action) {
   const name = current;
-  const { verb, question, note } = ACTIONS[action];
-  const refusal = busyRefusal(name, verb);
+  const { verb, phrase, question, note } = ACTIONS[action];
+  const refusal = busyRefusal(name, phrase);
   if (refusal) {
     showError(refusal);
     return;
@@ -460,7 +525,7 @@ async function ask(action) {
 async function confirmed() {
   const { session: name, action } = $('confirm-dialog').dataset;
   $('confirm-dialog').close();
-  const refusal = busyRefusal(name, ACTIONS[action].verb);
+  const refusal = busyRefusal(name, ACTIONS[action].phrase);
   if (refusal) {
     showError(refusal);
     return;
@@ -831,11 +896,16 @@ function renderSessions() {
   // Export reads only what is stored: it works while a round runs, without that round.
   $('export').disabled = setupStatus !== 'loads' || busy();
   // Also for a session that failed to load: deleting it is the way to be rid of it.
-  for (const [id, verb] of [['delete-session', 'Delete'], ['reset-session', 'Reset']]) {
-    $(id).disabled = !names.includes(current) || busy() || Boolean(busyRefusal(current, verb)) || dialog !== 'closed';
+  for (const [id, action] of [['delete-session', 'delete'], ['reset-session', 'reset']]) {
+    $(id).disabled = !names.includes(current) || busy() || Boolean(busyRefusal(current, ACTIONS[action].phrase)) || dialog !== 'closed';
   }
   // Reset keeps the setup, so the setup has to load; Delete is the way out otherwise.
   $('reset-session').disabled ||= setupStatus !== 'loads';
+  // What a session starts from is chosen before its first round, and not while its wizard
+  // is open: the wizard checks the tool assembly against it.
+  $('seed-session').hidden = !state || state.rounds.length > 0 || setupStatus !== 'loads';
+  $('seed-session').textContent = state?.seed ? ACTIONS.unseed.phrase : 'Start from…';
+  $('seed-session').disabled = pinned || editing !== null;
 }
 
 // The session's tool and cut in one line, lengths in the machine's units, the session it was
@@ -1070,6 +1140,12 @@ function renderStep() {
     step.append(
       el('p', {}, 'This setup was prepared ahead of time. Measure these on the machine and enter them in the setup wizard; saving it confirms them. Nothing is planned until then.'),
       el('ul', {}, ...Object.entries(state.pending).map(([at, text]) => el('li', {}, `${wizardField(at)}: ${text}`))),
+    );
+    // Start from left the placeholder stickout alone; the confirmed one must match.
+    if (state.seed && 'tool.stickout_mm' in state.pending) {
+      step.append(el('p', {}, `Started from ${state.seed.source}, whose stickout was ${length(state.seed.stickout_mm, units(), { mmToo: true })}: saving the wizard checks the stickout against it, and refuses one more than ${length(0.6, units())} off.`));
+    }
+    step.append(
       el('p', {}, button('Open the setup wizard', editSetup, { className: 'primary' })),
     );
     return;
@@ -1413,6 +1489,7 @@ $('new-import').onclick = () => {
 };
 $('new-from-row').append(...Object.values(info('new-from', 'Start from', START_FROM)));
 $('edit-setup').onclick = editSetup;
+$('seed-session').onclick = () => (state?.seed ? ask('unseed') : startFrom());
 $('setup-back').onclick = previousStep;
 $('setup-form').onsubmit = (event) => {
   event.preventDefault();
@@ -1438,8 +1515,8 @@ $('confirm-dialog').addEventListener('close', () => {
 $('confirm-export').onclick = async () => {
   showError('');
   await exportSession($('confirm-dialog').dataset.session);
-  const { verb } = ACTIONS[$('confirm-dialog').dataset.action];
-  $('confirm-note').textContent = $('error').hidden ? `Exported. ${verb} it now, or cancel.` : `Not exported: ${$('error').textContent}`;
+  const { phrase } = ACTIONS[$('confirm-dialog').dataset.action];
+  $('confirm-note').textContent = $('error').hidden ? `Exported. ${phrase} now, or cancel.` : `Not exported: ${$('error').textContent}`;
 };
 $('confirm-go').onclick = confirmed;
 $('confirm-cancel').onclick = () => $('confirm-dialog').close();

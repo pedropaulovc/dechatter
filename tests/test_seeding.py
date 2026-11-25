@@ -4,12 +4,15 @@ confirmation round that replaces the grid, and the way back to the grid."""
 from __future__ import annotations
 
 import dataclasses
+import io
 import json
 import math
+import re
+import zipfile
 
 import pytest
 import synth
-from test_app import NAME, Engine
+from test_app import NAME, PENDING, Engine, prepared_zip
 
 from dechatter import bayes, seeding, session
 from dechatter.bayes import Observation
@@ -112,6 +115,7 @@ def test_a_seeded_session_confirms_the_predicted_best_cut_instead_of_cutting_the
         "passes": cuts_there,
         "status": "unconfirmed",
         "transfer": "limits",
+        "stickout_mm": 30.0,
     }
     # The earlier cuts are on the map before any cut here, apart from this session's own.
     assert len(state["seeded"]) == cuts_there and state["observations"] == []
@@ -684,3 +688,157 @@ def test_the_control_is_the_deepest_chatter_band_not_a_pocket_probed_to_its_ceil
     control = [(rpm, expected) for rpm, _, _, _, expected in tests if expected is not None]
     assert control == [(2200.0, Verdict.UNSTABLE)]
     assert {rpm for rpm, *_ in tests} == {4600.0, 3700.0, 2200.0}
+
+
+PREPARED = "prepared-1018"
+
+
+def prepare(engine: Engine, name: str = PREPARED, pending: str = PENDING, **tool) -> bytes:
+    """Import a prepared session as harmonic-analyzer hands it over: the measured session's
+    setup with `[pending]`, its `tool` entries replaced (a placeholder stickout, say), in
+    1018. Answer the setup file as written."""
+    text = (engine.root / NAME / session.SETUP_FILE).read_text(encoding="utf-8")
+    text = text.replace('material = "aluminum-6061"', 'material = "steel-1018"')
+    for key, value in tool.items():
+        text = re.sub(rf"(?m)^{key} = .*$", f"{key} = {value}", text)
+    assert engine.call("import_zip", prepared_zip(name, text + pending)) == name
+    return (engine.root / name / session.SETUP_FILE).read_bytes()
+
+
+def test_a_prepared_session_starts_from_an_earlier_one_and_confirms_once_its_values_are(measured):
+    engine = measured
+    # The stickout is a placeholder far from the earlier session's 30 mm: it is to be
+    # measured on the machine, so it does not stop the seed.
+    written = prepare(engine, stickout_mm=45.0)
+    source = engine.call("state", NAME)
+    passes = sum(len(cuts_of(r)) for r in source["rounds"])
+
+    state = engine.call("start_from", PREPARED, NAME)
+    assert state["seed"]["source"] == NAME and state["seed"]["passes"] == passes
+    assert state["seed"]["status"] == "unconfirmed" and state["seed"]["stickout_mm"] == 30.0
+    assert state["seeded"] and state["rounds"] == []
+    # The session keeps its own setup, [pending] and all; the seed keeps the earlier one's.
+    assert (engine.root / PREPARED / session.SETUP_FILE).read_bytes() == written
+    seed = seeding.load(engine.root / PREPARED)
+    assert seed.setup_text == (engine.root / NAME / session.SETUP_FILE).read_text("utf-8")
+    assert engine.call("setup_form", PREPARED)["seed"] == NAME
+    assert engine.call("state", PREPARED)["summary"]["material"] == "steel-1018"
+
+    # Seeding confirms nothing: planning waits for the wizard.
+    assert state["next"] == "confirm" and set(state["pending"]) == {
+        "stock.height_mm",
+        "tool.stickout_mm",
+    }
+    with pytest.raises(RuntimeError, match="values to confirm on the machine"):
+        engine.call("plan", PREPARED, "fresh")
+    # Saving the wizard confirms the stickout, which is then checked: the placeholder is
+    # another assembly, and the session stays as it was.
+    values = engine.call("setup_form", PREPARED)["values"]
+    with pytest.raises(RuntimeError, match="stickout was 30 mm, not 45 mm") as refused:
+        engine.call("save_setup", PREPARED, json.dumps(values))
+    assert f"don't start from {NAME}" in str(refused.value)
+    assert (engine.root / PREPARED / session.SETUP_FILE).read_bytes() == written
+    assert engine.call("state", PREPARED)["next"] == "confirm"
+
+    # The stickout measured within 0.6 mm: round 1 is the confirmation round.
+    values["tool"]["stickout_mm"] = 30.4
+    state = engine.call("save_setup", PREPARED, json.dumps(values))
+    assert state["pending"] == {} and state["seed"]["source"] == NAME
+    assert (state["next"], state["next_planner"]) == ("plan", "confirm")
+    state = engine.call("plan", PREPARED, "fresh")
+    assert state["rounds"][0]["planner"] == "confirm"
+
+    # Once a round is planned, what the session started from is fixed.
+    with pytest.raises(RuntimeError, match="can only be seeded before its first round"):
+        engine.call("start_from", PREPARED, NAME)
+    with pytest.raises(RuntimeError, match="a seed can only be removed before the first round"):
+        engine.call("unseed", PREPARED)
+    assert seeding.load(engine.root / PREPARED) == seed
+
+
+def test_start_from_is_refused_with_the_reason_and_writes_nothing(measured):
+    engine = measured
+    # A session with a round.
+    engine.call("create", "planned")
+    engine.call("save_setup", "planned", json.dumps(engine.call("setup_form", NAME)["values"]))
+    engine.call("plan", "planned", "fresh")
+    with pytest.raises(RuntimeError, match="map can only be seeded before its first round"):
+        engine.call("start_from", "planned", NAME)
+    # One that already starts from another.
+    engine.call("create", NEW, NAME)
+    with pytest.raises(RuntimeError, match=f"already starts from {NAME}: choose Don't start"):
+        engine.call("start_from", NEW, NAME)
+    with pytest.raises(RuntimeError, match="cannot start from itself"):
+        engine.call("start_from", NAME, NAME)
+    with pytest.raises(RuntimeError, match="no session named 'missing'"):
+        engine.call("start_from", "missing", NAME)
+
+    # Another tool assembly. Only the stickout waits for the wizard: a flute count still to
+    # confirm is compared as it stands.
+    flutes = '\n[pending]\n"tool.flutes" = "count them"\n'
+    written = prepare(engine, pending=flutes, flutes=4)
+    with pytest.raises(RuntimeError, match="cutter had 3 flutes, not 4") as refused:
+        engine.call("start_from", PREPARED, NAME)
+    assert f"{PREPARED!r} cannot start from {NAME}" in str(refused.value)
+    # A source with no analysed cut, or that is missing.
+    with pytest.raises(RuntimeError, match="'planned' has no analysed cut"):
+        engine.call("start_from", PREPARED, "planned")
+    with pytest.raises(RuntimeError, match="no session named 'gone'"):
+        engine.call("start_from", PREPARED, "gone")
+
+    for name in ("planned", PREPARED):
+        assert not (engine.root / name / seeding.SEED_FILE).exists()
+        assert engine.call("state", name)["seed"] is None
+    assert (engine.root / PREPARED / session.SETUP_FILE).read_bytes() == written
+
+
+def test_a_seed_that_cannot_be_written_whole_is_not_left_behind(measured, monkeypatch):
+    engine = measured
+    prepare(engine)
+
+    def half(self, path):
+        path.write_text('{"schema": 1, "sou', encoding="utf-8")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(Seed, "save", half)
+    with pytest.raises(RuntimeError, match="disk full"):
+        engine.call("start_from", PREPARED, NAME)
+    assert not (engine.root / PREPARED / seeding.SEED_FILE).exists()
+    assert engine.call("state", PREPARED)["seed"] is None
+
+
+def test_a_seed_can_be_removed_and_chosen_again_before_the_first_round(measured):
+    engine = measured
+    engine.call("create", NEW, NAME)
+    setup_file = engine.root / NEW / session.SETUP_FILE
+    before = setup_file.read_bytes()
+
+    state = engine.call("unseed", NEW)
+    assert state["seed"] is None and state["seeded"] == []
+    assert (state["next"], state["next_planner"]) == ("plan", "grid")
+    assert not (engine.root / NEW / seeding.SEED_FILE).exists()
+    assert setup_file.read_bytes() == before
+    with pytest.raises(RuntimeError, match="does not start from another session"):
+        engine.call("unseed", NEW)
+
+    state = engine.call("start_from", NEW, NAME)
+    assert state["seed"]["source"] == NAME and state["next_planner"] == "confirm"
+    assert setup_file.read_bytes() == before
+
+
+def test_export_and_import_keep_a_prepared_session_and_its_seed(measured, tmp_path):
+    engine = measured
+    prepare(engine, stickout_mm=45.0)
+    before = engine.call("start_from", PREPARED, NAME)
+    archive = engine.call("export_zip", PREPARED, "mm")
+    held = zipfile.ZipFile(io.BytesIO(archive))
+    assert "[pending]" in held.read(f"{PREPARED}/{session.SETUP_FILE}").decode("utf-8")
+    assert f"{PREPARED}/{seeding.SEED_FILE}" in held.namelist()
+
+    # Another browser, which never held the earlier session.
+    other = Engine(tmp_path / "elsewhere")
+    assert other.call("import_zip", archive) == PREPARED
+    after = other.call("state", PREPARED)
+    for key in ("seed", "seeded", "pending", "next", "map"):
+        assert after[key] == before[key]
+    assert seeding.load(other.root / PREPARED) == seeding.load(engine.root / PREPARED)

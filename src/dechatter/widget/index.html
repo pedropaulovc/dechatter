@@ -17,6 +17,7 @@
       <button id="delete-session" disabled>Delete</button>
       <button id="new-session">New</button>
       <button id="edit-setup" disabled>Setup</button>
+      <button id="seed-session" hidden>Start from…</button>
       <button id="export" disabled>Export</button>
       <button id="import">Import</button>
       <input id="import-file" type="file" accept=".zip" hidden>
@@ -60,8 +61,8 @@
 
     <dialog id="new-dialog" aria-labelledby="new-title">
       <form id="new-form">
-        <p id="new-title">New session: one per tool assembly and kind of cut.</p>
-        <p>
+        <p id="new-title"></p>
+        <p id="new-name-row">
           <label for="new-name">Name</label>
           <input id="new-name" required pattern="[A-Za-z0-9][A-Za-z0-9._\-]{0,63}" placeholder="al-10mm-3fl" title="Letters, digits, dot, dash and underscore">
         </p>

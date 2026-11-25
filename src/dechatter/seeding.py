@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Collection
 from dataclasses import asdict, dataclass
 from enum import StrEnum
 from functools import cached_property
@@ -34,7 +35,7 @@ from pathlib import Path
 
 from . import bayes, materials
 from .bayes import Observation
-from .config import Setup, Vary, parse_setup
+from .config import Pending, Setup, Vary, parse_setup
 from .detect import Verdict
 from .plan import (
     ENGAGEMENT_TOLERANCE_MM,
@@ -53,6 +54,9 @@ SEED_FILE = "seed.json"
 # holder against a stop or a scale) and the diameter within that (a regrind is another tool).
 STICKOUT_TOLERANCE_MM = 0.6
 DIAMETER_TOLERANCE_MM = 0.05
+# A prepared setup may hold a placeholder stickout, marked to confirm on the machine: it is
+# compared once the setup wizard has confirmed it.
+STICKOUT = "tool.stickout_mm"
 # A pass is at this session's own depth (or width) when it is this close to it.
 SAME_LEVEL_MM = 0.01
 # A pass is a full-width slot when its width, kept to 0.001 mm in a plan, is this close to
@@ -170,12 +174,13 @@ def _label(text: str) -> str:
     return " ".join(text.casefold().split())
 
 
-def mismatches(source: Setup, new: Setup) -> list[str]:
+def mismatches(source: Setup, new: Setup, unconfirmed: Collection[str] = ()) -> list[str]:
     """Why `new` is not the tool assembly `source` measured; empty when it is.
 
-    A machine name or holder left empty on either side says nothing, so it passes. What the
-    cut may differ in (material, depth, width, what is stepped, direction, chip load) is
-    not looked at here: `carry` deals with those.
+    A machine name or holder left empty on either side says nothing, so it passes, and so
+    does a stickout `new` still marks to confirm on the machine (`unconfirmed`: the fields
+    of its `[pending]` table). What the cut may differ in (material, depth, width, what is
+    stepped, direction, chip load) is not looked at here: `carry` deals with those.
     """
     found = []
     old_tool, tool = source.tool, new.tool
@@ -196,7 +201,8 @@ def mismatches(source: Setup, new: Setup) -> list[str]:
         found.append(f"the cutter had {old_tool.flutes} flutes, not {tool.flutes}")
     if old_tool.material is not tool.material:
         found.append(f"the cutter was {old_tool.material.value}, not {tool.material.value}")
-    if abs(old_tool.stickout_mm - tool.stickout_mm) > STICKOUT_TOLERANCE_MM:
+    off = abs(old_tool.stickout_mm - tool.stickout_mm) > STICKOUT_TOLERANCE_MM
+    if off and STICKOUT not in unconfirmed:
         found.append(
             f"the stickout was {old_tool.stickout_mm:g} mm, not {tool.stickout_mm:g} mm "
             f"(more than {STICKOUT_TOLERANCE_MM:g} mm apart)"
@@ -204,15 +210,16 @@ def mismatches(source: Setup, new: Setup) -> list[str]:
     return found
 
 
-def check(seed: Seed, setup: Setup) -> None:
-    """Refuse a setup that is another tool assembly than the seed's."""
-    found = mismatches(seed.setup, setup)
+def check(seed: Seed, setup: Setup, pending: Pending = ()) -> None:
+    """Refuse a setup that is another tool assembly than the seed's. A stickout the setup
+    marks as pending is a placeholder: it is checked once saving the wizard confirms it."""
+    found = mismatches(seed.setup, setup, {at for at, _ in pending})
     if not found:
         return
     raise SeedError(
         f"this session starts from {seed.source}, which measured another tool assembly: "
         f"{'; '.join(found)}. A stability map belongs to one machine, holder, cutter and "
-        "stickout: put them back, or create the session without starting from another"
+        f"stickout: put them back or, while no round is planned, don't start from {seed.source}"
     )
 
 

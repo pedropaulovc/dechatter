@@ -36,6 +36,13 @@ What changed for people who use the dechatter widget and command line. The forma
   and each stop of the round names the speed stop to set ("speed stop 5 of 9, counting from
   the slowest"), in the widget and in the program's `M0` comment. The stops only bound the
   search, so they may change after a round was cut.
+- A session that has no round yet, such as a prepared one, can start from an earlier session
+  too ("Start from…" next to Setup, with the same choice and Import). It keeps its own setup,
+  `[pending]` included, and still plans nothing until the wizard is saved; round 1 is then
+  the confirmation round. It is refused with the reason once a round is planned, while it
+  already starts from another, or on another tool assembly. A stickout still to confirm under
+  `[pending]` is compared only when saving the wizard confirms it. "Don't start from …"
+  removes the seed again before round 1.
 
 ### Changed
 
