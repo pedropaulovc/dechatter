@@ -1028,12 +1028,14 @@ function renderSetup() {
 
 // Planning on the wrong face position cuts air or too deep: the choice survives redraws.
 function stockSelect() {
-  const stock = el('select', {}, el('option', { value: 'same' }, 'same block'), el('option', { value: 'fresh' }, 'fresh block, face at Y0'));
+  const stock = el('select', { className: 'stock-choice' }, el('option', { value: 'same' }, 'same block'), el('option', { value: 'fresh' }, 'fresh block, face at Y0'));
   stock.value = stockChoice;
   stock.onchange = () => {
     stockChoice = stock.value;
     // Every stock choice on the page shows the one that planning uses.
-    render();
+    for (const other of document.querySelectorAll('select.stock-choice')) {
+      other.value = stockChoice;
+    }
   };
   return stock;
 }

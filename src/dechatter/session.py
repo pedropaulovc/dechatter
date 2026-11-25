@@ -1242,14 +1242,13 @@ def _cut_by(setup: Setup, check: Check, best: StableCut) -> bool:
     it. A check stopped before telling either way is offered again."""
     if abs(check.level_mm - level_of(setup, best)) > DEPTH_TOLERANCE_MM:
         return False
+    # The level matched: only the stepped size tells cuts apart. A pass's held size is
+    # rounded to the micron (make_pass), the level's (4.7625 mm for 3/16 in) is not.
     size = engagement_of(setup, best)
     for cut in check.cuts:
         if cut.rpm != round(best.rpm):
             continue
-        same = (
-            abs(cut.width_mm - best.width_mm) <= ENGAGEMENT_TOLERANCE_MM
-            and abs(cut.depth_mm - best.depth_mm) <= DEPTH_TOLERANCE_MM
-        )
+        same = abs(check.engagement_mm(cut) - size) <= ENGAGEMENT_TOLERANCE_MM
         if same and cut.verdict is not None:
             return True
         lighter = check.engagement_mm(cut) <= size + ENGAGEMENT_TOLERANCE_MM
