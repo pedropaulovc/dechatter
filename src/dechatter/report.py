@@ -49,8 +49,9 @@ SEED_STATUS = {
     seeding.SeedStatus.REJECTED: "rejected by this session's confirmation cuts: half or more "
     "of those it predicted came out the other way, so it is left out of the map and the "
     "round-1 grid was planned after all",
-    seeding.SeedStatus.UNTESTED: "on the map untested: none of its cuts inside this "
-    "session's search was stable, so there was no best cut to confirm and round 1 was the grid",
+    seeding.SeedStatus.UNTESTED: "on the map untested: this session's first cuts checked "
+    "nothing it predicted (it holds no stable cut inside this session's search to confirm, "
+    "or no confirmation cut it predicted got a verdict)",
     seeding.SeedStatus.UNUSED: "not used: none of it lies inside this session's search",
 }
 CARRY = {

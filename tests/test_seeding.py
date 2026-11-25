@@ -420,6 +420,91 @@ def test_limits_scale_with_the_specific_energy_and_the_arc_of_engagement(setup, 
     assert seeding.prior(slow, setup, envelope(setup)) == []
     assert seeding.confirmation(slow, setup, envelope(setup)) == []
 
+    # A load no width reaches here (a shallow cut in a soft material) is beyond a full slot:
+    # a stable pass is stable at the widest cut searched, and chatter says nothing, even
+    # where the search goes up to the cutter diameter.
+    soft = at(material="acetal", axial_depth_mm=1.0, width_max_mm=diameter)
+    assert seeding.equivalent_mm(seed, stable, soft) == math.inf
+    env = envelope(soft)
+    seen = {c.source.id: c.observation for c in seeding.carried(seed, soft, env)}
+    assert seen[stable.id].engagement_mm == pytest.approx(env.engagement_top_mm)
+    assert seen[chatter.id] is None
+
+    # Each cut's arc is on its own cutter: a slot of the earlier cutter stays a slot when
+    # this one is a hair larger, within the tolerance.
+    larger = dataclasses.replace(setup, tool=dataclasses.replace(setup.tool, diameter_mm=9.56))
+    assert seeding.mismatches(seed.setup, larger) == []
+    slotted = dataclasses.replace(seed, passes=passes((4000, diameter, 1.0, Verdict.STABLE)))
+    assert seeding.carry(slotted, slotted.passes[0], larger) is Carry.SPEEDS
+    slots = dataclasses.replace(
+        larger,
+        cut=dataclasses.replace(
+            setup.cut, vary=Vary.DEPTH, radial_width_mm=9.56, depth_max_mm=3.0, axial_depth_mm=None
+        ),
+    )
+    assert seeding.carry(slotted, slotted.passes[0], slots) is Carry.SAME
+    assert seeding.equivalent_mm(slotted, slotted.passes[0], slots) == pytest.approx(1.0)
+
+
+def test_a_rejected_seed_shows_even_where_the_power_cap_leaves_no_grid(measured):
+    engine = measured
+    engine.call("create", NEW, NAME)
+    state = engine.call("plan", NEW, "fresh")
+    setup = load_setup(engine.root / NEW / session.SETUP_FILE)
+    env = envelope(setup)
+    # Every confirmation cut is within the power cap at the speed it is cut at.
+    for p in cuts_of(state["rounds"][0]):
+        assert p["width_mm"] * p["depth_mm"] * p["feed_mm_min"] <= env.mrr_limit_mm3_min
+    cut(engine, NEW, 1, HOPELESS)
+    # The power may change after a cut. With none left for the grid the session still
+    # opens and says what comes next; planning it says why it cannot.
+    state = change(engine, NEW, machine__spindle_power_hp=0.001)
+    assert state["seed"]["status"] == "rejected"
+    assert (state["next"], state["next_planner"]) == ("plan", "grid")
+    with pytest.raises(RuntimeError, match="power cap excludes every round-1 cut"):
+        engine.call("plan", NEW, "fresh")
+
+
+def test_a_confirmation_round_that_checked_no_prediction_leaves_the_seed_untested(measured):
+    engine = measured
+    engine.call("create", NEW, NAME)
+    change(engine, NEW, cut__direction="climb")
+    planned = engine.call("plan", NEW, "fresh")["rounds"][0]
+    control = next(p for p in cuts_of(planned) if p["expected"] == "unstable")
+    cut(engine, NEW, 1, HOPELESS)
+    # The control was not heard: every other cut chattered, but nothing was predicted of them.
+    path = session.round_dir(engine.root / NEW, 1) / session.RESULTS_FILE
+    data = json.loads(path.read_text(encoding="utf-8"))
+    for p in data["passes"]:
+        if p["id"] == control["id"]:
+            p["verdict"] = p["detected"] = None
+    path.write_text(json.dumps(data), encoding="utf-8")
+    state = engine.call("state", NEW)
+    assert state["seed"]["status"] == "untested" and state["seeded"]
+    assert state["next_planner"] == "bayes"
+
+
+def test_a_session_changed_since_it_was_cut_cannot_be_started_from(measured):
+    engine = measured
+    setup_file = engine.root / NAME / session.SETUP_FILE
+    text = setup_file.read_text(encoding="utf-8")
+    assert "flutes = 3" in text
+    setup_file.write_text(text.replace("flutes = 3", "flutes = 2"), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="was cut with another tool.flutes"):
+        Engine(engine.root).call("create", NEW, NAME)
+    assert not (engine.root / NEW).exists()
+
+
+def test_a_seed_with_a_size_that_is_no_number_is_refused(measured):
+    engine = measured
+    engine.call("create", NEW, NAME)
+    seed_file = engine.root / NEW / seeding.SEED_FILE
+    data = json.loads(seed_file.read_text(encoding="utf-8"))
+    data["passes"][0]["width_mm"] = 0
+    seed_file.write_text(json.dumps(data), encoding="utf-8")
+    status = Engine(engine.root).call("setup_status", NEW)
+    assert status["status"] == "refused" and "no positive number" in status["reason"]
+
 
 def test_a_carried_over_cut_counts_for_less_than_one_made_here(setup):
     env = envelope(setup)
@@ -458,9 +543,10 @@ def test_what_the_confirmation_cuts_make_of_the_seed():
     assert seeding.judged([*agreed[1:], (stable, chatter), (stable, chatter)]) is (
         SeedStatus.REJECTED
     )
-    # Cuts nothing was predicted of decide nothing; the control alone does.
-    assert seeding.judged([(None, chatter), (None, stable)]) is SeedStatus.CONFIRMED
+    # Cuts nothing was predicted of check nothing; the control alone does.
+    assert seeding.judged([(None, chatter), (None, stable)]) is SeedStatus.UNTESTED
     assert seeding.judged([(None, chatter), (chatter, stable)]) is SeedStatus.REJECTED
+    assert seeding.judged([(None, chatter), (chatter, chatter)]) is SeedStatus.CONFIRMED
 
 
 def test_a_plan_keeps_what_was_expected_of_each_confirmation_cut(measured):

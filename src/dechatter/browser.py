@@ -86,9 +86,13 @@ class Sessions:
         text, seed = TEMPLATE, None
         if source:
             origin = self._existing(source)
+            # The other session must open as it would in the widget, and its rounds belong
+            # to its setup: a setup changed by hand since they were cut measured other cuts.
+            measured_with = self._app(source).setup
             text = (origin / session.SETUP_FILE).read_text(encoding="utf-8")
-            parse_setup(text, f"{source}/{session.SETUP_FILE}")
-            passes = session.seed_passes(session.load_rounds(origin))
+            rounds = session.load_rounds(origin)
+            session.check_measured(rounds, measured_with)
+            passes = session.seed_passes(rounds)
             if not passes:
                 raise SessionError(
                     f"session {source!r} has no analysed cut with a verdict to start from"

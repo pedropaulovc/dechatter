@@ -151,10 +151,15 @@ def build_map(setup: Setup, env: Envelope, observations: list[Observation]) -> S
         )
 
     # Sweet spots are credited from this session's cuts and from carried-over ones apart,
-    # each at its own weight: a mode only another session heard earns less.
-    for weight in sorted({obs.weight for obs in observations}):
+    # each at its own weight: a mode only another session heard earns less, and one both
+    # heard is credited once, from this session's cuts.
+    credited: list[float] = []
+    for weight in sorted({obs.weight for obs in observations}, reverse=True):
         heard = [obs for obs in observations if obs.weight == weight]
         for chatter_hz, engagement_mm in chatter_modes(heard, cfg.speed_sigma_fraction):
+            if any(abs(chatter_hz - hz) <= MODE_TOLERANCE * hz for hz in credited):
+                continue
+            credited.append(chatter_hz)
             spots = sweet_spot_speeds(
                 chatter_hz, setup.tool.flutes, env.speed_min_rpm, env.speed_max_rpm
             )

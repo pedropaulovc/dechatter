@@ -446,6 +446,22 @@ def carried(
     return seeding.prior(seed, at_level(setup, level_mm), env)
 
 
+def grid_due(status: SeedStatus | None, rounds: list[Round]) -> bool:
+    """Whether the round-1 grid is the next thing to plan: a session's first round, unless
+    it has a seed to confirm (`status`: where it stands with it, None without one). And
+    once more for a seeded session that has cut no grid, when its confirmation cuts rejected
+    the seed, or when none of them got a verdict and nothing is left to confirm."""
+    if status is SeedStatus.UNCONFIRMED:
+        return False
+    if not rounds:
+        return True
+    if status is None or any(r.plan.planner is PlannerKind.GRID for r in rounds):
+        return False
+    if status is SeedStatus.REJECTED:
+        return True
+    return status is not SeedStatus.CONFIRMED and not _tests(rounds, lambda level: True)
+
+
 def next_stage(
     setup: Setup,
     env: Envelope,
@@ -457,14 +473,13 @@ def next_stage(
     the session's best cuts, which set the removal rate to beat.
 
     A session started from another (`seed`) confirms that one's prediction first, instead
-    of the grid, and cuts the grid after all once its confirmation cuts rejected it."""
+    of the grid, and cuts the grid after all where `grid_due` says so."""
     base = fixed_mm(setup)
     status = None if seed is None else seed_status(seed, setup, env, rounds)
     if status is SeedStatus.UNCONFIRMED:
         tests = seeding.confirmation(seed, setup, env)
         return Stage(base, PlannerKind.CONFIRM, tests, 0.0)
-    gridded = any(r.plan.planner is PlannerKind.GRID for r in rounds)
-    if not rounds or (status is SeedStatus.REJECTED and not gridded):
+    if grid_due(status, rounds):
         return Stage(base, PlannerKind.GRID, grid_tests(setup, env), 0.0)
     target = found[0].mrr_mm3_min if found else 0.0
     stage = Stage(base, PlannerKind.BAYES, [], 0.0)

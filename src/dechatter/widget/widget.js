@@ -5,7 +5,7 @@
 import { Mic } from './mic.js';
 import { PHASE, Stepper } from './stepper.js';
 import { chipLoad, feed, length, rate } from './units.js';
-import { START_FROM, STEPS, applicable, draw, info, placehold, read, reveal } from './wizard.js';
+import { START_FROM, STEPS, applicable, closeInfo, draw, info, placehold, read, reveal } from './wizard.js';
 
 const params = new URLSearchParams(location.search);
 const token = params.get('token') ?? '';
@@ -168,9 +168,18 @@ function newSession() {
   $('new-name').value = '';
   fillSources('');
   newError('');
+  closeInfo();
   dialog = 'open';
   $('new-dialog').showModal();
   render();
+}
+
+// The dialog's controls wait while it creates or imports: one request at a time, and no
+// way out of the dialog until it has answered.
+function renderNew() {
+  for (const id of ['new-name', 'new-from', 'new-import', 'new-create', 'new-cancel']) {
+    $(id).disabled = busy();
+  }
 }
 
 function fillSources(chosen) {
@@ -186,32 +195,50 @@ function newError(message) {
   $('new-error').hidden = !message;
 }
 
+// The session stays pinned from the request until its wizard is open: nothing else can
+// be opened, made or imported in between.
 async function createSession() {
-  const name = $('new-name').value.trim();
-  try {
-    await engine('create', name, $('new-from').value);
-    names = await engine('names');
-  } catch (err) {
-    newError(err.message);
+  if (busy()) {
     return;
   }
-  $('new-dialog').close();
-  try {
-    current = name;
-    localStorage.setItem(SESSION_KEY, current);
-    state = null;
-    await checkSetup(current);
-    await openWizard();
-    showError('');
-  } catch (err) {
-    showError(err.message);
-  }
+  const name = $('new-name').value.trim();
+  const source = $('new-from').value;
+  requests += 1;
   render();
+  try {
+    try {
+      await engine('create', name, source);
+      names = await engine('names');
+    } catch (err) {
+      newError(err.message);
+      return;
+    }
+    closeInfo();
+    $('new-dialog').close();
+    try {
+      current = name;
+      localStorage.setItem(SESSION_KEY, current);
+      state = null;
+      await checkSetup(current);
+      await openWizard();
+      showError('');
+    } catch (err) {
+      showError(err.message);
+    }
+  } finally {
+    requestDone();
+    render();
+  }
 }
 
 // An exported session to start the new one from: stored in this browser like any import,
 // then chosen in the dialog.
 async function importSource(file) {
+  if (busy()) {
+    return;
+  }
+  requests += 1;
+  render();
   try {
     const name = await engine('import_zip', new Uint8Array(await file.arrayBuffer()));
     names = await engine('names');
@@ -219,8 +246,10 @@ async function importSource(file) {
     newError('');
   } catch (err) {
     newError(err.message);
+  } finally {
+    requestDone();
+    render();
   }
-  render();
 }
 
 // Start the wizard on the session's stored setup. The form is redrawn even when it last
@@ -1306,6 +1335,7 @@ function render() {
   }
   renderSessions();
   renderLinks();
+  renderNew();
   renderSetup();
   renderStep();
   renderRound();
@@ -1322,7 +1352,20 @@ $('new-form').onsubmit = (event) => {
   createSession();
 };
 $('new-cancel').onclick = () => $('new-dialog').close();
+// Escape closes an open (i) bubble first, not the dialog with it; and nothing closes the
+// dialog while it waits for an answer.
+$('new-dialog').addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && (busy() || $('new-dialog').querySelector('.bubble:not([hidden])'))) {
+    event.preventDefault();
+  }
+}, true);
+$('new-dialog').addEventListener('cancel', (event) => {
+  if (busy()) {
+    event.preventDefault();
+  }
+});
 $('new-dialog').addEventListener('close', () => {
+  closeInfo();
   dialog = 'closed';
   render();
 });

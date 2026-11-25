@@ -94,7 +94,12 @@ class App:
         planner = PlannerKind.CONFIRM if status is SeedStatus.UNCONFIRMED else PlannerKind.GRID
         if rounds and rounds[-1].results is None:
             upcoming, next_level = Next.RUN, level
-        if rounds and rounds[-1].results is not None:
+        # The grid is only laid out when it is planned: a power cap that excludes all of it
+        # is refused then, with what to change, and must not stop the session showing.
+        analysed = bool(rounds) and rounds[-1].results is not None
+        if analysed and session.grid_due(status, rounds):
+            planner = PlannerKind.GRID
+        elif analysed:
             stage = session.next_stage(self.setup, self.env, rounds, found, self.seed)
             upcoming = Next.PLAN if stage.tests else Next.CONVERGED
             next_level, planner = stage.level_mm, stage.planner

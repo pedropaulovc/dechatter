@@ -301,7 +301,7 @@ function row(field, values, units, setup) {
 // One info bubble open at a time. It closes on its button, Escape, or a click elsewhere.
 let openInfo = null; // { about, bubble } while a bubble is open
 
-function closeInfo() {
+export function closeInfo() {
   if (openInfo === null) {
     return;
   }

@@ -393,10 +393,12 @@ Round 1 of such a session is a short confirmation instead of the grid:
   heaviest of those sizes in its chatter band, expected to chatter.
 
 There is a control only where the earlier session heard chatter inside this search, within
-the power cap and away from the speeds being confirmed; without one, where only the speeds
-carried over, nothing is predicted and the seed stands. With no stable pass inside the
-search there is no best cut to confirm: the earlier chatter stays on the map and round 1 is
-the grid. With nothing inside the search at all, the earlier session is not used.
+the power cap and away from the speeds being confirmed. Where no cut with a prediction got
+a verdict (only the speeds carried over and there was no control, or it was not cut),
+nothing was checked: the earlier passes stay on the map, untested, at their small weight.
+With no stable pass inside the search there is no best cut to confirm either: the earlier
+chatter stays on the map and round 1 is the grid. With nothing inside the search at all, the
+earlier session is not used.
 
 The confirmation cuts are cuts of this session like any other. If half or more of the cuts
 with a prediction that got a verdict come out the other way (two of four, or the one control

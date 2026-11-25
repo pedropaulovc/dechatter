@@ -90,8 +90,8 @@ class SeedStatus(StrEnum):
     UNCONFIRMED = "unconfirmed"  # the confirmation round is still to be cut
     CONFIRMED = "confirmed"
     REJECTED = "rejected"  # the confirmation cuts disagreed: dropped, the grid follows
-    # No stable pass of it inside the search: nothing to confirm. It stays on the map, and
-    # round 1 is the grid.
+    # Nothing of it was checked: it holds no stable pass inside the search to confirm (round
+    # 1 is the grid), or no confirmation cut it predicted got a verdict. It stays on the map.
     UNTESTED = "untested"
     UNUSED = "unused"  # nothing of it lies inside this session's search
 
@@ -140,6 +140,11 @@ def load(session_dir: Path) -> Seed | None:
         if data["schema"] != SCHEMA:
             raise ValueError(f"schema {data['schema']}")
         passes = tuple(SeedPass(**{**p, "verdict": Verdict(p["verdict"])}) for p in data["passes"])
+        for p in passes:
+            sizes = [p.rpm, p.width_mm, p.depth_mm]
+            sizes += [] if p.chatter_hz is None else [p.chatter_hz]
+            if not all(isinstance(v, int | float) and math.isfinite(v) and v > 0 for v in sizes):
+                raise ValueError(f"pass {p.round}.{p.id} holds a size that is no positive number")
         seed = Seed(str(data["source"]), str(data["setup"]), passes)
         seed.setup  # noqa: B018  the setup must load
     except (KeyError, TypeError, ValueError) as exc:
@@ -208,12 +213,13 @@ def _arc(width_mm: float, diameter_mm: float) -> float:
 
 def carry(seed: Seed, p: SeedPass, setup: Setup) -> Carry:
     """How pass `p` carries over to `setup`'s depth (or where it steps the depth, width)."""
-    diameter = setup.tool.diameter_mm
-    slot = p.width_mm >= diameter - ENGAGEMENT_TOLERANCE_MM
+    slot = p.width_mm >= seed.setup.tool.diameter_mm - ENGAGEMENT_TOLERANCE_MM
     if slot is not (milling(setup) is Milling.SLOT):
         return Carry.SPEEDS
     if seed.setup.cut.direction is not setup.cut.direction:
         return Carry.SPEEDS
+    if slot:
+        return Carry.SAME  # a full-width slot of either cutter, whatever their diameters
     held = p.width_mm if setup.cut.vary is Vary.DEPTH else p.depth_mm
     if abs(held - fixed_mm(setup)) <= SAME_LEVEL_MM:
         return Carry.SAME
@@ -222,16 +228,18 @@ def carry(seed: Seed, p: SeedPass, setup: Setup) -> Carry:
 
 def equivalent_mm(seed: Seed, p: SeedPass, setup: Setup) -> float:
     """The engagement in `setup` that loads the tool as pass `p` did: the same specific
-    energy x depth x arc of engagement. A width beyond a full slot is the cutter diameter."""
+    energy x depth x arc of engagement, each cut's arc on its own cutter diameter (they may
+    differ by the tolerance). Infinite where no width loads it as much: more than a full
+    slot would at this depth."""
     diameter = setup.tool.diameter_mm
     old = materials.lookup(seed.setup.cut.material).specific_energy_j_mm3
     new = materials.lookup(setup.cut.material).specific_energy_j_mm3
-    load = old * p.depth_mm * _arc(p.width_mm, diameter)
+    load = old * p.depth_mm * _arc(p.width_mm, seed.setup.tool.diameter_mm)
     if setup.cut.vary is Vary.DEPTH:
         return load / (new * _arc(setup.cut.radial_width_mm, diameter))
     arc = load / (new * setup.cut.axial_depth_mm)
-    if arc >= math.pi:
-        return diameter
+    if arc > math.pi:
+        return math.inf
     return diameter / 2 * (1 - math.cos(arc))
 
 
@@ -249,15 +257,19 @@ class Carried:
 
 def _observe(setup: Setup, env: Envelope, p: SeedPass, size_mm: float, weight: float):
     """A stable pass says the map is stable up to the step under its size, chatter that it
-    chatters from the step over it: neither claims more than was measured."""
+    chatters from the step over it: neither claims more than was measured. A stable pass
+    beyond the largest size searched is stable at that size; chatter beyond it says nothing."""
     if not env.holds_speed(p.rpm):
         return None
     step = engagement_step_mm(setup)
+    top = round(env.engagement_top_mm / step)
     if p.verdict is Verdict.STABLE:
-        steps = min(math.floor(size_mm / step + 1e-6), round(env.engagement_top_mm / step))
+        steps = top if math.isinf(size_mm) else min(math.floor(size_mm / step + 1e-6), top)
         if steps < 1:
             return None
         return Observation(p.rpm, steps * step, p.verdict, p.chatter_hz, weight)
+    if math.isinf(size_mm):
+        return None
     steps = max(1, math.ceil(size_mm / step - 1e-6))
     if steps * step > env.engagement_top_mm + ENGAGEMENT_TOLERANCE_MM:
         return None
@@ -321,34 +333,44 @@ def _band(setup: Setup, chatter: list[tuple[float, float]], taken: list[float]):
     return min(free, key=lambda cut: (-heard(cut[0]), cut[1], cut[0]))
 
 
+def _snap(setup: Setup, env: Envelope, rpm: float) -> float:
+    """The test speed nearest `rpm`: on the planner's speed step, inside the search."""
+    step = setup.planner.speed_step_rpm
+    return float(min(max(round(rpm / step) * step, env.speed_min_rpm), env.speed_max_rpm))
+
+
 def _limit_tests(setup: Setup, env: Envelope, known: list[Observation]) -> list[tuple]:
     """The predicted best cut, the same speed a third lighter, the best cut of another
-    pocket, and the control; each with the seeded map's P(stable) and the verdict expected."""
+    pocket, and the control; each with the seeded map's P(stable) and the verdict expected.
+    Speeds are the test speeds nearest the earlier passes', and the power cap is held there."""
+    step = engagement_step_mm(setup)
+    stable_at = [
+        (_snap(setup, env, o.rpm), o.engagement_mm) for o in known if o.verdict is Verdict.STABLE
+    ]
+    chatter_at = [
+        (_snap(setup, env, o.rpm), o.engagement_mm) for o in known if o.verdict is Verdict.UNSTABLE
+    ]
+    stable = []
+    for rpm, reached in stable_at:
+        size = _within_power(setup, env, rpm, reached)
+        if size is None:
+            continue
+        # Chatter carried over at this speed, at no more than this size, contradicts it.
+        denied = any(
+            abs(other - rpm) <= _sigma(setup, rpm) and heard <= size + ENGAGEMENT_TOLERANCE_MM
+            for other, heard in chatter_at
+        )
+        if not denied:
+            stable.append((float(mrr_mm3_min(setup, env, rpm, size)), rpm, size))
+    if not stable:
+        return []
     stability = bayes.build_map(setup, env, known)
     p = stability.p_stable()
-    chatter = [o for o in known if o.verdict is Verdict.UNSTABLE]
-    step = engagement_step_mm(setup)
 
     def test(rpm: float, size_mm: float, expected: Verdict) -> tuple:
         s, e = stability.speed_index(rpm), stability.engagement_index(size_mm)
-        speed, size = float(stability.speeds[s]), float(stability.engagements[e])
-        return (speed, size, float(p[s, e]), None, expected)
+        return (rpm, float(stability.engagements[e]), float(p[s, e]), None, expected)
 
-    stable = []
-    for o in known:
-        if o.verdict is not Verdict.STABLE:
-            continue
-        size = _within_power(setup, env, o.rpm, o.engagement_mm)
-        # Chatter carried over at this speed, at no more than this size, contradicts it.
-        denied = any(
-            abs(c.rpm - o.rpm) <= _sigma(setup, o.rpm)
-            and c.engagement_mm <= (size or 0.0) + ENGAGEMENT_TOLERANCE_MM
-            for c in chatter
-        )
-        if size is not None and not denied:
-            stable.append((float(mrr_mm3_min(setup, env, o.rpm, size)), o.rpm, size))
-    if not stable:
-        return []
     stable.sort(key=lambda cut: (-cut[0], cut[1]))
     _, best_rpm, best_size = stable[0]
     tests = [test(best_rpm, best_size, Verdict.STABLE)]
@@ -362,14 +384,13 @@ def _limit_tests(setup: Setup, env: Envelope, known: list[Observation]) -> list[
             taken.append(rpm)
             break
     loud = [
-        (c.rpm, c.engagement_mm)
-        for c in chatter
-        if mrr_mm3_min(setup, env, c.rpm, c.engagement_mm) <= env.mrr_limit_mm3_min
+        (rpm, heard)
+        for rpm, heard in chatter_at
+        if mrr_mm3_min(setup, env, rpm, heard) <= env.mrr_limit_mm3_min
         # A stable pass carried over at this speed and size or above contradicts it.
         and not any(
-            abs(o.rpm - c.rpm) <= _sigma(setup, c.rpm) and o.engagement_mm >= c.engagement_mm
-            for o in known
-            if o.verdict is Verdict.STABLE
+            abs(other - rpm) <= _sigma(setup, rpm) and reached >= heard
+            for other, reached in stable_at
         )
     ]
     control = _band(setup, loud, taken)
@@ -379,34 +400,35 @@ def _limit_tests(setup: Setup, env: Envelope, known: list[Observation]) -> list[
     return list(unique.values())
 
 
-def _snap(setup: Setup, env: Envelope, rpm: float) -> float:
-    step = setup.planner.speed_step_rpm
-    return float(min(max(round(rpm / step) * step, env.speed_min_rpm), env.speed_max_rpm))
-
-
 def _speed_tests(seed: Seed, setup: Setup, env: Envelope) -> list[tuple]:
     """Round 1's sizes at the speeds of the earlier session's best cuts, one per pocket, and
-    as a control its heaviest size within the power cap in the chatter band heard most often,
-    expected to chatter. The sizes are the grid's: no limit is predicted for them."""
-    inside = [p for p in seed.passes if env.holds_speed(p.rpm)]
-    stable = [p for p in inside if p.verdict is Verdict.STABLE]
-    stable.sort(key=lambda p: (-p.width_mm * p.depth_mm * p.rpm, p.rpm))
-    pockets: list[float] = []
-    for p in stable:
-        rpm = _snap(setup, env, p.rpm)
-        if len(pockets) < POCKETS and _apart(rpm, pockets):
-            pockets.append(rpm)
+    as a control its heaviest size within the power cap in the chatter band heard most often
+    (of two as often, the one that chattered under the lighter load), expected to chatter.
+    The sizes are the grid's: no limit is predicted for them. A speed the power cap leaves
+    no size at is passed over."""
     sizes = grid_engagements(setup, env)
 
     def allowed(rpm: float) -> list[float]:
         return [e for e in sizes if mrr_mm3_min(setup, env, rpm, e) <= env.mrr_limit_mm3_min]
 
-    tests = [(rpm, size, None, None, None) for rpm in pockets for size in allowed(rpm)]
-    if not tests:
+    inside = [
+        (_snap(setup, env, p.rpm), p.width_mm * p.depth_mm, p.verdict)
+        for p in seed.passes
+        if env.holds_speed(p.rpm)
+    ]
+    inside = [cut for cut in inside if allowed(cut[0])]
+    stable = [(rpm, load) for rpm, load, verdict in inside if verdict is Verdict.STABLE]
+    stable.sort(key=lambda cut: (-cut[1] * cut[0], cut[0]))
+    pockets: list[float] = []
+    for rpm, _ in stable:
+        if len(pockets) < POCKETS and _apart(rpm, pockets):
+            pockets.append(rpm)
+    if not pockets:
         return []
-    chatter = [(_snap(setup, env, p.rpm), 0.0) for p in inside if p.verdict is Verdict.UNSTABLE]
+    tests = [(rpm, size, None, None, None) for rpm in pockets for size in allowed(rpm)]
+    chatter = [(rpm, load) for rpm, load, verdict in inside if verdict is Verdict.UNSTABLE]
     control = _band(setup, chatter, pockets)
-    if control is not None and allowed(control[0]):
+    if control is not None:
         tests.append((control[0], allowed(control[0])[-1], None, None, Verdict.UNSTABLE))
     return tests
 
@@ -436,12 +458,16 @@ def judged(cuts: list[tuple[Verdict | None, Verdict]]) -> SeedStatus | None:
     Rejected when half or more of the cuts the seed predicted came out the other way, the
     control among them: one surprise in four leaves it standing (the cut itself corrects
     the map there), two do not. Where only the speeds carried over the control is the one
-    cut predicted, so the seed is rejected when its chatter band did not chatter.
+    cut predicted, so the seed is rejected when its chatter band did not chatter. With
+    verdicts but none for a cut it predicted (no control was planned, or it was not cut),
+    nothing was checked: the seed is neither confirmed nor rejected, but untested.
     """
     if not cuts:
         return None
     predicted = [(expected, verdict) for expected, verdict in cuts if expected is not None]
+    if not predicted:
+        return SeedStatus.UNTESTED
     wrong = sum(expected is not verdict for expected, verdict in predicted)
-    if predicted and 2 * wrong >= len(predicted):
+    if 2 * wrong >= len(predicted):
         return SeedStatus.REJECTED
     return SeedStatus.CONFIRMED
