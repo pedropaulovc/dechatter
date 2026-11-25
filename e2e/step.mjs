@@ -10,7 +10,7 @@ import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-import { PHASE, REST, restOf, Stepper } from '../src/dechatter/widget/stepper.js';
+import { changed, PHASE, REST, restOf, Stepper } from '../src/dechatter/widget/stepper.js';
 
 const cache = process.env.DECHATTER_E2E_CACHE || join(homedir(), '.cache', 'dechatter-e2e');
 const args = process.argv.slice(2);
@@ -36,8 +36,8 @@ const blocks = JSON.parse(readFileSync(args[0], 'utf8'));
 
 const require = createRequire(join(cache, 'cncjs', 'node_modules', 'cncjs', 'package.json'));
 const io = require('socket.io-client');
-const t0 = Date.now();
-const log = (...a) => console.log(`[${((Date.now() - t0) / 1000).toFixed(1).padStart(6)}s]`, ...a);
+const t0 = performance.now();
+const log = (...a) => console.log(`[${((performance.now() - t0) / 1000).toFixed(1).padStart(6)}s]`, ...a);
 const fail = (msg) => {
   log(`FAIL: ${msg}`);
   process.exit(1);
@@ -93,8 +93,12 @@ const start = async () => {
     // The last change the controller reported between the hold and the reset (its state or
     // position; cncjs also reports feed or buffer changes): it must leave the machine at
     // rest, and must have come most of a second before the reset (cncjs polls every 250 ms).
+    const before = hold ? reports.findLast((r) => r.t < hold.t) : null;
     const between = hold && reset ? reports.filter((r) => r.t >= hold.t && r.t <= reset.t) : [];
-    const last = between.findLast((r, i) => i === 0 || r.state !== between[i - 1].state || r.wpos !== between[i - 1].wpos);
+    const last = between.findLast((r, i) => {
+      const previous = i === 0 ? before : between[i - 1];
+      return !previous || changed(r, previous);
+    });
     const problems = [
       phase !== PHASE.STOPPED && `ended ${phase}`,
       !hold && 'no feed hold was sent',
@@ -141,12 +145,12 @@ socket.on('startup', () => socket.emit('open', port, { controllerType: 'Grbl', b
 socket.on('controller:settings', () => setTimeout(start, 500));
 socket.on('serialport:open', () => setTimeout(start, 1500));
 let lastState = '';
-const reports = []; // { t, state, wpos, rest }: each controller state cncjs reported
+const reports = []; // { t, activeState, subState, wpos, state, rest }: each controller state cncjs reported
 socket.on('controller:state', (_t, state) => {
   const { activeState, subState, wpos } = state?.status ?? {};
   lastState = activeState;
   const shown = activeState === 'Hold' ? `Hold:${subState}` : activeState;
-  reports.push({ t: Date.now(), state: shown, wpos: JSON.stringify(wpos), rest: restOf({ activeState, subState }) });
+  reports.push({ t: performance.now(), activeState, subState, wpos, state: shown, rest: restOf({ activeState, subState }) });
   stepper.controller({ activeState, subState, wpos });
 });
 // What cncjs wrote to the controller, from any sender: the realtime bytes included.
@@ -154,7 +158,7 @@ const written = [];
 const WRITES = [['feedhold', (d) => d.includes('!')], ['reset', (d) => d.includes('\x18')], ['unlock', (d) => /^\$X/m.test(d)]];
 socket.on('serialport:write', (data) => {
   for (const [what, test] of WRITES) {
-    if (test(String(data))) written.push({ t: Date.now(), what });
+    if (test(String(data))) written.push({ t: performance.now(), what });
   }
 });
 socket.on('serialport:read', (line) => {

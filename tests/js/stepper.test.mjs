@@ -3,7 +3,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { PHASE, Stepper } from '../../src/dechatter/widget/stepper.js';
+import { Mic } from '../../src/dechatter/widget/mic.js';
+import { changed, PHASE, Stepper } from '../../src/dechatter/widget/stepper.js';
 
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 
@@ -522,4 +523,37 @@ test('reports that change nothing the stepper sees do not delay the reset', asyn
   assert.equal(await stepper.run(round([1])), PHASE.STOPPED);
   const after = machine.resetAt - machine.heldAt;
   assert.ok(after >= 1 && after < 1.5, `reset ${after} s after Hold:0`);
+  assert.equal(changed({ activeState: 'Hold', subState: 0, wpos: { x: '1.000' } }, { activeState: 'Hold', subState: 0, wpos: { x: '1.000' } }), false);
+  assert.equal(changed({ activeState: 'Hold', subState: 0, wpos: { x: '1.000' } }, { activeState: 'Hold', subState: 0, wpos: { x: '1.500' } }), true);
+});
+
+test('a failure followed by a lost connection keeps its error reason and sends no reset', async () => {
+  const machine = new Machine();
+  machine.hold = HOLD.NEVER;
+  const { stepper } = machine.stepper_for();
+  machine.onMove = async (lines) => {
+    if (lines[0] === 'G1 X68 F500') {
+      machine.moving = false;
+      stepper.error('error:22 (Undefined feed rate)');
+      await tick();
+      stepper.disconnected();
+    }
+  };
+  assert.equal(await stepper.run(round([1])), PHASE.FAILED);
+  assert.ok(!machine.log.includes('^X'), 'no reset to be buffered and sent on reconnect');
+  assert.match(stepper.reason, /^error:22 \(Undefined feed rate\); the connection was lost while stopping, so it was not reset/);
+});
+
+test('closing the microphone marks it closed before AudioContext.close resolves', async () => {
+  const mic = new Mic();
+  let stopped = false;
+  let releaseClose;
+  mic.stream = { active: true, getTracks: () => [{ stop: () => { stopped = true; } }] };
+  mic.context = { close: () => new Promise((resolve) => { releaseClose = resolve; }) };
+  assert.equal(mic.open, true);
+  const closing = mic.close();
+  assert.equal(mic.open, false, 'closed synchronously before context.close resolves');
+  assert.equal(stopped, true);
+  releaseClose();
+  await closing;
 });

@@ -2,20 +2,13 @@
 
 Usage: uv run python e2e/round_audio.py <session export .zip> <out.wav>
 
-The widget's Export button produces the zip. Play the WAV into the widget with fake_mic.js,
-or through the speakers, starting when the job starts. The cuts are timed from the round's
-G-code the way fake_grbl.py runs it at its default --rapid (G0 at 3000 mm/min, G1 at its feed,
-G4 for its seconds), so the sound follows the simulated machine's motion to within about a
-second: the simulator's 10 ms ticks add up over a round. Facing the top down is heard as it
-runs, right after the pass before it: the widget records on through it and sends no M0.
+The widget's Export button produces the zip. Cue the WAV in the widget before pressing Start with
+`await window.fakeMicCue('/dechatter/e2e/round.wav')` (see fake_mic.js): it decodes the audio up
+front, starts playback on the widget's `dechatter:record` event, and re-anchors each pass at its
+dwell from `<out.wav>.json` so simulator or facing timing drift cannot shift later cuts.
 
-A session that steps the width hears synth.DEFAULT_MACHINE, whose chatter limit is a width at
-each speed. One that steps the depth (full-width slots, or side milling at a set width) hears
-synth.DEPTH_MACHINE, whose limit also falls with depth.
-
-Assumes every earlier round's program ran to completion on the same simulator, since that is
-where this round starts from. Manual-spindle programs are refused: their M0 stops last as
-long as the operator takes.
+If the latest round in `<session export .zip>` already carries `timeline.json`, the audio is laid
+out directly on the widget's recorded cut windows instead of G-code timing estimates.
 """
 
 from __future__ import annotations
@@ -33,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tests"))
 
 import synth  # noqa: E402
 
-from dechatter import audio  # noqa: E402
+from dechatter import audio, session  # noqa: E402
 from dechatter.config import Vary  # noqa: E402
 from dechatter.plan import Plan  # noqa: E402
 
@@ -70,37 +63,101 @@ def run(program: str, start: tuple[float, float, float]) -> tuple[list[tuple[flo
     return cuts, tuple(position.values())
 
 
+def _from_timeline(plan: Plan, timeline: list) -> tuple[list[float], list[float], dict[str, float]]:
+    placed = session.placements_from_timeline(plan, timeline)
+    if not placed:
+        raise SystemExit("timeline.json has no placed cuts")
+    air, cut_s, dwells, cursor = [], [], {}, 0.0
+    for index, p in enumerate(plan.passes):
+        if index not in placed:
+            break
+        pl = placed[index]
+        start, end = pl.cut.start_s, pl.cut.end_s
+        air_len = max(start - cursor, 0.0)
+        dwell_start = (
+            pl.air.start_s
+            if pl.air is not None
+            else max(start - p.lead_in_s - plan.dwell_s, cursor)
+        )
+        dwells[str(p.id)] = round(dwell_start, 3)
+        air.append(air_len)
+        cut_s.append(max(end - start, 0.0))
+        cursor = end
+    return air, cut_s, dwells
+
+
 def main(export: Path, out: Path) -> None:
     with zipfile.ZipFile(io.BytesIO(export.read_bytes())) as archive:
-        rounds = sorted(
-            name[: -len("plan.json")] for name in archive.namelist() if name.endswith("/plan.json")
+        names = set(archive.namelist())
+        rounds = sorted(name[: -len("plan.json")] for name in names if name.endswith("/plan.json"))
+        latest = rounds[-1]
+        data = archive.read(f"{latest}plan.json")
+        timeline = (
+            json.loads(archive.read(f"{latest}timeline.json").decode("utf-8"))
+            if f"{latest}timeline.json" in names
+            else None
         )
-        programs = [archive.read(f"{folder}program.nc").decode("ascii") for folder in rounds]
-        data = archive.read(f"{rounds[-1]}plan.json")
+        programs = (
+            []
+            if timeline is not None
+            else [archive.read(f"{folder}program.nc").decode("ascii") for folder in rounds]
+        )
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "plan.json"
         path.write_bytes(data)
         plan = Plan.load(path)
 
-    # The machine starts each round where the previous round's program left it.
-    position = (0.0, 0.0, 0.0)
-    for program in programs:
-        cuts, position = run(program, position)
-
-    # Facing is heard from the end of the pass before it; the rest of the gap is spindle.
-    faced = {leg.passes[0].id: leg.face_s for leg in plan.legs if leg.reface_mm > 0}
-    air, heard_until = [], 0.0
-    for p, (start, _) in zip(plan.passes, cuts, strict=True):
-        air.append(start + p.lead_in_s - heard_until - faced.get(p.id, 0.0))
-        heard_until = start + p.lead_in_s + p.expected_cut_s
     machine = synth.DEPTH_MACHINE if plan.vary is Vary.DEPTH else synth.DEFAULT_MACHINE
-    # `air` is the whole gap before each cut: no rapid of the recording's own before a facing.
-    heard = synth.record(
-        plan, machine, seed=plan.round, air_s=air, facing=synth.Facing.HEARD, rapid_s=0.0
-    )
+    if timeline is not None:
+        air, cut_s, dwells = _from_timeline(plan, timeline)
+        subplan = plan
+        if len(cut_s) < len(plan.passes):
+            # Keep only passes present in the recorded timeline.
+            kept = set(range(len(cut_s)))
+            idx = 0
+            legs = []
+            for leg in plan.legs:
+                lp = tuple(p for p in leg.passes if (idx := idx + 1) - 1 in kept)
+                if lp:
+                    legs.append(type(leg)(**{**leg.__dict__, "passes": lp}))
+            subplan = Plan(**{**plan.__dict__, "legs": tuple(legs)})
+        heard = synth.record(
+            subplan,
+            machine,
+            seed=plan.round,
+            air_s=air,
+            cut_s=cut_s,
+            facing=synth.Facing.PAUSED,
+            rapid_s=0.0,
+        )
+    else:
+        position = (0.0, 0.0, 0.0)
+        for program in programs:
+            cuts, position = run(program, position)
+        faced = {leg.passes[0].id: leg.face_s for leg in plan.legs if leg.reface_mm > 0}
+        air, dwells, heard_until = [], {}, 0.0
+        for p, (start, _) in zip(plan.passes, cuts, strict=True):
+            contact = start + p.lead_in_s
+            dwells[str(p.id)] = round(max(start - plan.dwell_s, 0.0), 3)
+            air.append(contact - heard_until - faced.get(p.id, 0.0))
+            heard_until = contact + p.expected_cut_s
+        heard = synth.record(
+            plan, machine, seed=plan.round, air_s=air, facing=synth.Facing.HEARD, rapid_s=0.0
+        )
+
     out.parent.mkdir(parents=True, exist_ok=True)
     audio.save_wav(out, heard, synth.RATE)
-    print(json.dumps({"round": plan.round, "seconds": round(len(heard) / synth.RATE, 1)}))
+    cues_path = out.with_name(out.name + ".json")
+    cues_path.write_text(json.dumps({"dwells": dwells}, indent=2) + "\n", encoding="utf-8")
+    print(
+        json.dumps(
+            {
+                "round": plan.round,
+                "source": "timeline" if timeline is not None else "program",
+                "seconds": round(len(heard) / synth.RATE, 1),
+            }
+        )
+    )
 
 
 if __name__ == "__main__":

@@ -78,8 +78,9 @@ def _closure(lock: dict, names: tuple[str, ...]) -> list[dict]:
     return list(seen.values())
 
 
-def pyodide_files(cache: Path, fetch: Fetch = _download) -> list[Path]:
+def pyodide_files(cache: Path, fetch: Fetch | None = None) -> list[Path]:
     """Pyodide core and the packages dechatter needs, fetched into `cache` when missing."""
+    fetch = fetch or _download
     cache.mkdir(parents=True, exist_ok=True)
     for name in CORE:
         if not (cache / name).exists():
@@ -98,7 +99,7 @@ def pyodide_files(cache: Path, fetch: Fetch = _download) -> list[Path]:
     return files
 
 
-def export(out: Path, cache: Path | None = None, fetch: Fetch = _download) -> None:
+def export(out: Path, cache: Path | None = None, fetch: Fetch | None = None) -> None:
     out.mkdir(parents=True, exist_ok=True)
     widget = resources.files("dechatter.widget")
     for name in WIDGET_FILES:

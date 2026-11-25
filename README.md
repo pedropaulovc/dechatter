@@ -6,8 +6,7 @@ which cuts chattered. From that it either plans a finer round of cuts or reports
 stable speeds, widths and depths.
 
 It runs as a widget inside [cncjs](https://cnc.js.org), entirely in the browser and recording
-with that computer's microphone, or from the command line with a recording made on a phone.
-The G-code is
+with that computer's microphone. The G-code is
 plain Grbl dialect (`G0`, `G1`, `G4`, `M3`, `M5`), written for FluidNC and usable on Grbl and
 grblHAL.
 
@@ -155,7 +154,7 @@ a page the microphone on those. Then, in the widget:
    widest width searched; chatter that wide, and cuts at speeds outside the limits, are left
    out. A round
    planned but not yet run is discarded when the setup changes its program, so the next
-   plan uses the new setup. `dechatter plan` refuses the same changes made by hand.
+   plan uses the new setup.
 2. Plan a round. Round 1 is a coarse grid of speeds and widths.
 3. Set the work zero at the left end of the stock, on its front face, at the top.
 4. Press Start. The widget runs the round itself through cncjs, one move at a time: it
@@ -186,8 +185,8 @@ a page the microphone on those. Then, in the widget:
    setup. Lengths follow the machine's G20/G21, with mm beside. It is offered on convergence
    and any time beside the best cuts.
 
-Everything runs in the browser tab. The same Python that the command line uses runs there
-under [Pyodide](https://pyodide.org), which `dechatter widget` downloads once and copies into
+Everything runs in the browser tab. Pyodide runs `dechatter`'s Python engine in a worker,
+which `dechatter widget` downloads once and copies into
 the folder, so the shop PC needs no Python and no internet. The microphone is the browser's,
 on whichever computer shows cncjs, opened with echo cancellation, noise suppression and
 automatic gain switched off. The widget shows its level before any cutting and warns if the
@@ -195,13 +194,12 @@ browser kept any of that processing on.
 
 Sessions are stored in that browser (IndexedDB), per cncjs address. Export saves one as a zip
 holding `setup.toml` and each round's plan, program, `recording.wav`, results and the job
-timeline of the run (each pass's cut and dwell windows), plus `report.html`. Import loads it in another browser, and unzipped it is a session
-folder the command line reads. Keep the tab open while a round runs: the recording lives in
+timeline of the run (each pass's cut and dwell windows), plus `report.html`. Import loads it in another browser. Keep the tab open while a round runs: the recording lives in
 the page until the round ends. Export works during a run too, without that round. If a run
 seems stuck (held for a minute, or the machine idle but not where its move ends), the widget
 says so and points to Stop, which keeps and analyses the cuts made so far. Reset, next to the session list, discards every round and
 keeps the setup, so the session starts again from round 1 and its setup can be changed
-freely (`dechatter reset <session>` on the command line); it needs a setup that loads,
+freely; it needs a setup that loads,
 though its rounds need not. Delete removes a session for good after asking, and offers
 Export first. It also removes sessions that no longer load, such as ones from dechatter
 0.1.x; one whose setup does not load cannot be exported.
@@ -211,43 +209,14 @@ Both are refused while that session records or its job runs.
 
 If the spindle is started and set by hand, choose "me, by hand" on the wizard's first step
 (`spindle = "manual"` under `[machine]` in a setup file). The program then never commands the
-spindle. In the widget, the round stops before each speed with the cutter clear of the work
-and shows the speed to set: set it and press Continue. The program file (`program.nc`, for
-the command line) stops with `M0` at the same places instead: set the speed and press resume
-in cncjs. Cuts are grouped by speed, lightest first, so a round has one stop per
+spindle. The round stops before each speed with the cutter clear of the work
+and shows the speed to set: set it and press Continue. Cuts are grouped by speed, lightest first, so a round has one stop per
 speed: five in round 1. The first stop is where you start the spindle, and you stop it yourself
-after the program ends.
+after the round ends.
 
 Set the speed within 5% of what is asked; the detector finds the actual speed inside that
 range. The stability map is built on the requested speeds, so a dial that reads off by a
 constant amount shifts the whole map by that amount.
-
-## Use from the command line
-
-Without cncjs, record on a phone and run the same session by hand:
-
-```sh
-dechatter plan al-10mm          # writes al-10mm/round-01/program.nc
-```
-
-Set the work zero at the left end of the stock, on its front face, at the top. Start one
-continuous recording, run the program, stop recording after `M30`. If the program faces the
-top down partway, it stops (`M0`) before and after the facing: pause the recording through
-it, and note what the facing did, since `analyze` asks once the run gets to it (`--facing
-done` for a facing that ran to its end; see [Facing the top down](#facing-the-top-down)).
-Then:
-
-```sh
-dechatter analyze al-10mm recording.wav   # classifies each pass
-dechatter plan al-10mm                    # next round, or "converged"
-dechatter plan al-10mm --sweep            # once converged: chip-load sweep of the best cut
-dechatter report al-10mm                  # stability map and best cuts so far
-dechatter reset al-10mm                   # discard every round, keep the setup (asks first)
-dechatter report al-10mm --html al-10mm.html --units in   # printable report
-```
-
-Repeat until `plan` reports convergence. WAV, FLAC, OGG and MP3 load directly. Phone formats
-such as M4A need `ffmpeg` on the path.
 
 Round 1 is a coarse grid of speeds and widths (or depths, in a session that steps the
 depth). Later rounds are chosen from what was measured. A program that steps the width
@@ -260,52 +229,46 @@ each face with a light truing pass, and every program tells you where the face w
 The program looks for chatter on purpose, so later passes are heavier than earlier ones and
 some of them will chatter. A round that steps the depth on a face or across lanes runs the
 other way, deepest first: its first pass is its heaviest (see
-[Stepping the depth](#stepping-the-depth-slots-and-set-widths)). Feed-hold and abort when a
-cut gets violent. Analyze the recording anyway: the passes that ran still count, the aborted
+[Stepping the depth](#stepping-the-depth-slots-and-set-widths)). Press Stop (or feed-hold) when a
+cut gets violent: the passes that ran still count, the aborted
 one is marked as such, and the next round starts by clearing the step it left on the face
 (an aborted slot just leaves its row used).
 
 Every planned cut stays under a power cap (60% of rated spindle power by default) and inside
-the material's surface-speed limit. The built-in cutting data (`dechatter materials`) is a
+the material's surface-speed limit. The built-in cutting data is a
 conservative starting point. Override `chip_load_mm` and the speed range when you know better.
 
 ## How a pass is classified
 
 Forced vibration sits on harmonics of the spindle rotation. Chatter is a strong tone anywhere
-else. For each pass dechatter estimates the true spindle speed from the tooth-passing
-harmonics, removes every spindle harmonic from the spectrum, and takes the strongest peak
-left over. The pass is unstable when that peak is at least 27 dB above the median of the
-remaining spectrum and at least 10 dB above the same frequency in the dwell just before the
+else. For each pass dechatter estimates the true spindle speed from the tooth-passing and
+runout harmonics (using the dwell in air before the pass to break ties when loud chatter drowns
+them), removes every spindle harmonic from the spectrum, and takes the strongest peak
+left over. The pass is unstable when that peak (including excess energy drifting within ±6 Hz across the
+pass) is at least 27 dB above the median of the remaining spectrum (capped at 20 dB over the air
+dwell's floor, so heavy or clipped chatter cannot hide itself by raising the floor) and at least 10 dB above the same frequency in the dwell just before the
 pass, when the spindle was turning in air. The second test rejects tones the machine makes
 without cutting, such as drive whine.
 
 A pass whose cut is less than 1 dB louder than that dwell, and which would be called stable,
-says "no cut heard" instead, with no verdict. The cuts of real sessions sounded 1 to 15 dB
+says "no cut heard" instead, with no verdict. The cuts of real sessions sounded 1 to 20 dB
 over the spindle in air; a pass that cut nothing, on a face that was not where the plan put
 it, sounds like the air and would otherwise pass for stable. The face still counts as moved
 on, and a verdict can be set by hand.
 
-When the widget ran the round, it recorded where every cut and every dwell is, and those
+As the widget runs the round, it records where every cut and every dwell is, and those
 windows are used as they are: the cut from where the cutter meets the stock to where it
 leaves it, without any time the machine was held, and the dwell before it as the air
-reference. A pass the run never reached is "not run". A pass the run cut, but where nothing
+reference. A pass the run never reached is "not run", and a pass whose spindle speed was found
+at the edge of its ±5% search is flagged ("speed?" in the widget). A pass the run cut, but where nothing
 could be analysed (its window silent or too short, as when the recording stopped first), is
 "no cut heard", with no verdict; its face still counts as moved on. A run that ended before
 its first cut is not analysed, and the round stays planned to run again. Facing the top
-down, wherever in the round it comes, is in the recording but in no window, so it is never
+down, wherever in the round it comes, is in the recording but in no cut window, so it is never
 analysed.
 
-A recording made otherwise (the command line, a phone) is searched for its cuts by their
-level over the spindle's own noise around them, since the spindle gets louder as it speeds
-up and a light cut is only a few dB over it. The cuts found are matched in order to the
-planned passes by how long each should last; at one speed the narrowest cuts are the ones
-that can go unheard, so those are the ones taken as missing. Passes after the last cut heard
-are "likely not run" (a verdict can still be set by hand, should one have run unheard), and a pass whose spindle speed was found at the edge of its ±5% search is
-flagged ("speed?" in the widget). If matching fails, mark the cuts yourself and pass
-`--segments labels.txt` (start and end seconds per pass; an Audacity label export works).
-
 `results.json` in each round holds the verdicts and the numbers behind them. If your ears
-disagree with a verdict, change it in the widget or edit it there before planning the next
+disagree with a verdict, change it in the widget before planning the next
 round.
 
 ### How well it works
@@ -316,21 +279,14 @@ in steel and aluminium on a Hurco VM20i, each labelled by two operators.
 
 | Operators say | Cuts | Detector agrees |
 |---|---|---|
-| chatter (both) | 169 | 142 (84%) |
+| chatter (both) | 169 | 149 (88%) |
 | no chatter (both) | 254 | 233 (92%) |
 | slight, or they disagree | 160 | not scored |
 
-The 27 dB threshold was chosen on this same data, so these numbers are a fit and the detector
-has not been scored on a second dataset. Most of those cuts last about a second; dechatter's
-own passes are longer, which gives a finer spectrum. Removing the spindle harmonics matters:
-without that step the best achievable balanced accuracy on this data falls from 88% to 75%.
-
-It has not yet been run on a real machine end to end. The planner and the audio pipeline are
-tested against a simulated machine with stability lobes (`tests/synth.py`), where a session
-converges in about three rounds and 27 cuts to within 10% of the true best removal rate. The
-widget was driven through that same session in Chrome against cncjs 1.11.5 and a simulated
-Grbl (`e2e/`), with the simulated machine's sound played into the widget in place of the
-microphone. Capture from a real webcam microphone was checked separately, without cutting.
+The 27 dB threshold was chosen on this dataset, and spindle-speed and noise-floor handling were
+checked against three PM-30MV widget sessions in 1018 steel (13 rounds, 57 passes). Removing
+the spindle harmonics matters: without that step the best achievable balanced accuracy on the
+Purdue data falls to 75%.
 
 Known limits:
 
@@ -365,9 +321,8 @@ Three things differ from the paper, which tests one cut at a time under closed-l
   passing divides it, at `60 f / (flutes k)` rpm. Those speeds get partial credit for the
   width that was stable where the chatter was heard, so the planner tries them.
 
-The stock runs out before the search does on small blocks. `plan` then asks for fresh stock;
-mount it, reset the face to `Y0` and run `dechatter plan --new-stock` (in the widget: plan on
-the "fresh block, face at Y0").
+The stock runs out before the search does on small blocks. When it does, mount fresh stock,
+reset the face to `Y0` and plan on the "fresh block, face at Y0" in the widget.
 
 ### Lanes: fresh faces without remounting
 
@@ -391,7 +346,7 @@ way in, and each lane must be at least twice the cutter diameter long. For the s
 a cut in a later lane goes no deeper than the lane before it was cut that far back from
 Y0; one deeper than that needs fresh stock (or the top faced down). The number of lanes
 cannot change once a round was cut.
-The program says in a comment where it changes lane; `dechatter plan`, the widget's round
+The program says in a comment where it changes lane; the widget's round
 and the report list the lanes a round cuts and the pass each starts at. The next round
 starts where the last pass heard left the stock, in whichever lane that was.
 
@@ -412,33 +367,11 @@ plans afresh. It faces only while the next cut's bottom stays the clearance abov
 height; past that the round keeps the cuts that fit, and the next one asks for fresh stock.
 The run time covers the facing.
 
-Facing is no test cut, and must not be analysed as one. The widget records on through it
-and knows it from the windows it recorded: no pass's cut is in it. A recording from the
-command line is searched for its cuts by sound, so it should not hold the facing: the
-program stops (`M0`) after facing at its start, to start the recording then, and before and
-after facing partway, to pause the recording through it. Pause it there: the cuts on either
-side then follow on in the recording as they do in the plan. A recording left running
-through a facing that ran to its end still matches (a stretch about as long as the facing,
-where the plan has one, is taken for it and left out), but a facing stopped after a few
-rows sounds like cuts.
-
+Facing is no test cut, and is never analysed as one. The widget records on through it
+and leaves it out of the pass windows it recorded, while keeping a record of each facing row.
 A run that gets to facing partway leaves the stock as the facing left it: the new top if it
 finished, the old one if it never started, and if it stopped part-way, a top faced only in
-part, which the next round faces down again from the old top before any cut. The widget
-records each row of the facing, so it knows which. A recording does not: paused, it holds
-none of the facing, and left running, a facing stopped after a few rows sounds like the
-cuts after it. So once a recording shows the run got to the facing (a cut after it heard, or
-the last cut heard the one right before it), `dechatter analyze` asks what the facing did,
-and `dechatter plan` waits for the answer. For a round run to its end, that is `--facing
-done`:
-
-```sh
-dechatter analyze al-10mm recording.wav --facing done   # or cut-short, or not-run
-```
-
-`cut-short` and `not-run` drop whatever was heard after the facing as not run. The answer
-can also go in the round's `results.json` as `"facing"`, which keeps the verdicts edited
-there. `dechatter plan` and the program's header say so for every round that faces partway.
+part, which the next round faces down again from the old top before any cut.
 
 A chip-load sweep is planned only where all its cuts fit, in what the lanes have left, on
 the lanes after them or on a faced top: cut short by the stock, its heaviest chip loads

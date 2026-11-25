@@ -461,8 +461,8 @@ name = "PM-30MV"
 max_rpm = 5000
 min_rpm = 500
 spindle_power_hp = 2.0   # rated spindle motor power, in hp
-spindle = "program"      # program: the G-code sets the speed (M3 S) | manual: the program
-                         # pauses (M0) before each speed and you set it on the machine
+spindle = "program"      # program: the G-code sets the speed (M3 S) | manual: the round
+                         # pauses before each speed and you set it on the machine
 weight_kg = 250          # derates the starting chip load on light machines
 
 [tool]
@@ -473,7 +473,7 @@ holder = "ER32"
 material = "carbide"     # carbide | hss
 
 [cut]
-material = "aluminum-6061"   # see `dechatter materials`
+material = "aluminum-6061"
 # vary = "width"             # width: hold the depth, step the radial width | depth: see below
 axial_depth_mm = 5.0         # the deepest cut; the test steps speed and radial width at it
 # other_depths_mm = [2.5]    # shallower depths to compare once that one is settled

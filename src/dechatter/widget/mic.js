@@ -17,7 +17,7 @@ export class Mic {
   }
 
   get open() {
-    return this.stream !== null;
+    return this.stream !== null && this.stream.active !== false;
   }
 
   get recording() {
@@ -97,10 +97,12 @@ export class Mic {
   }
 
   async close() {
-    this.stream?.getTracks().forEach((track) => track.stop());
-    await this.context?.close();
+    const stream = this.stream;
+    const context = this.context;
     this.stream = null;
     this.context = null;
     this.levelDb = null;
+    stream?.getTracks().forEach((track) => track.stop());
+    await context?.close();
   }
 }

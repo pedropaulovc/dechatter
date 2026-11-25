@@ -3,10 +3,11 @@ from __future__ import annotations
 import numpy as np
 import pytest
 import synth
+from scipy.io import wavfile
 
 from dechatter import audio, detect, session
 from dechatter.detect import Thresholds, Verdict
-from dechatter.plan import PassKind, PlannerKind, assemble, envelope, grid_tests
+from dechatter.plan import PlannerKind, assemble, envelope, grid_tests
 from dechatter.session import PassStatus
 
 MACHINE = synth.Machine()
@@ -74,9 +75,11 @@ def round1(setup):
     return assemble(setup, env, 1, PlannerKind.GRID, grid_tests(setup, env))
 
 
-def test_recording_is_split_into_passes_and_each_classified(setup):
+def test_recording_is_split_by_timeline_and_each_pass_classified(setup):
     plan = round1(setup)
-    results = session.analyze(plan, synth.record(plan), synth.RATE, "r.wav", Thresholds())
+    results = session.analyze(
+        plan, synth.record(plan), synth.RATE, "r.wav", Thresholds(), synth.timeline(plan)
+    )
     assert [p.status for p in results.passes] == [PassStatus.ANALYSED] * len(plan.passes)
     for p, result in zip(plan.passes, results.passes, strict=True):
         truth = MACHINE.chatters(p.rpm, p.width_mm, plan.flutes)
@@ -85,46 +88,35 @@ def test_recording_is_split_into_passes_and_each_classified(setup):
     assert starts == sorted(starts)
 
 
-def test_aborted_run_marks_the_cut_short_pass_and_the_rest_likely_not_run(setup):
+def test_aborted_run_marks_the_cut_short_pass_and_the_rest_not_run(setup):
     plan = round1(setup)
     stopped = 9
     recording = synth.record(plan, abort_in_pass=stopped)
-    results = session.analyze(plan, recording, synth.RATE, "r.wav", Thresholds())
+    timeline = synth.timeline(plan, abort_in_pass=stopped)
+    results = session.analyze(plan, recording, synth.RATE, "r.wav", Thresholds(), timeline)
     statuses = [p.status for p in results.passes]
     assert statuses[:stopped] == [PassStatus.ANALYSED] * stopped
     assert statuses[stopped] is PassStatus.ABORTED
-    # From the sound alone, passes after the last cut are likeliest not run.
-    assert set(statuses[stopped + 1 :]) == {PassStatus.LIKELY_NOT_RUN}
+    assert set(statuses[stopped + 1 :]) == {PassStatus.NOT_RUN}
 
     face = session.face_after(session.Round(None, plan, results))
     assert face.remnant_mm == plan.passes[stopped].width_mm
     assert face.y_mm == pytest.approx(sum(p.width_mm for p in plan.passes[:stopped]))
 
 
-def test_quiet_truing_pass_going_undetected_does_not_shift_the_matching(setup):
-    plan = round1(setup)
-    recording = synth.record(plan)
-    truing = plan.passes[0]
-    assert truing.kind is PassKind.TRUING
-    lead = 3.0 + 2.0 + plan.dwell_s + truing.lead_in_s
-    silent = slice(int(lead * synth.RATE), int((lead + truing.expected_cut_s) * synth.RATE))
-    recording[silent] *= 0.02
-    results = session.analyze(plan, recording, synth.RATE, "r.wav", Thresholds())
-    assert results.passes[0].status is PassStatus.MISSING
-    for p, result in zip(plan.passes[1:], results.passes[1:], strict=True):
-        assert result.status is PassStatus.ANALYSED
-        assert (result.verdict is Verdict.UNSTABLE) == MACHINE.chatters(p.rpm, p.width_mm, 3)
+def test_wav_loader_reads_16bit_and_float_wav_and_refuses_corrupt_files(tmp_path):
+    tone = (0.5 * np.sin(np.linspace(0, 50, 4000))).astype(np.float32)
+    pcm_path = tmp_path / "pcm16.wav"
+    audio.save_wav(pcm_path, tone, 16000)
+    samples, rate = audio.load(pcm_path)
+    assert rate == 16000 and samples == pytest.approx(tone, abs=1e-4)
 
+    float_path = tmp_path / "float32.wav"
+    wavfile.write(float_path, 24000, np.column_stack([tone, tone]))
+    samples_f, rate_f = audio.load(float_path)
+    assert rate_f == 24000 and samples_f == pytest.approx(tone, abs=1e-6)
 
-def test_manual_segments_replace_detection(setup, tmp_path):
-    plan = round1(setup)
-    recording = synth.record(plan)
-    auto = session.analyze(plan, recording, synth.RATE, "r.wav", Thresholds())
-    labels = tmp_path / "labels.txt"
-    labels.write_text(
-        "".join(f"{r.start_s}\t{r.end_s}\tpass {r.id}\n" for r in auto.passes), encoding="utf-8"
-    )
-    manual = session.analyze(
-        plan, recording, synth.RATE, "r.wav", Thresholds(), audio.read_segments(labels)
-    )
-    assert [r.verdict for r in manual.passes] == [r.verdict for r in auto.passes]
+    bad = tmp_path / "broken.wav"
+    bad.write_bytes(b"not a wav")
+    with pytest.raises(audio.AudioError, match="cannot read WAV"):
+        audio.load(bad)

@@ -18,7 +18,7 @@ To drive the widget:
 
 1. `uv run dechatter widget <dir>`, then `e2e/start.sh --speed 1 --mount /dechatter:<dir as a WSL path>`. Keep the speed at 1: the round's audio plays in real time, so the job has to last as long.
 2. Open `http://localhost:8000/` in a Playwright-driven Chrome with `fake_mic.js` added as an init script. It swaps the widget's microphone for a stream the test can play a WAV into. Enable the Custom widget with URL `/dechatter/` and open the simulator port.
-3. Per round: plan, press Export, run `uv run python e2e/round_audio.py <export.zip> <dir>/e2e/round.wav` to get the sound of the simulated machine (`tests/synth.py`) cutting that plan, press Start in the widget, and call `window.fakeMicPlay('/dechatter/e2e/round.wav')` in the widget's frame.
+3. Per round: plan, press Export, run `uv run python e2e/round_audio.py <export.zip> <dir>/e2e/round.wav` to get the sound of the simulated machine (`tests/synth.py`) cutting that plan (plus `<dir>/e2e/round.wav.json` dwell cues; if the exported round already has `timeline.json`, `round_audio.py` lays the audio out directly on those recorded windows), call `await window.fakeMicCue('/dechatter/e2e/round.wav')` in the widget's frame to decode and arm playback, then press Start in the widget. Playback begins on `dechatter:record` and re-anchors at each pass's dwell so facing or simulator clock drift cannot shift later cuts.
 
 A session that steps the depth (slots, or side milling at a set width) hears `synth.DEPTH_MACHINE`, whose chatter limit also falls with depth: a 12.7 mm slot chatters from about 0.25 mm deep, 0.5 mm at its sweet spots. `round_audio.py` picks it from the plan.
 

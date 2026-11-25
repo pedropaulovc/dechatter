@@ -6,6 +6,33 @@ What changed for people who use the dechatter widget and command line. The forma
 
 ## [Unreleased]
 
+### Removed
+
+- **Breaking:** the standalone command-line session commands (`dechatter init`, `plan`,
+  `analyze`, `report`, `reset` and `materials`), audio-only pass segmentation without a widget
+  run timeline, `soundfile`/`ffmpeg` decoding, and the recording-pause `M0` stops around
+  facing in `program.nc`. Run sessions in the cncjs widget instead; `dechatter widget <folder>`
+  still builds the static widget folder from source.
+
+### Fixed
+
+- Heavy, drifting or clipped chatter in steel can spread a tone across several Welch bins and
+  flood the non-harmonic spectrum enough to hide the peak under the 27 dB prominence threshold;
+  excess tonal energy within ±6 Hz of the peak is now summed back together and the reference
+  floor's rise over the air dwell before the pass is capped at 20 dB.
+- Spindle-speed estimation now scores runout harmonics alongside tooth passing and uses the
+  air dwell before the pass to break ties when loud chatter drowns the cut's harmonics,
+  improving recall on the Purdue dataset (88% chatter, 92% stable) and avoiding false `speed?`
+  edge flags on chattering passes.
+- The widget's stepper and run timeline now read `performance.now()` instead of `Date.now()`, so
+  system or VM clock steps cannot record a negative cut window; a finished cut shorter than its
+  planned lead-ins is marked "no cut heard" instead of "not run" so the stock face still moves.
+- Closing the microphone clears its open state before `AudioContext.close()` settles, and a
+  failed write in the worker returns its refusal even if the follow-up filesystem sync fails.
+- Resetting a session logs a warning when its `.done` marker cannot be written and gives
+  widget-actionable recovery instructions (`export, delete and import`) if the fallback rename
+  fails too.
+
 ## [0.6.0] - 2026-11-23
 
 ### Added

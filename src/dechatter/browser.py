@@ -243,9 +243,9 @@ class Sessions:
         return report.render(self._dir(name), gcode.Units(machine_units))
 
     def export_zip(self, name: str, machine_units: str) -> bytes:
-        """The session directory as a zip, usable with the command line as it is, with the
-        report as of now. Export is the way out of the browser's storage, so a report that
-        cannot be made is left out rather than stopping it."""
+        """The session directory as a zip, with the report as of now. Export is the way out of
+        the browser's storage, so a report that cannot be made is left out rather than stopping
+        it."""
         self._app(name)
         try:
             page = report.render(self._dir(name), gcode.Units(machine_units))

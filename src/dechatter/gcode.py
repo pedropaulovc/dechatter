@@ -220,14 +220,13 @@ def _leg_lines(plan: Plan, setup: Setup) -> list[str]:
         if leg.reface_mm > 0 and number == 0:
             lines.append(
                 f"(FACING FIRST: the top comes down {_n(leg.reface_mm)} mm, to "
-                f"Z{_n(-leg.top_mm)}; keep the zero. The program stops when it is done: start "
-                "recording then)"
+                f"Z{_n(-leg.top_mm)}; keep the zero)"
             )
         if leg.reface_mm > 0 and number > 0:
             lines.append(
                 f"(then FACING: the top comes down {_n(leg.reface_mm)} mm, to "
                 f"Z{_n(-leg.top_mm)}, and the round starts again at the first lane; keep the "
-                "zero. The program stops before and after it: pause the recording meanwhile)"
+                "zero)"
             )
         if leg.reface_mm == 0 and number == 0 and leg.top_mm > 0:
             lines.append(f"(the top stands at Z{_n(-leg.top_mm)}, faced down by earlier rounds)")
@@ -239,18 +238,6 @@ def _leg_lines(plan: Plan, setup: Setup) -> list[str]:
             continue
         lines.append(f"({then}{_lane(plan, setup, leg.lane)}: {faces})")
     return lines
-
-
-def _record_line(plan: Plan) -> str:
-    start = "at the stop after the facing" if plan.legs[0].reface_mm > 0 else "before cycle start"
-    if plan.mid_facing is not None:
-        return (
-            f"(RECORD: start one continuous recording {start}; pause it while the top is "
-            "faced mid-round, between the stops before and after; stop it after M30. The "
-            "recording cannot tell what the facing did: dechatter analyze asks; note whether "
-            "it ran to its end, stopped part-way or never started)"
-        )
-    return f"(RECORD: start one continuous recording {start}; stop after M30)"
 
 
 def _leg_start(plan: Plan, setup: Setup, number: int) -> list[str]:
@@ -265,9 +252,7 @@ def _leg_start(plan: Plan, setup: Setup, number: int) -> list[str]:
     if leg.reface_mm > 0:
         return [
             f"(FACING THE TOP DOWN from here: {_n(leg.reface_mm)} mm, to Z{_n(-leg.top_mm)}; "
-            f"then {where} from Y0 again, below the new top; keep the zero)",
-            # A recording searched for its cuts by sound must not hold the facing's.
-            "M0 (the top is faced next: pause the recording now, then resume)",
+            f"then {where} from Y0 again, below the new top; keep the zero)"
         ]
     fresh = "slots from Y0 again" if slot else "a fresh face at Y0"
     return [f"(LANE CHANGE: {where} from here, {fresh}; keep the zero)"]
@@ -309,16 +294,14 @@ def render(plan: Plan, setup: Setup, units: Units) -> str:
         f"{_n(plan.chip_load_mm)} mm per tooth)",
         "(WCS zero: X = left end of stock, Y = front face as first mounted, Z = top)",
         *_leg_lines(plan, setup),
-        _record_line(plan),
         _stop_rule(plan),
         MANUAL_NOTE if manual else "(the program starts, sets and stops the spindle)",
         *([] if units is Units.MM else ["(lengths in inches; the comments give mm)"]),
     ]
     passes = {p.id: p for p in plan.passes}
     found = blocks(plan, setup, units)
-    faced = {b.leg: i for i, b in enumerate(found) if b.step is Step.FACE}  # each leg's last row
     leg = 0
-    for index, block in enumerate(found):
+    for block in found:
         if block.leg is not None and block.leg != leg:
             leg = block.leg
             lines += _leg_start(plan, setup, leg)
@@ -327,9 +310,5 @@ def render(plan: Plan, setup: Setup, units: Units) -> str:
             label = "test" if p.kind is PassKind.TEST else p.kind.value
             lines.append(f"(pass {p.id} {label}: S{p.rpm} {_size(plan, p)} F{_n(p.feed_mm_min)})")
         lines += _file_lines(block, plan)
-        if faced.get(block.leg) == index:
-            # A recording searched for its cuts by sound must not hold the facing's.
-            again = "start" if block.leg == 0 else "resume"
-            lines.append(f"M0 (top faced: {again} the recording now, then resume)")
     lines.append("M30")
     return "\n".join(lines) + "\n"

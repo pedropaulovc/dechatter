@@ -66,7 +66,7 @@ export function restOf(state) {
 
 // Whether two reports differ in what the stepper sees: cncjs also reports when only the
 // feed, the spindle speed or the planner buffer changed.
-const changed = (a, b) => a.activeState !== b.activeState || a.subState !== b.subState || JSON.stringify(a.wpos) !== JSON.stringify(b.wpos);
+export const changed = (a, b) => a.activeState !== b.activeState || a.subState !== b.subState || JSON.stringify(a.wpos) !== JSON.stringify(b.wpos);
 const UNSETTLED_ADVICE = 'so it was not reset. Make sure it has stopped, then reset it in cncjs.';
 
 // Positions match within this many mm: controllers report three decimals in mm, or four in
@@ -80,7 +80,7 @@ export class Stepper {
   // io: { send(lines), feedhold(), cyclestart(), reset() }. It never unlocks ($X): an
   // alarm is for the operator to clear.
   // reportInches: the controller reports positions in inches (Grbl's $13=1); targets are mm.
-  constructor({ io, reportInches = false, now = () => Date.now() / 1000, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), onChange = () => {}, onWindow = () => {} }) {
+  constructor({ io, reportInches = false, now = () => performance.now() / 1000, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), onChange = () => {}, onWindow = () => {} }) {
     this.io = io;
     this.scale = reportInches ? 25.4 : 1;
     this.now = now;
@@ -244,10 +244,11 @@ export class Stepper {
       }
       if (state) {
         report = this.nextReport();
+        if (quietSince === null || changed(state, last)) {
+          quietSince = this.now();
+        }
         if (restOf(state) === REST.OTHER) {
           quietSince = null;
-        } else if (quietSince === null || changed(state, last)) {
-          quietSince = this.now();
         }
         last = state;
       }
