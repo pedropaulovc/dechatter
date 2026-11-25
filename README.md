@@ -205,6 +205,26 @@ Export first. It also removes sessions that no longer load, such as ones from de
 0.1.x; one whose setup does not load cannot be exported.
 Both are refused while that session records or its job runs.
 
+### Prepared sessions
+
+A session can be prepared ahead of time by someone who is not at the machine: write its
+`setup.toml`, zip it as `<session>/setup.toml` (a folder named after the session holding the
+file) and hand the zip over; the operator imports it. Values only the machine can tell, such
+as the stock's size and height above the jaws or the tool's actual stickout, are listed under
+`[pending]` with a note saying how to check each, while their fields hold a placeholder:
+
+```toml
+[pending]
+"stock.height_mm" = "measure the top above the jaws (calipers)"
+"tool.stickout_mm" = "measure from the collet face after the tool setter"
+```
+
+Each key is a field the wizard shows, as `section.field` (one that goes with the other way of
+stepping the cut is refused, since the wizard hides it). The widget shows how many values are
+to confirm on the machine and plans nothing until they are: the setup wizard highlights each
+one with its note, opening the Advanced section that holds it, and saving the wizard writes
+the setup without `[pending]`. Export keeps the table while it is there.
+
 ### Manual spindle
 
 If the spindle is started and set by hand, choose "me, by hand" on the wizard's first step

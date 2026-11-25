@@ -19,7 +19,7 @@ from scipy import signal
 import dechatter
 from dechatter import browser, plan, session
 from dechatter.app import TIMELINE_FILE, App
-from dechatter.config import load_setup
+from dechatter.config import ONLY_WITH, ConfigError, Vary, load_setup, read_setup
 from dechatter.detect import Verdict
 from dechatter.plan import Plan, envelope
 
@@ -256,6 +256,100 @@ def test_planning_waits_until_the_template_setup_is_filled_in(engine):
     assert state["next"] == "run"
     plan = Plan.load(session.round_dir(engine.root / "untouched", 1) / session.PLAN_FILE)
     assert plan.flutes == 2
+
+
+PENDING = """
+[pending]
+"stock.height_mm" = "measure the top above the jaws (calipers)"
+"tool.stickout_mm" = "measure from the collet face after the tool setter"
+"""
+
+
+def prepared_zip(name: str, setup_text: str) -> bytes:
+    """What harmonic-analyzer hands over: a zip holding only `<name>/setup.toml`."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr(f"{name}/{session.SETUP_FILE}", setup_text)
+    return buffer.getvalue()
+
+
+def test_a_prepared_session_plans_only_once_its_pending_values_are_confirmed(engine):
+    filled_in = (engine.root / NAME / session.SETUP_FILE).read_text(encoding="utf-8")
+    archive = prepared_zip("prepared", filled_in + PENDING)
+    assert engine.call("import_zip", memoryview(archive)) == "prepared"
+
+    # It loads with the placeholder values, so the widget can show it and open the wizard.
+    state = engine.call("state", "prepared")
+    assert state["next"] == "confirm"
+    pending = {
+        "stock.height_mm": "measure the top above the jaws (calipers)",
+        "tool.stickout_mm": "measure from the collet face after the tool setter",
+    }
+    assert state["pending"] == pending
+    form = engine.call("setup_form", "prepared")
+    assert form["pending"] == pending
+    for method in ("plan", "plan_sweep"):
+        with pytest.raises(RuntimeError, match="values to confirm on the machine") as refused:
+            engine.call(method, "prepared", "same")
+        assert "stock.height_mm (measure the top above the jaws (calipers))" in str(refused.value)
+        assert "tool.stickout_mm (measure from the collet face" in str(refused.value)
+    assert not list((engine.root / "prepared").glob("round-*"))
+
+    # Export keeps the table while it is there.
+    exported = zipfile.ZipFile(io.BytesIO(engine.call("export_zip", "prepared", "mm")))
+    assert "[pending]" in exported.read(f"prepared/{session.SETUP_FILE}").decode("utf-8")
+
+    # A refused save leaves the setup, and so what is still to confirm, as it was.
+    bad = json.loads(json.dumps(form["values"]))
+    bad["cut"]["material"] = "unobtainium"
+    with pytest.raises(RuntimeError, match="unknown material"):
+        engine.call("save_setup", "prepared", json.dumps(bad))
+    assert engine.call("state", "prepared")["pending"] == pending
+
+    # Saving the wizard is the confirmation: the setup is written without [pending].
+    form["values"]["stock"]["height_mm"] = 12.5
+    state = engine.call("save_setup", "prepared", json.dumps(form["values"]))
+    assert state["next"] == "plan" and state["pending"] == {}
+    text = (engine.root / "prepared" / session.SETUP_FILE).read_text(encoding="utf-8")
+    assert "pending" not in text and "height_mm = 12.5" in text
+    assert engine.call("setup_form", "prepared")["pending"] == {}
+    assert engine.call("plan", "prepared", "same")["next"] == "run"
+
+
+@pytest.mark.parametrize(
+    ("entry", "reason"),
+    [
+        ('"stock.heigth_mm" = "typo"', "not a setup field"),
+        ('"stock" = "a section"', "not a setup field"),
+        ('"vise.height_mm" = "no such section"', "not a setup field"),
+        ('"planner.power_fraction" = "the wizard never shows it"', "not a setup field"),
+        ('"cut.radial_width_mm" = "hidden when the width is stepped"', 'vary = "width"'),
+        ('"stock.height_mm" = 25', "needs a note"),
+        ('"stock.height_mm" = "  "', "needs a note"),
+        ('"stock.height_mm" = {}', "needs a note"),
+        ("[pending.typo]", "not a setup field"),
+        ('"stock.height_mm" = "calipers"\nstock.height_mm = "a rule"', "listed twice"),
+    ],
+)
+def test_pending_entries_must_name_fields_the_wizard_shows(engine, entry, reason):
+    filled_in = (engine.root / NAME / session.SETUP_FILE).read_text(encoding="utf-8")
+    with pytest.raises(ConfigError, match=reason):
+        read_setup(f"{filled_in}\n[pending]\n{entry}\n", session.SETUP_FILE)
+
+
+def test_pending_is_a_table_and_takes_unquoted_dotted_keys_too(engine):
+    filled_in = (engine.root / NAME / session.SETUP_FILE).read_text(encoding="utf-8")
+    with pytest.raises(ConfigError, match="must be a table"):
+        read_setup(f'pending = "everything"\n{filled_in}', session.SETUP_FILE)
+    dotted = f'{filled_in}\n[pending]\nstock.height_mm = "calipers"\n'
+    assert read_setup(dotted, session.SETUP_FILE).pending == (("stock.height_mm", "calipers"),)
+
+
+def test_the_fields_pending_refuses_by_vary_are_those_the_wizard_hides():
+    wizard = (Path(dechatter.__file__).parent / "widget" / "wizard.js").read_text(encoding="utf-8")
+    hidden = re.findall(r"at: '([^']+)', when: STEPS_(WIDTH|DEPTH)", wizard)
+    assert len(hidden) == wizard.count("when:"), "a field's `when` this test does not read"
+    assert {at: Vary(when.lower()) for at, when in hidden} == ONLY_WITH
 
 
 def files(folder) -> dict:

@@ -186,20 +186,93 @@ def load_setup(path: Path) -> Setup:
     return parse_setup(path.read_text(encoding="utf-8"), path.name)
 
 
+# Field path ("stock.height_mm") and note, for each value written ahead of time that is
+# still to be confirmed on the machine.
+type Pending = tuple[tuple[str, str], ...]
+
+
 @dataclass(frozen=True)
 class SetupFile:
     """A setup and the file text it was parsed from, which a planned round keeps."""
 
     text: str
     setup: Setup
+    # Planning waits until these are confirmed; saving the wizard confirms them.
+    pending: Pending = ()
 
 
 def read_setup(text: str, origin: str) -> SetupFile:
-    return SetupFile(text, parse_setup(text, origin))
+    setup, pending = _parse(text, origin)
+    return SetupFile(text, setup, pending)
 
 
 def parse_setup(text: str, origin: str) -> Setup:
     """A setup from setup file text; `origin` names it in errors."""
+    return _parse(text, origin)[0]
+
+
+PENDING = "pending"
+
+# The fields that go with one way of stepping the cut: the wizard shows them only then (the
+# `when` of its fields, in wizard.js).
+ONLY_WITH = {
+    "cut.axial_depth_mm": Vary.WIDTH,
+    "cut.other_depths_mm": Vary.WIDTH,
+    "cut.width_max_mm": Vary.WIDTH,
+    "planner.round1_width_fractions": Vary.WIDTH,
+    "cut.radial_width_mm": Vary.DEPTH,
+    "cut.depth_max_mm": Vary.DEPTH,
+    "cut.other_widths_mm": Vary.DEPTH,
+    "program.slot_wall_mm": Vary.DEPTH,
+    "planner.round1_depth_fractions": Vary.DEPTH,
+}
+
+
+def _shown_fields() -> set[str]:
+    """Every field the wizard can show, as `section.field`."""
+    hints = typing.get_type_hints(Setup)
+    shown = {
+        f"{section.name}.{entry.name}"
+        for section in dataclasses.fields(Setup)
+        for entry in dataclasses.fields(hints[section.name])
+    }
+    return shown - {f"planner.{key}" for key in UNLISTED_PLANNER}
+
+
+def _pending(entries: object, setup: Setup) -> Pending:
+    """The `[pending]` table: each key a field the wizard shows this setup, each value a note
+    saying how to check it."""
+    if not isinstance(entries, dict):
+        raise ConfigError(f'[{PENDING}] must be a table of "section.field" = "note"')
+    if not entries:
+        return ()
+    flat = []
+    for at, note in entries.items():
+        # Unquoted, stock.height_mm is a TOML dotted key: a table of the section's fields. An
+        # empty table stays as it is, to be refused below.
+        if isinstance(note, dict) and note:
+            flat.extend((f"{at}.{key}", value) for key, value in note.items())
+        else:
+            flat.append((at, note))
+    shown, seen = _shown_fields(), set()
+    for at, note in flat:
+        if at in seen:
+            raise ConfigError(f'[{PENDING}] "{at}" is listed twice')
+        seen.add(at)
+        if at not in shown:
+            raise ConfigError(f'[{PENDING}] "{at}" is not a setup field the wizard shows')
+        wanted = ONLY_WITH.get(at)
+        if wanted is not None and wanted is not setup.cut.vary:
+            raise ConfigError(
+                f'[{PENDING}] "{at}" does not apply with vary = "{setup.cut.vary}", so the '
+                "wizard never shows it"
+            )
+        if not isinstance(note, str) or not note.strip():
+            raise ConfigError(f'[{PENDING}] "{at}" needs a note in quotes: how to check it')
+    return tuple(flat)
+
+
+def _parse(text: str, origin: str) -> tuple[Setup, Pending]:
     try:
         data = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
@@ -211,6 +284,7 @@ def parse_setup(text: str, origin: str) -> Setup:
             "spindle_power_hp: the spindle motor's rated power in horsepower, "
             f"1 hp = {WATTS_PER_HP} W.)"
         )
+    entries = data.pop(PENDING, {})
     sections = {f.name: f for f in dataclasses.fields(Setup)}
     unknown = set(data) - set(sections)
     if unknown:
@@ -223,7 +297,7 @@ def parse_setup(text: str, origin: str) -> Setup:
         built[name] = _build(cls, name, data.get(name, {}))
     setup = Setup(**built)
     _validate(setup)
-    return setup
+    return setup, _pending(entries, setup)
 
 
 def setup_source(text: str) -> SetupSource:
@@ -270,7 +344,8 @@ def setup_values(path: Path) -> dict:
     Everything a form shows is included, so saving pins what the user saw even where it
     equals today's default: a safe height someone confirmed must not move with a later
     release. The unlisted planner settings are included only where the file sets them, so
-    one written by hand survives a save and the rest keep following the defaults.
+    one written by hand survives a save and the rest keep following the defaults. The
+    `[pending]` table is left out: saving what the form showed confirms those fields.
     """
     values = dataclasses.asdict(load_setup(path))
     written = tomllib.loads(path.read_text(encoding="utf-8")).get("planner", {})
