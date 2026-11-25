@@ -72,6 +72,26 @@ export const infoFor = (field, units) => {
   return typeof text === 'function' ? text(units) : text;
 };
 
+// The New dialog's "Start from": what starting a session from an earlier one does.
+export const START_FROM = 'Pick an earlier session measured on this same machine, holder, cutter and stickout (Import brings in one that was exported), for instance the same cutter in another material, at another depth or width, or in the other direction. The new session takes over its setup for you to change, and keeps its analysed cuts. Round 1 is then a short confirmation instead of the coarse grid: a few cuts around the best cut the earlier session predicts here, or, where its limits do not carry over (the other direction, or a slot against a side cut), the round-1 cuts at its best speeds only; and, where it heard chatter within reach, one cut in its chatter band as a control. The earlier cuts count for much less than cuts made here and show apart on the map. If half or more of the predicted cuts come out the other way, they are dropped and the coarse grid follows. A different machine, holder, cutter diameter, flute count or cutter material, or a stickout more than 0.6 mm off, is refused when the setup is saved.';
+
+// An (i) button and the bubble it opens, for anything explained at length.
+export function info(id, label, text) {
+  const bubble = Object.assign(document.createElement('p'), {
+    className: 'bubble',
+    id: `info-${id}`,
+    hidden: true,
+    textContent: text,
+  });
+  bubble.setAttribute('role', 'note');
+  const about = Object.assign(document.createElement('button'), { type: 'button', className: 'info', textContent: 'i' });
+  about.setAttribute('aria-label', `About ${label}`);
+  about.setAttribute('aria-expanded', 'false');
+  about.setAttribute('aria-controls', bubble.id);
+  about.onclick = () => toggle(about, bubble);
+  return { about, bubble };
+}
+
 // The fields that go with what the session steps.
 const STEPS_WIDTH = { 'cut.vary': 'width' };
 const STEPS_DEPTH = { 'cut.vary': 'depth' };
@@ -258,18 +278,7 @@ function row(field, values, units, setup) {
   const id = field.at.replace('.', '-');
   input.id = `field-${id}`;
   const unit = LENGTH_UNITS[field.type]?.[units] ?? field.unit ?? '';
-  const bubble = Object.assign(document.createElement('p'), {
-    className: 'bubble',
-    id: `info-${id}`,
-    hidden: true,
-    textContent: infoFor(field, units),
-  });
-  bubble.setAttribute('role', 'note');
-  const about = Object.assign(document.createElement('button'), { type: 'button', className: 'info', textContent: 'i' });
-  about.setAttribute('aria-label', `About ${field.label}`);
-  about.setAttribute('aria-expanded', 'false');
-  about.setAttribute('aria-controls', bubble.id);
-  about.onclick = () => toggle(about, bubble);
+  const { about, bubble } = info(id, field.label, infoFor(field, units));
   // The label names only the input; the (i) button and its bubble sit beside it.
   const label = Object.assign(document.createElement('label'), { htmlFor: input.id, textContent: field.label });
   const name = document.createElement('span');
@@ -292,7 +301,7 @@ function row(field, values, units, setup) {
 // One info bubble open at a time. It closes on its button, Escape, or a click elsewhere.
 let openInfo = null; // { about, bubble } while a bubble is open
 
-function closeInfo() {
+export function closeInfo() {
   if (openInfo === null) {
     return;
   }

@@ -344,6 +344,74 @@ Three things differ from the paper, which tests one cut at a time under closed-l
 The stock runs out before the search does on small blocks. When it does, mount fresh stock,
 reset the face to `Y0` and plan on the "fresh block, face at Y0" in the widget.
 
+### Starting from an earlier session
+
+A stability map belongs to one tool assembly: machine, holder, cutter and stickout. The next
+question about that same assembly (another material, a deeper or narrower cut, slots, the
+other direction) need not start from the round-1 grid. In the widget, New asks for a name
+and offers "Start from": pick an earlier session stored in this browser, or Import an
+exported one there. The new session takes over that session's setup for you to change, and
+keeps a copy of its analysed test cuts that got a verdict (the detector's or one set by
+hand; a chip-load sweep is left out) with the setup they were measured with, in `seed.json`
+in its own folder. Export and Import carry it along, and the earlier session may be deleted.
+
+The setup may then change in what the new cuts differ in, but not in the assembly. Saving a
+setup with another machine name or weight, holder, cutter diameter (more than 0.05 mm),
+flute count or cutter material, or a stickout more than 0.6 mm off, is refused with the
+reason. A machine name or holder left empty on either side passes. The 0.6 mm allows for a
+cutter put back in its holder against a scale; the control cut below is there to catch a
+chatter band that moved anyway.
+
+What carries over follows the usual stability-lobe picture:
+
+- The speeds. Chatter bands and stable pockets come from the tool's own vibration and the
+  tooth count, so they stay where they were in rpm.
+- The limits, converted. The limiting depth goes with 1 / (specific energy × teeth in the
+  cut), so each earlier pass becomes the cut that loads the tool as much here: the same
+  specific energy (`materials.py`) × depth × arc of engagement, the arc being
+  `acos(1 - 2 width / diameter)`. From 6061 to 1018 a depth limit shrinks by 0.70 / 2.20; a
+  width limit at a set depth shrinks faster, since it is the arc that shrinks by that ratio.
+  A stable pass is rounded down to the map's step and chatter up. A stable pass beyond the
+  largest size searched counts as stable at that size; a pass at a speed outside the search,
+  chatter beyond the largest size, or a stable pass under the smallest step says nothing.
+- Less trust than a cut made here. A new cut is taken as misheard 5% of the time. A
+  carried-over pass at this session's own depth (or, stepping the depth, width) counts as
+  misheard 22% of the time; one converted from another depth or width 41%; and one cut in
+  the other direction, or a full-width slot against a side cut or the reverse, 64%, which is
+  next to nothing: between those the load compares poorly, and only the speeds are relied on.
+  Chip load and coolant are not converted.
+
+Round 1 of such a session is a short confirmation instead of the grid:
+
+- Where limits carry over: the predicted best cut (the earlier stable pass with the highest
+  removal rate here, within the power cap), the same speed at two thirds of it, the best
+  pass of another pocket (a speed more than 5% away), and a control: the lightest cut that
+  chattered, away from those speeds, which is the bottom of the deepest chatter band. The
+  first three are expected to be stable, the control to chatter.
+- Where only the speeds do: the grid's own widths (or depths) at the speeds of the earlier
+  session's two best pockets, with nothing predicted of them, and the control: the heaviest
+  of those sizes at the speed of the earlier session's lightest cut that chattered,
+  expected to chatter.
+
+There is a control only where the earlier session heard chatter inside this search, within
+the power cap and away from the speeds being confirmed. Where no cut with a prediction got
+a verdict (only the speeds carried over and there was no control, or it was not cut),
+nothing was checked: the earlier passes stay on the map, untested, at their small weight.
+Where the limits carry over but predict no best cut here (no stable pass inside the search
+and the power cap, or chatter at that speed contradicts it), there is nothing to confirm:
+the earlier passes stay on the map and round 1 is the grid. With nothing inside the search
+at all, the earlier session is not used.
+
+The confirmation cuts are cuts of this session like any other. If half or more of the cuts
+with a prediction that got a verdict come out the other way (two of four, or the one control
+where only the speeds carried over), the earlier passes are dropped from the map and the
+next round is the normal round-1 grid. Otherwise they stay, and later rounds are chosen from
+the map as usual; a carried-over pass is never a best cut, and the planner may cut it here.
+Correcting a verdict by hand can change which way this goes. On the map the earlier passes
+show as small squares (stable) and plus signs (chatter), apart from this session's dots and
+crosses, and the report has a "Seeded from" section listing each one, what it became here
+and how much it was trusted.
+
 ### Lanes: fresh faces without remounting
 
 A long block is split into lanes along X. By default there are as many as leave every cut

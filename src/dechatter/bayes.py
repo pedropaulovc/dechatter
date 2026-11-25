@@ -46,6 +46,14 @@ class Observation:
     engagement_mm: float
     verdict: Verdict
     chatter_hz: float | None = None
+    # Under 1: not cut in this session but carried over from the one it was started from
+    # (see seeding). It counts as a cut misheard more often: misclassification ** weight.
+    weight: float = 1.0
+
+
+def made(observations: list[Observation]) -> list[Observation]:
+    """The cuts made in this session, without what another session's carried over."""
+    return [o for o in observations if o.weight >= 1.0]
 
 
 class StabilityMap:
@@ -135,22 +143,35 @@ def build_map(setup: Setup, env: Envelope, observations: list[Observation]) -> S
     )
     for obs in observations:
         stability.update(
-            obs.rpm, obs.engagement_mm, obs.verdict, cfg.speed_sigma_fraction * obs.rpm
+            obs.rpm,
+            obs.engagement_mm,
+            obs.verdict,
+            cfg.speed_sigma_fraction * obs.rpm,
+            obs.weight,
         )
 
-    for chatter_hz, engagement_mm in chatter_modes(observations, cfg.speed_sigma_fraction):
-        spots = sweet_spot_speeds(
-            chatter_hz, setup.tool.flutes, env.speed_min_rpm, env.speed_max_rpm
-        )
-        for lobe, rpm in spots:
-            pocket = SWEET_SPOT_POCKET * rpm / (lobe + 1)
-            stability.update(
-                rpm,
-                engagement_mm,
-                Verdict.STABLE,
-                min(pocket, cfg.speed_sigma_fraction * rpm),
-                cfg.sweet_spot_trust,
+    # Sweet spots are credited from this session's cuts and from carried-over ones apart,
+    # each at its own weight: a mode only another session heard earns less, and one both
+    # heard is credited once, from this session's cuts.
+    credited: list[float] = []
+    for weight in sorted({obs.weight for obs in observations}, reverse=True):
+        heard = [obs for obs in observations if obs.weight == weight]
+        for chatter_hz, engagement_mm in chatter_modes(heard, cfg.speed_sigma_fraction):
+            if any(abs(chatter_hz - hz) <= MODE_TOLERANCE * hz for hz in credited):
+                continue
+            credited.append(chatter_hz)
+            spots = sweet_spot_speeds(
+                chatter_hz, setup.tool.flutes, env.speed_min_rpm, env.speed_max_rpm
             )
+            for lobe, rpm in spots:
+                pocket = SWEET_SPOT_POCKET * rpm / (lobe + 1)
+                stability.update(
+                    rpm,
+                    engagement_mm,
+                    Verdict.STABLE,
+                    min(pocket, cfg.speed_sigma_fraction * rpm),
+                    cfg.sweet_spot_trust * weight,
+                )
     return stability
 
 
@@ -192,8 +213,8 @@ def mrr_grid(setup: Setup, env: Envelope, stability: StabilityMap) -> np.ndarray
 def best_stable(
     setup: Setup, env: Envelope, observations: list[Observation]
 ) -> list[tuple[float, Observation]]:
-    """Stable observations, highest removal rate first, as (mm3/min, observation)."""
-    stable = [o for o in observations if o.verdict is Verdict.STABLE]
+    """Stable cuts made in this session, highest removal rate first, as (mm3/min, observation)."""
+    stable = [o for o in made(observations) if o.verdict is Verdict.STABLE]
     rated = [(float(mrr_mm3_min(setup, env, o.rpm, o.engagement_mm)), o) for o in stable]
     return sorted(rated, key=lambda pair: -pair[0])
 
@@ -213,7 +234,8 @@ def propose(
     is proposed once no cut within the power cap that would beat it keeps a fair chance of
     being stable: this depth is not going to win. Until then the search here climbs from its
     own best cut, since the first cuts at a new depth are lighter than the ones that could
-    win.
+    win. Observations carried over from another session shape the map, but are neither a best
+    cut to beat nor a cut already made: theirs may be cut here.
     """
     cfg = setup.planner
     measured = build_map(setup, env, observations)
@@ -230,7 +252,7 @@ def propose(
     if not np.any(within_power & reachable & (mrr > target_mm3_min)):
         return Proposal([], 0.0)
     allowed = within_power & (p_measured >= cfg.probability_floor)
-    for obs in observations:
+    for obs in made(observations):
         allowed[measured.speed_index(obs.rpm), measured.engagement_index(obs.engagement_mm)] = False
 
     tests: list[tuple[float, float, float]] = []
