@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pytest
-import soundfile
 import synth
 
-from dechatter import bayes, cli, session
+from dechatter import audio, bayes, session
 from dechatter.bayes import Observation
-from dechatter.detect import Verdict
-from dechatter.plan import PlannerKind, envelope, grid_tests, mrr_mm3_min
+from dechatter.config import TEMPLATE, read_setup
+from dechatter.detect import Thresholds, Verdict
+from dechatter.plan import PlanError, PlannerKind, envelope, grid_tests, mrr_mm3_min
+from dechatter.session import SessionError, Stock
 
 MACHINE = synth.Machine()
 
@@ -115,30 +118,48 @@ def true_optimum(setup, env) -> float:
     )
 
 
+def init_session(work) -> None:
+    work.mkdir(parents=True, exist_ok=True)
+    (work / session.SETUP_FILE).write_text(TEMPLATE, encoding="utf-8")
+
+
 def fill_in(work) -> None:
-    """Describe the machine, as the user does after `init`, keeping the template's values."""
+    """Describe the machine, keeping the template's numeric values."""
     path = work / session.SETUP_FILE
     path.write_text(path.read_text().replace('name = "PM-30MV"', 'name = "mill"'))
 
 
-def test_session_converges_near_the_true_optimum_from_recordings_alone(tmp_path, setup, capsys):
+def source_at(work):
+    text = (work / session.SETUP_FILE).read_text(encoding="utf-8")
+    source = read_setup(text, session.SETUP_FILE)
+    return source, envelope(source.setup)
+
+
+def run_round(target: session.Round, seed: int) -> None:
+    wav = target.path / session.RECORDING_FILE
+    audio.save_wav(wav, synth.record(target.plan, seed=seed), synth.RATE)
+    (target.path / session.TIMELINE_FILE).write_text(
+        json.dumps(synth.timeline(target.plan)), encoding="utf-8"
+    )
+    session.analyze_recording(target, wav, Thresholds())
+
+
+def test_session_converges_near_the_true_optimum(tmp_path, setup):
     work = tmp_path / "session"
-    assert cli.main(["init", str(work)]) == 0
+    init_session(work)
     fill_in(work)
+    source, env = source_at(work)
     for _ in range(10):
-        planned = len(session.load_rounds(work))
-        assert cli.main(["plan", str(work), "--new-stock"]) == 0
-        rounds = session.load_rounds(work)
-        if len(rounds) == planned:
+        planned = session.plan_next(work, source, env, Stock.FRESH)
+        if planned.plan is None:
             break
-        wav = rounds[-1].path / "recording.wav"
-        soundfile.write(wav, synth.record(rounds[-1].plan, seed=len(rounds)), synth.RATE)
-        assert cli.main(["analyze", str(work), str(wav)]) == 0
+        rounds = session.load_rounds(work)
+        run_round(rounds[-1], seed=len(rounds))
     else:
         pytest.fail("did not converge in 10 rounds")
 
-    env = envelope(setup)
-    cuts = session.observations(session.load_rounds(work), setup.cut.axial_depth_mm, env)
+    rounds = session.load_rounds(work)
+    cuts = session.observations(rounds, setup.cut.axial_depth_mm, env)
     for obs in cuts:
         truth = MACHINE.chatters(obs.rpm, obs.engagement_mm, setup.tool.flutes)
         assert (obs.verdict is Verdict.UNSTABLE) == truth
@@ -146,65 +167,67 @@ def test_session_converges_near_the_true_optimum_from_recordings_alone(tmp_path,
     assert best_mrr >= 0.85 * true_optimum(setup, env)
     assert len(cuts) <= 40
 
-    # Converged: a chip-load sweep of the best cut is offered, planned, and reported.
-    assert f"dechatter plan {work} --sweep" in capsys.readouterr().out
-    assert cli.main(["plan", str(work), "--sweep", "--new-stock"]) == 0
+    # Converged: a chip-load sweep of the best cut is offered, planned, and analysed.
+    found = session.best_cuts(setup, env, rounds)
+    assert session.to_sweep(setup, env, found, session.swept(found, session.sweeps(rounds, env)))
+    session.plan_sweep(work, source, env, Stock.FRESH)
     sweep = session.load_rounds(work)[-1]
     assert sweep.plan.planner is PlannerKind.SWEEP
-    wav = sweep.path / "recording.wav"
-    soundfile.write(wav, synth.record(sweep.plan, seed=99), synth.RATE)
-    assert cli.main(["analyze", str(work), str(wav)]) == 0
-    capsys.readouterr()
-    assert cli.main(["report", str(work)]) == 0
-    assert "chip-load sweep (round" in capsys.readouterr().out
-    after = session.observations(session.load_rounds(work), setup.cut.axial_depth_mm, env)
+    run_round(sweep, seed=99)
+    rounds = session.load_rounds(work)
+    assert len(session.sweeps(rounds, env)) == 1
+    after = session.observations(rounds, setup.cut.axial_depth_mm, env)
     assert after == cuts, "the sweep's cuts stay off the map"
 
 
-def test_plan_refuses_until_the_setup_is_filled_in(tmp_path, capsys):
+def test_plan_refuses_until_the_setup_is_filled_in(tmp_path):
     work = tmp_path / "session"
-    cli.main(["init", str(work)])
+    init_session(work)
     path = work / session.SETUP_FILE
     # Re-wrapping lines or line endings in an editor fills nothing in.
     path.write_text(path.read_text().replace("\n", "\r\n  ") + "\n\n", newline="")
-    assert cli.main(["plan", str(work)]) == 1
-    assert "still the example template" in capsys.readouterr().err
+    source, env = source_at(work)
+    with pytest.raises(PlanError, match="still the example template"):
+        session.plan_next(work, source, env, Stock.SAME)
     assert session.load_rounds(work) == []
 
     fill_in(work)
-    assert cli.main(["plan", str(work)]) == 0
+    source, env = source_at(work)
+    session.plan_next(work, source, env, Stock.SAME)
     assert [r.plan.round for r in session.load_rounds(work)] == [1]
 
 
-def test_plan_refuses_until_the_last_round_is_analysed(tmp_path, capsys):
+def test_plan_refuses_until_the_last_round_is_analysed(tmp_path):
     work = tmp_path / "session"
-    cli.main(["init", str(work)])
+    init_session(work)
     fill_in(work)
-    assert cli.main(["plan", str(work)]) == 0
-    assert cli.main(["plan", str(work)]) == 1
-    assert "dechatter analyze" in capsys.readouterr().err
+    source, env = source_at(work)
+    session.plan_next(work, source, env, Stock.SAME)
+    with pytest.raises(SessionError, match="has no results"):
+        session.plan_next(work, source, env, Stock.SAME)
 
 
-def test_plan_refuses_a_setup_that_changed_what_a_cut_round_measured(tmp_path, capsys):
+def test_plan_refuses_a_setup_that_changed_what_a_cut_round_measured(tmp_path):
     work = tmp_path / "session"
-    cli.main(["init", str(work)])
+    init_session(work)
     fill_in(work)
-    assert cli.main(["plan", str(work)]) == 0
+    source, env = source_at(work)
+    session.plan_next(work, source, env, Stock.SAME)
     first = session.load_rounds(work)[0]
     assert (first.path / session.SETUP_FILE).read_bytes() == (
         work / session.SETUP_FILE
     ).read_bytes()
-    wav = first.path / "recording.wav"
-    soundfile.write(wav, synth.record(first.plan, seed=1), synth.RATE)
-    assert cli.main(["analyze", str(work), str(wav)]) == 0
+    run_round(first, seed=1)
 
     path = work / session.SETUP_FILE
     text = path.read_text()
     path.write_text(text.replace("flutes = 3", "flutes = 2"))
-    assert cli.main(["plan", str(work)]) == 1
-    assert "tool.flutes" in capsys.readouterr().err
+    source, env = source_at(work)
+    with pytest.raises(SessionError, match=r"tool\.flutes"):
+        session.plan_next(work, source, env, Stock.SAME)
     assert len(session.load_rounds(work)) == 1
 
     path.write_text(text.replace("safe_z_mm = 10.0", "safe_z_mm = 20.0"))
-    assert cli.main(["plan", str(work)]) == 0
+    source, env = source_at(work)
+    session.plan_next(work, source, env, Stock.SAME)
     assert len(session.load_rounds(work)) == 2

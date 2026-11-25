@@ -124,6 +124,7 @@ def record(
     rapid_s: float = 2.0,
     speed_change_s: float = 0.0,
     air_s: Sequence[float] | None = None,
+    cut_s: Sequence[float] | None = None,
     in_air: frozenset[int] = frozenset(),
     facing: Facing = Facing.PAUSED,
     row_s: Sequence[float] = (),
@@ -167,7 +168,11 @@ def record(
         previous_rpm = p.rpm
         air = rapid_s + plan.dwell_s + p.lead_in_s if air_s is None else air_s[index]
         parts.append(_air(air, spindle_hz, machine, rng))
-        seconds = p.expected_cut_s * (0.4 if index == abort_in_pass else 1.0)
+        seconds = (
+            p.expected_cut_s * (0.4 if index == abort_in_pass else 1.0)
+            if cut_s is None
+            else cut_s[index]
+        )
         chatter = machine.chatters(p.rpm, p.width_mm, plan.flutes, p.depth_mm)
         load = machine.load(p.width_mm, p.depth_mm)
         if index in in_air:
@@ -178,3 +183,112 @@ def record(
             break
     parts.append(0.0005 * rng.standard_normal(2 * RATE))
     return np.concatenate(parts).astype(np.float32)
+
+
+def timeline(
+    plan: Plan,
+    *,
+    abort_in_pass: int | None = None,
+    rapid_s: float = 2.0,
+    speed_change_s: float = 0.0,
+    facing: Facing = Facing.PAUSED,
+    row_s: Sequence[float] = (),
+    stop_after_rows: int | None = None,
+) -> list[dict]:
+    """The widget's run timeline matching `record(plan, ...)`."""
+    t0, t = 1000.0, 3.0
+    events: list[dict] = [{"t": t0, "event": "record", "round": plan.round, "units": "mm"}]
+    faced = {
+        leg.passes[0].id: (n, leg.face_s) for n, leg in enumerate(plan.legs) if leg.reface_mm > 0
+    }
+    previous_rpm = None
+    for index, p in enumerate(plan.passes):
+        if facing is Facing.ROWS and p.id in faced:
+            leg_num, _ = faced[p.id]
+            for row, seconds in enumerate(row_s):
+                if row == stop_after_rows:
+                    events.append(
+                        {
+                            "t": t0 + t,
+                            "event": "run",
+                            "outcome": "stopped",
+                            "reason": "stopped by the operator",
+                        }
+                    )
+                    return events
+                t += 2 * rapid_s
+                events.append(
+                    {
+                        "t": 0,
+                        "event": "face",
+                        "leg": leg_num,
+                        "rows_after": len(row_s) - 1 - row,
+                        "start": t0 + t,
+                        "end": t0 + t + seconds,
+                    }
+                )
+                t += seconds
+        if facing is Facing.HEARD and p.id in faced:
+            leg_num, face_s = faced[p.id]
+            t += rapid_s
+            events.append(
+                {
+                    "t": 0,
+                    "event": "face",
+                    "leg": leg_num,
+                    "rows_after": 0,
+                    "start": t0 + t,
+                    "end": t0 + t + face_s,
+                }
+            )
+            t += face_s
+        if speed_change_s and p.rpm != previous_rpm:
+            t += 0.3 + speed_change_s
+        previous_rpm = p.rpm
+        dwell_start = t + rapid_s
+        dwell_end = dwell_start + plan.dwell_s
+        events.append(
+            {
+                "t": 0,
+                "event": "dwell",
+                "pass": p.id,
+                "start": t0 + dwell_start,
+                "end": t0 + dwell_end,
+            }
+        )
+        contact_start = dwell_end + p.lead_in_s
+        seconds = p.expected_cut_s * (0.4 if index == abort_in_pass else 1.0)
+        if index == abort_in_pass:
+            events.append(
+                {
+                    "t": 0,
+                    "event": "cut",
+                    "pass": p.id,
+                    "start": t0 + dwell_end,
+                    "end": t0 + contact_start + seconds,
+                    "aborted": True,
+                    "holds": [],
+                }
+            )
+            events.append(
+                {
+                    "t": t0 + contact_start + seconds,
+                    "event": "run",
+                    "outcome": "stopped",
+                    "reason": "stopped by the operator",
+                }
+            )
+            return events
+        events.append(
+            {
+                "t": 0,
+                "event": "cut",
+                "pass": p.id,
+                "start": t0 + dwell_end,
+                "end": t0 + contact_start + seconds + p.lead_in_s,
+                "holds": [],
+            }
+        )
+        t = contact_start + seconds
+    events.append({"t": t0 + t, "event": "run", "outcome": "done", "reason": ""})
+    return events

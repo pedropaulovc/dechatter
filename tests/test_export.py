@@ -8,7 +8,7 @@ import zipfile
 
 import pytest
 
-from dechatter import export
+from dechatter import cli, export
 
 WHEELS = {"numpy": b"numpy wheel", "scipy": b"scipy wheel", "unrelated": b"other wheel"}
 DEPENDS = {"numpy": [], "scipy": ["numpy"], "unrelated": []}
@@ -77,3 +77,21 @@ def test_corrupt_download_is_refused_and_fetched_again_next_time(tmp_path):
     cdn.files["scipy.whl"] = good
     export.export(tmp_path / "widget", tmp_path / "cache", cdn.fetch)
     assert (tmp_path / "widget" / "pyodide" / "scipy.whl").read_bytes() == good
+
+
+def test_cli_widget_command_exports_folder_and_reports_errors(tmp_path, monkeypatch, capsys):
+    cdn = Cdn()
+    monkeypatch.setattr(export, "default_cache", lambda: tmp_path / "cache")
+    monkeypatch.setattr(export, "_download", cdn.fetch)
+    out = tmp_path / "built"
+    assert cli.main(["widget", str(out)]) == 0
+    assert "wrote the widget to" in capsys.readouterr().out
+    assert (out / "widget.js").exists()
+
+    def broken(url: str, target) -> None:
+        raise export.ExportError("network down")
+
+    monkeypatch.setattr(export, "default_cache", lambda: tmp_path / "empty-cache")
+    monkeypatch.setattr(export, "_download", broken)
+    assert cli.main(["widget", str(tmp_path / "failed")]) == 1
+    assert "network down" in capsys.readouterr().err

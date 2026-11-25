@@ -1,7 +1,7 @@
 """One session as the cncjs widget sees it: its state as JSON-ready data, and its actions.
 
-The widget records in the browser and hands the samples over; everything else (planning,
-analysis, files) is the same code the command line uses.
+The widget records in the browser while stepping the round and hands the samples and run
+timeline over; this layer plans, analyses and persists the session files.
 """
 
 from __future__ import annotations

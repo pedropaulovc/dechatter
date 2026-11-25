@@ -7,12 +7,11 @@ import json
 from pathlib import Path
 
 import pytest
-import soundfile
 import synth
 
-from dechatter import bayes, browser, cli, gcode, report, session
+from dechatter import audio, bayes, browser, gcode, report, session
 from dechatter.app import App
-from dechatter.config import ConfigError, Vary, parse_setup
+from dechatter.config import ConfigError, Vary, parse_setup, read_setup
 from dechatter.detect import Thresholds, Verdict
 from dechatter.plan import (
     REFACE_EXTRA_MM,
@@ -415,33 +414,37 @@ def test_a_cut_on_a_faced_top_stays_the_clearance_above_what_the_stock_stands_on
         assemble(setup, env, 5, PlannerKind.BAYES, [light], face=used, made=made, lanes=1)
 
 
-def record(work, plan, machine, seed) -> None:
-    wav = session.round_dir(work, plan.round) / "recording.wav"
-    soundfile.write(wav, synth.record(plan, machine, seed=seed), synth.RATE)
-    # The recording was paused through a facing mid-round: the operator says it ran.
-    facing = [] if plan.mid_facing is None else ["--facing", "done"]
-    assert cli.main(["analyze", str(work), str(wav), *facing]) == 0
+def record(work, target: session.Round, machine, seed) -> None:
+    wav = target.path / session.RECORDING_FILE
+    heard = synth.record(target.plan, machine, seed=seed, facing=synth.Facing.HEARD)
+    audio.save_wav(wav, heard, synth.RATE)
+    tl = synth.timeline(target.plan, facing=synth.Facing.HEARD)
+    (target.path / session.TIMELINE_FILE).write_text(json.dumps(tl), encoding="utf-8")
+    session.analyze_recording(target, wav, Thresholds())
 
 
-def test_a_slotting_session_converges_on_the_depth_limit_from_recordings_alone(tmp_path, capsys):
+def test_a_slotting_session_converges_on_the_depth_limit(tmp_path):
     # A block that stands 4.5 mm above the jaws: the top can come down once.
-    setup = slots(h=("height_mm = 20.0", "height_mm = 4.5"))
+    setup_text = SLOTS.replace("height_mm = 20.0", "height_mm = 4.5")
+    source = read_setup(setup_text, session.SETUP_FILE)
+    setup = source.setup
     work = tmp_path / "slots"
     work.mkdir()
-    (work / session.SETUP_FILE).write_text(SLOTS.replace("height_mm = 20.0", "height_mm = 4.5"))
+    (work / session.SETUP_FILE).write_text(setup_text)
     env = envelope(setup)
     fresh_blocks = 0
     for _ in range(12):
-        planned = len(session.load_rounds(work))
-        if cli.main(["plan", str(work)]) != 0:
+        try:
+            planned = session.plan_next(work, source, env, session.Stock.SAME)
+        except PlanError as exc:
             # No row left and the top cannot come down further: fresh stock is asked for.
-            assert "mount fresh stock and plan with new stock" in capsys.readouterr().err
+            assert "mount fresh stock and plan with new stock" in str(exc)
             fresh_blocks += 1
-            assert cli.main(["plan", str(work), "--new-stock"]) == 0
-        rounds = session.load_rounds(work)
-        if len(rounds) == planned:
+            planned = session.plan_next(work, source, env, session.Stock.FRESH)
+        if planned.plan is None:
             break
-        record(work, rounds[-1].plan, MACHINE, len(rounds))
+        rounds = session.load_rounds(work)
+        record(work, rounds[-1], MACHINE, len(rounds))
     else:
         pytest.fail("did not converge in 12 rounds")
 
@@ -466,10 +469,6 @@ def test_a_slotting_session_converges_on_the_depth_limit_from_recordings_alone(t
     # when the depths between promise under 5%, not always at the best of the sweet spots.
     assert best.depth_mm >= 1.5 * min(MACHINE.depth_limit_mm(s, 3, 12.7) for s in env.speeds(10))
     assert best.mrr_mm3_min >= 0.7 * optimum
-
-    out = capsys.readouterr().out
-    assert "width 12.7 mm:" in out and "stability map (depth mm down, rpm across):" in out
-    assert "12.7 mm wide (full-width slots)" in out and "the deepest cuts come first" in out
 
     state = App(work, Thresholds()).state()
     assert (state["vary"], state["level_mm"]) == ("depth", 12.7)
@@ -515,7 +514,8 @@ width_mm = 80.0
 
 
 def test_a_narrower_width_starts_from_the_depths_that_were_stable_at_the_wider_one(tmp_path):
-    setup = parse_setup(LADDER, "setup.toml")
+    source = read_setup(LADDER, session.SETUP_FILE)
+    setup = source.setup
     work = tmp_path / "ladder"
     work.mkdir()
     (work / session.SETUP_FILE).write_text(LADDER)
@@ -524,15 +524,15 @@ def test_a_narrower_width_starts_from_the_depths_that_were_stable_at_the_wider_o
     # On this machine a narrower cut stays stable much deeper.
     machine = synth.Machine(reference_depth_mm=2.5, depth_power=0.8)
     for _ in range(16):
-        planned = len(session.load_rounds(work))
-        assert cli.main(["plan", str(work), "--new-stock"]) == 0
-        rounds = session.load_rounds(work)
-        if len(rounds) == planned:
+        planned = session.plan_next(work, source, env, session.Stock.FRESH)
+        if planned.plan is None:
             break
-        record(work, rounds[-1].plan, machine, len(rounds))
+        rounds = session.load_rounds(work)
+        record(work, rounds[-1], machine, len(rounds))
     else:
         pytest.fail("did not converge in 16 rounds")
 
+    rounds = session.load_rounds(work)
     order = [r.plan.fixed_mm for r in rounds]
     assert order == sorted(order, reverse=True) and set(order) == {4.0, 2.0}
     wide = session.observations(rounds, 4.0, env)

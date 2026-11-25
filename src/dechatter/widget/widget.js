@@ -458,7 +458,7 @@ function loadScript(src) {
 
 function note(event, detail) {
   if (timeline.length < TIMELINE_LIMIT) {
-    timeline.push({ t: Date.now() / 1000, event, ...detail });
+    timeline.push({ t: performance.now() / 1000, event, ...detail });
   }
 }
 
@@ -627,7 +627,12 @@ async function startRound(round) {
       reset: () => command('reset'),
     },
     reportInches: cnc.reportInches,
-    onChange: () => render(),
+    onChange: () => {
+      if (stepper.phase === PHASE.DWELLING) {
+        window.dispatchEvent(new CustomEvent('dechatter:dwell', { detail: { pass: stepper.block.pass_id } }));
+      }
+      render();
+    },
     onWindow: ({ kind, ...window }) => note(kind, window),
   });
   // cncjs reports the controller only when it changes: start from what it said last.
@@ -651,6 +656,7 @@ async function startRound(round) {
   timeline = [];
   mic.record();
   note('record', { round: round.round, units: cnc.units });
+  window.dispatchEvent(new CustomEvent('dechatter:record', { detail: { round: round.round } }));
   if (!(await actOn(name, 'record_start', round.round))) {
     mic.finish();
     run = null;
@@ -822,7 +828,7 @@ const IDLE_AWAY_S = 5;
 
 // Why the run seems stuck, pointing to Stop; '' while it is not.
 function stall(stepper) {
-  const now = Date.now() / 1000;
+  const now = performance.now() / 1000;
   if (stepper.phase === PHASE.HELD && now - stepper.holds.at(-1)[0] >= HELD_LONG_S) {
     return `Held for ${Math.round(now - stepper.holds.at(-1)[0])} s. Resume, or Stop the round: the cuts made so far are analysed.`;
   }

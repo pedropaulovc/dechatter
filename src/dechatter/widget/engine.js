@@ -70,7 +70,15 @@ async function handle({ method, args }) {
   const reply = JSON.parse(result);
   // Also after a refused or failed write: memory may have changed before it failed.
   if (WRITES.has(method)) {
-    await sync(false);
+    if ('error' in reply) {
+      try {
+        await sync(false);
+      } catch (err) {
+        console.warn('could not sync filesystem after failed write:', err);
+      }
+    } else {
+      await sync(false);
+    }
   }
   return reply;
 }

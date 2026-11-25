@@ -17,7 +17,7 @@ import synth
 from scipy import signal
 
 import dechatter
-from dechatter import audio, browser, cli, plan, session
+from dechatter import browser, plan, session
 from dechatter.app import TIMELINE_FILE, App
 from dechatter.config import load_setup
 from dechatter.detect import Verdict
@@ -66,12 +66,20 @@ class Engine:
             seed=number,
             abort_in_pass=abort_in_pass,
             speed_change_s=speed_change_s,
+            facing=synth.Facing.HEARD,
         )
         heard = heard * gain
         # Browsers capture at 48 kHz, far above the simulated machine's own bandwidth.
         heard = signal.resample_poly(heard, BROWSER_RATE, synth.RATE).astype(np.float32)
         self.call("record_start", NAME, number)
-        timeline = json.dumps([{"t": 1.0, "event": "workflow", "state": "running"}])
+        timeline = json.dumps(
+            synth.timeline(
+                plan,
+                abort_in_pass=abort_in_pass,
+                speed_change_s=speed_change_s,
+                facing=synth.Facing.HEARD,
+            )
+        )
         return self.call("record_stop", NAME, memoryview(heard), float(BROWSER_RATE), timeline)
 
 
@@ -156,7 +164,7 @@ def test_session_runs_to_convergence(engine, setup):
         p["kind"] == "test" for r in state["rounds"] for p in r["passes"]
     )
     timeline = json.loads((engine.root / NAME / "round-01" / TIMELINE_FILE).read_text())
-    assert timeline[0]["state"] == "running"
+    assert timeline[0]["event"] == "record"
 
 
 def test_manual_spindle_session_converges_despite_the_stops_to_change_speed(engine, setup):
@@ -437,16 +445,14 @@ def test_narrowing_the_speeds_after_cutting_recommends_and_plans_only_inside_the
     assert planned and all(p["rpm"] <= 2000 for p in planned)
 
 
-def test_a_session_from_an_older_dechatter_is_refused_cleanly(engine, tmp_path, capsys):
+def test_a_session_from_an_older_dechatter_is_refused_cleanly(engine):
     # A 0.1.x session stops at its setup, with what to do.
-    old = tmp_path / "old-session"
+    old = engine.root / "old-session"
     old.mkdir()
     setup_011 = (Path(__file__).parent / "fixtures" / "setup-0.1.1.toml").read_text()
     (old / session.SETUP_FILE).write_text(setup_011.replace("PM-30MV", "my mill"))
-    for command in (["plan"], ["report"]):
-        assert cli.main([command[0], str(old)]) == 1
-        err = capsys.readouterr().err
-        assert "from dechatter 0.1.x" in err and "start a new session" in err
+    with pytest.raises(RuntimeError, match=r"from dechatter 0\.1\.x.*start a new session"):
+        Engine(engine.root).call("state", "old-session")
 
     # Rounds in the older format: their schema says so.
     engine.call("plan", NAME, "same")
@@ -461,9 +467,6 @@ def test_a_session_from_an_older_dechatter_is_refused_cleanly(engine, tmp_path, 
     for method, args in [("state", ()), ("plan", ("same",)), ("program", (1, "mm"))]:
         with pytest.raises(RuntimeError, match=message):
             Engine(engine.root).call(method, NAME, *args)
-    for command in (["plan"], ["report"], ["analyze", str(folder / "recording.wav")]):
-        assert cli.main([command[0], str(engine.root / NAME), *command[1:]]) == 1
-        assert re.search(message, capsys.readouterr().err)
     plan_path.write_text(json.dumps(plan))
     results_path.write_text(json.dumps(dict(results, schema=1)))
     with pytest.raises(RuntimeError, match=r"results.json was written by an older dechatter"):
@@ -530,7 +533,7 @@ def test_a_discarded_round_that_will_not_delete_blocks_nothing(engine, monkeypat
 
 def test_a_round_that_was_recorded_but_not_analysed_counts_as_cut(engine):
     engine.call("plan", NAME, "same")
-    with pytest.raises(RuntimeError, match="no cut"):
+    with pytest.raises(RuntimeError, match="recording is silent"):
         engine.run_round(1, gain=0.0)
     form = engine.call("setup_form", NAME)["values"]
     form["stock"]["length_mm"] = 80.0
@@ -577,7 +580,7 @@ def test_operator_verdict_overrules_the_detector_and_feeds_the_planner(engine):
 
 def test_unusable_recording_is_reported_and_the_round_can_be_run_again(engine):
     engine.call("plan", NAME, "same")
-    with pytest.raises(RuntimeError, match="no cut"):
+    with pytest.raises(RuntimeError, match="recording is silent"):
         engine.run_round(1, gain=0.0)
 
     state = engine.call("state", NAME)
@@ -590,19 +593,19 @@ def test_aborted_job_still_yields_results_and_a_cleanup_next_round(engine):
     engine.call("plan", NAME, "same")
     state = engine.run_round(1, abort_in_pass=9)
     statuses = [p["status"] for p in state["rounds"][0]["passes"]]
-    assert statuses[9] == "aborted" and set(statuses[10:]) == {"likely not run"}
+    assert statuses[9] == "aborted" and set(statuses[10:]) == {"not run"}
 
     state = engine.call("plan", NAME, "same")
     assert "cleanup" in [p["kind"] for p in state["rounds"][1]["passes"]]
 
 
-def test_the_report_does_not_call_passes_likely_not_run_unheard(engine):
+def test_the_report_does_not_call_passes_not_run_unheard(engine):
     engine.call("plan", NAME, "same")
     engine.run_round(1, abort_in_pass=9)
     page = engine.call("report_html", NAME, "mm")
     rows = re.findall(r"<tr><td>(\d+)</td>(.*?)</tr>", page.split("<h3>Round 1")[1])
     trailing = [cells for pass_id, cells in rows if int(pass_id) >= 10]
-    assert trailing and all("likely not run" in cells for cells in trailing)
+    assert trailing and all("not run" in cells for cells in trailing)
     assert not any("not heard" in cells for cells in trailing)
 
 
@@ -633,18 +636,18 @@ def test_a_widget_run_that_ended_before_its_first_cut_leaves_the_round_runnable(
     assert state["rounds"][0]["has_recording"]
 
 
-def test_a_verdict_can_be_set_on_a_pass_likely_not_run_but_not_on_one_never_run(engine):
+def test_a_verdict_can_be_set_on_a_legacy_likely_not_run_pass_but_not_on_one_never_run(engine):
     engine.call("plan", NAME, "same")
     state = engine.run_round(1, abort_in_pass=9)
-    assert state["rounds"][0]["passes"][12]["status"] == "likely not run"
-    state = engine.call("set_verdict", NAME, 1, 12, "stable")
-    assert state["rounds"][0]["passes"][12]["status"] == "analysed"
-    path = session.round_dir(engine.root / NAME, 1) / session.RESULTS_FILE
-    results = json.loads(path.read_text())
-    results["passes"][13]["status"] = "not run"
-    path.write_text(json.dumps(results))
+    assert state["rounds"][0]["passes"][13]["status"] == "not run"
     with pytest.raises(RuntimeError, match="pass 13 of round 1 was never run"):
         engine.call("set_verdict", NAME, 1, 13, "stable")
+    path = session.round_dir(engine.root / NAME, 1) / session.RESULTS_FILE
+    results = json.loads(path.read_text())
+    results["passes"][12]["status"] = "likely not run"
+    path.write_text(json.dumps(results))
+    state = engine.call("set_verdict", NAME, 1, 12, "stable")
+    assert state["rounds"][0]["passes"][12]["status"] == "analysed"
 
 
 def test_requests_out_of_order_are_refused(engine):
@@ -892,7 +895,7 @@ def test_a_finished_reset_that_could_not_delete_its_rounds_is_swept_later(engine
     assert sorted(p.name for p in folder.iterdir()) == [session.SETUP_FILE]
 
 
-def test_a_reset_that_cannot_mark_its_folder_discards_it_or_says_where(engine, monkeypatch):
+def test_a_reset_that_cannot_mark_its_folder_discards_it_or_says_where(engine, monkeypatch, caplog):
     folder = engine.root / NAME
     real_touch, real_rename = Path.touch, Path.rename
 
@@ -901,13 +904,15 @@ def test_a_reset_that_cannot_mark_its_folder_discards_it_or_says_where(engine, m
             raise OSError("storage refused")
         return real_touch(self, *args, **kwargs)
 
-    # Unmarked but discarded right away: a clean reset.
+    # Unmarked but discarded right away: a clean reset, with a warning logged.
     engine.call("plan", NAME, "same")
     monkeypatch.setattr(Path, "touch", no_marker)
-    assert engine.call("reset", NAME)["rounds"] == []
+    with caplog.at_level("WARNING"):
+        assert engine.call("reset", NAME)["rounds"] == []
+    assert "could not mark" in caplog.text
     assert sorted(p.name for p in folder.iterdir()) == [session.SETUP_FILE]
 
-    # Nor can it be renamed: the reset says where the rounds are.
+    # Nor can it be renamed: the reset says where the rounds are and how to clear them.
     def no_discard(self, target):
         if self.name.startswith(".reset-"):
             raise OSError("storage refused")
@@ -916,12 +921,32 @@ def test_a_reset_that_cannot_mark_its_folder_discards_it_or_says_where(engine, m
     engine.call("plan", NAME, "same")
     monkeypatch.setattr(Path, "rename", no_discard)
     with pytest.raises(
-        RuntimeError, match=r"discarded rounds are still in .*\.reset-.*delete that"
+        RuntimeError,
+        match=r"discarded rounds are still in .*\.reset-.*export the session, delete it",
     ):
         engine.call("reset", NAME)
     monkeypatch.undo()
     left = [p for p in folder.glob(".reset-*") if p.is_dir()]
     assert len(left) == 1 and (left[0] / "round-01").exists()
+
+
+def test_a_reset_whose_marker_will_not_unlink_still_removes_its_rounds(engine, monkeypatch):
+    folder = engine.root / NAME
+    engine.call("plan", NAME, "same")
+    real = Path.unlink
+
+    def keep_marker(self, *args, **kwargs):
+        if self.name.endswith(".done"):
+            raise OSError("storage refused")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", keep_marker)
+    assert engine.call("reset", NAME)["rounds"] == []
+    assert not list(folder.glob("round-*")) and not list(folder.glob(".discarded-*"))
+    assert len(list(folder.glob(".reset-*.done"))) == 1
+    monkeypatch.undo()
+    session.sweep_discarded(folder)
+    assert sorted(p.name for p in folder.iterdir()) == [session.SETUP_FILE]
 
 
 def test_a_marker_that_will_not_go_does_not_stop_the_session_opening(engine, monkeypatch):
@@ -986,44 +1011,7 @@ def test_a_session_whose_setup_does_not_load_is_not_reset(engine):
     assert status["status"] == "refused" and "0.1.x" in status["reason"]
     with pytest.raises(RuntimeError, match="0.1.x"):
         engine.call("reset", "old-011")
-    assert cli.main(["reset", str(old), "--yes"]) == 1
     assert files(old) == before
-
-
-def test_the_command_line_resets_a_session_after_asking(engine, monkeypatch, capsys):
-    engine.call("plan", NAME, "same")
-    engine.run_round(1)
-    folder = engine.root / NAME
-    monkeypatch.setattr("builtins.input", lambda prompt: print(prompt) or "n")
-    assert cli.main(["reset", str(folder)]) == 1
-    out = capsys.readouterr().out
-    assert "Discard all 1 rounds and 1 recordings" in out and "nothing changed" in out
-    assert (folder / "round-01").exists()
-
-    def no_answer(prompt):
-        raise EOFError
-
-    monkeypatch.setattr("builtins.input", no_answer)
-    assert cli.main(["reset", str(folder)]) == 1
-    assert "nothing changed" in capsys.readouterr().out
-    assert (folder / "round-01").exists()
-
-    def refuse(self, target):
-        raise OSError("read-only file system")
-
-    monkeypatch.setattr(Path, "rename", refuse)
-    assert cli.main(["reset", str(folder), "--yes"]) == 1
-    assert "could not reset al-10mm: read-only file system" in capsys.readouterr().err
-    monkeypatch.undo()
-    assert (folder / "round-01").exists()
-    (folder / "report.html").write_text("<!doctype html>")
-    monkeypatch.setattr("builtins.input", lambda prompt: "y")
-    assert cli.main(["reset", str(folder)]) == 0
-    assert not (folder / "round-01").exists() and not (folder / "report.html").exists()
-    engine.call("plan", NAME, "same")
-    assert cli.main(["reset", str(folder), "--yes"]) == 0
-    assert "discarded 1 rounds" in capsys.readouterr().out
-    assert sorted(p.name for p in folder.iterdir()) == [session.SETUP_FILE]
 
 
 def test_session_names_cannot_escape_the_store(engine):
@@ -1100,7 +1088,7 @@ def test_a_lowered_power_cap_leaves_heavier_cuts_unrecommended(engine, setup):
     assert engine.call("plan_sweep", NAME, "fresh")["rounds"][-1]["planner"] == "sweep"
 
 
-def test_no_sweep_is_offered_when_the_power_cap_leaves_it_no_room(engine, setup, capsys):
+def test_no_sweep_is_offered_when_the_power_cap_leaves_it_no_room(engine, setup):
     best = converge(engine, setup)["best"][0]
     # The sweep starts above the session's chip load, and the cap sits at the best cut.
     state = cap_power(engine, best["mrr_cm3_min"] * 1.001, chip_load_sweep_low=1.2)
@@ -1108,12 +1096,9 @@ def test_no_sweep_is_offered_when_the_power_cap_leaves_it_no_room(engine, setup,
     assert state["next"] == "converged" and state["sweep"] is None
     with pytest.raises(RuntimeError, match="leaves no chip load to sweep"):
         engine.call("plan_sweep", NAME, "fresh")
-    assert cli.main(["plan", str(engine.root / NAME)]) == 0
-    out = capsys.readouterr().out
-    assert "converged" in out and "--sweep" not in out
 
 
-def test_the_sweep_result_stays_within_a_lowered_power_cap(engine, setup, capsys):
+def test_the_sweep_result_stays_within_a_lowered_power_cap(engine, setup):
     best = converge(engine, setup)["best"][0]
     sweep = engine.call("plan_sweep", NAME, "fresh")["rounds"][-1]
     engine.run_round(sweep["round"])
@@ -1124,8 +1109,6 @@ def test_the_sweep_result_stays_within_a_lowered_power_cap(engine, setup, capsys
     assert state["best"][0] == best and state["next"] == "converged"
     assert state["sweep"]["chip_load_mm"] == loads[1]
     assert state["sweep"]["mrr_cm3_min"] <= 1.1 * best["mrr_cm3_min"]
-    assert cli.main(["report", str(engine.root / NAME)]) == 0
-    assert f"stable up to {loads[1]:g} mm/tooth" in capsys.readouterr().out
     recommended = engine.call("report_html", NAME, "mm").split("<h2>Stability map")[0]
     assert f"{loads[1]:.3f} mm" in recommended and f"{loads[2]:.3f} mm" not in recommended
 
@@ -1171,19 +1154,6 @@ def test_the_report_holds_the_results_on_one_offline_page(engine, setup):
 
     millimetres = engine.call("report_html", NAME, "mm")
     assert f"{best['width_mm']:.2f} mm" in millimetres and " in (" not in millimetres
-
-
-def test_the_command_line_writes_the_report(engine, tmp_path, capsys):
-    engine.call("plan", NAME, "same")
-    engine.run_round(1)
-    out = tmp_path / "report.html"
-    assert cli.main(["report", str(engine.root / NAME), "--html", str(out), "--units", "in"]) == 0
-    assert out.read_text(encoding="utf-8").startswith("<!doctype html>")
-    assert " in (" in out.read_text(encoding="utf-8")
-    with pytest.raises(SystemExit) as refused:
-        cli.main(["report", str(engine.root / NAME), "--units", "in"])
-    assert refused.value.code == 2
-    assert "--units applies to the HTML report only" in capsys.readouterr().err
 
 
 def test_the_widget_gets_the_round_as_blocks_in_the_machine_units(engine):
@@ -1299,31 +1269,23 @@ def test_once_every_lane_is_used_the_round_faces_the_top_midway_and_goes_on(engi
     assert [leg["top_mm"] for leg in legs] == pytest.approx([0, 0, 0, step, step])
     program = engine.call("program", NAME, first["round"], "mm")
     lines = program.splitlines()
-    pause = lines.index("M0 (the top is faced next: pause the recording now, then resume)")
-    resume = lines.index("M0 (top faced: resume the recording now, then resume)")
+    facing_comment = next(i for i, line in enumerate(lines) if line.startswith("(FACING THE TOP"))
     before = lines.index(
         next(line for line in lines if line.startswith(f"(pass {legs[3]['first_pass'] - 1} "))
     )
     after = lines.index(
         next(line for line in lines if line.startswith(f"(pass {legs[3]['first_pass']} "))
     )
-    assert before < pause < resume < after
+    assert before < facing_comment < after
+    assert not [line for line in lines if line.startswith("M0")]
     assert f"G1 Z{-(step + depth):g} F{form['program']['plunge_feed_mm_min']:g}" in lines[after:]
 
-    # Recorded as the program asks, paused through the facing: every cut on its own pass.
+    # Recorded on through the facing, with timeline windows placing every cut on its pass.
     state = engine.run_round(first["round"])
     for p in state["rounds"][-1]["passes"]:
         truth = MACHINE.chatters(p["rpm"], p["width_mm"], setup.tool.flutes, depth)
         assert p["status"] == "analysed"
         assert p["kind"] != "test" or p["verdict"] == ("unstable" if truth else "stable")
-
-    # Found by sound (this run's timeline records no windows), so the recording cannot tell
-    # what the facing did, though the run went on past it: it is asked.
-    with pytest.raises(RuntimeError, match="cannot tell what that facing did"):
-        engine.call("plan", NAME, "same")
-    folder = session.round_dir(engine.root / NAME, first["round"])
-    where, wav = str(engine.root / NAME), str(folder / session.RECORDING_FILE)
-    assert cli.main(["analyze", where, wav, "--facing", "done"]) == 0
 
     # The next round starts where this one ended: on the new top, in the lane it ended in,
     # or the fresh lane after it, cut back no further.
@@ -1352,7 +1314,7 @@ def test_a_round_stopped_before_its_facing_goes_on_where_it_stopped(engine):
     cut = leg.passes[1]
     state = engine.run_round(first["round"], abort_in_pass=cut.id)
     statuses = [p["status"] for p in state["rounds"][-1]["passes"]]
-    assert statuses[cut.id] == "aborted" and set(statuses[cut.id + 1 :]) == {"likely not run"}
+    assert statuses[cut.id] == "aborted" and set(statuses[cut.id + 1 :]) == {"not run"}
 
     # The next round clears the step there, on the top as it was (the facing never came),
     # and moves on from that lane.
@@ -1364,7 +1326,7 @@ def test_a_round_stopped_before_its_facing_goes_on_where_it_stopped(engine):
     assert second["passes"][0]["kind"] == "cleanup"
 
 
-def test_from_the_command_line_a_run_stopped_at_the_facing_must_say_what_it_did(engine, capsys):
+def test_a_run_stopped_during_or_after_mid_facing_plans_from_what_the_timeline_recorded(engine):
     form = engine.call("setup_form", NAME)["values"]
     form["stock"].update(SPILL)
     engine.call("save_setup", NAME, json.dumps(form))
@@ -1372,41 +1334,42 @@ def test_from_the_command_line_a_run_stopped_at_the_facing_must_say_what_it_did(
     folder = session.round_dir(engine.root / NAME, first["round"])
     planned = Plan.load(folder / session.PLAN_FILE)
     faced = next(n for n, leg in enumerate(planned.legs) if n > 0 and leg.reface_mm > 0)
-    # Recorded up to the stop before the facing, then paused, and nothing more: the run may
-    # have stopped there, or after facing the top all the way or part-way.
     before = dataclasses.replace(planned, legs=planned.legs[:faced])
-    wav = folder / "phone.wav"
-    audio.save_wav(wav, synth.record(before, MACHINE, seed=1), synth.RATE)
-    where = str(engine.root / NAME)
-    # Said up front: the plan's output and the program's header.
-    cli._print_round(engine.root / NAME, planned)
-    assert "analyze asks, and you add --facing done" in capsys.readouterr().out
-    program = engine.call("program", NAME, first["round"], "mm")
-    assert "dechatter analyze asks" in program
-    assert cli.main(["analyze", where, str(wav)]) == 0
-    assert "Did it run to its end, stop part-way, or never start?" in capsys.readouterr().out
-    assert cli.main(["plan", where]) == 1
-    assert "--facing done` if it ran to its end" in capsys.readouterr().err
+    heard = signal.resample_poly(
+        synth.record(before, MACHINE, seed=1), BROWSER_RATE, synth.RATE
+    ).astype(np.float32)
+    base_tl = synth.timeline(before)[:-1]  # before the final "run" event
 
     # Stopped part-way through the facing: the next round faces the top down again from
     # the old top before any cut, then starts at the first lane below it.
-    assert cli.main(["analyze", where, str(wav), "--facing", "cut-short"]) == 0
-    assert "next: dechatter plan" in capsys.readouterr().out
-    assert cli.main(["plan", where]) == 0
-    second = Plan.load(session.round_dir(engine.root / NAME, 2) / session.PLAN_FILE)
+    cut_short_tl = [
+        *base_tl,
+        {"t": 0, "event": "face", "leg": faced, "rows_after": 1, "start": 2000.0, "end": 2020.0},
+        {"t": 2021.0, "event": "run", "outcome": "stopped", "reason": "stopped by the operator"},
+    ]
+    engine.call("record_start", NAME, first["round"])
+    engine.call(
+        "record_stop", NAME, memoryview(heard), float(BROWSER_RATE), json.dumps(cut_short_tl)
+    )
+    second = engine.call("plan", NAME, "same")["rounds"][-1]
     step = form["cut"]["axial_depth_mm"] + plan.REFACE_EXTRA_MM
-    start = second.legs[0]
-    assert (start.lane, start.face_y_start_mm) == (1, 0.0)
-    assert (start.reface_mm, start.top_mm) == (pytest.approx(step), pytest.approx(step))
+    start = second["legs"][0]
+    assert (start["lane"], start["face_y_start_mm"]) == (1, 0.0)
+    assert (start["reface_mm"], start["top_mm"]) == (pytest.approx(step), pytest.approx(step))
 
-    # Finished: the next round starts on the new top, the cuts above it gone with it.
+    # Finished facing, then stopped before the first cut on the new top: starts on the new top.
     shutil.rmtree(session.round_dir(engine.root / NAME, 2))
-    assert cli.main(["analyze", where, str(wav), "--facing", "done"]) == 0
-    assert cli.main(["plan", where]) == 0
-    second = Plan.load(session.round_dir(engine.root / NAME, 2) / session.PLAN_FILE)
-    start = second.legs[0]
-    assert (start.lane, start.face_y_start_mm, start.reface_mm) == (1, 0.0, 0.0)
-    assert start.top_mm == pytest.approx(step)
+    done_tl = [
+        *base_tl,
+        {"t": 0, "event": "face", "leg": faced, "rows_after": 0, "start": 2000.0, "end": 2020.0},
+        {"t": 2021.0, "event": "run", "outcome": "stopped", "reason": "stopped by the operator"},
+    ]
+    engine.call("record_start", NAME, first["round"])
+    engine.call("record_stop", NAME, memoryview(heard), float(BROWSER_RATE), json.dumps(done_tl))
+    second = engine.call("plan", NAME, "same")["rounds"][-1]
+    start = second["legs"][0]
+    assert (start["lane"], start["face_y_start_mm"], start["reface_mm"]) == (1, 0.0, 0.0)
+    assert start["top_mm"] == pytest.approx(step)
 
 
 def test_without_room_to_face_the_top_down_fresh_stock_is_asked_for(engine):
@@ -1464,8 +1427,7 @@ def test_a_deeper_depth_faces_the_top_down_instead_of_asking_for_fresh_stock(eng
     )
     lines = engine.call("program", NAME, deeper["round"], "mm").splitlines()
     assert any(line.startswith("(FACING FIRST") for line in lines)
-    stop = lines.index("M0 (top faced: start the recording now, then resume)")
-    assert stop < min(i for i, line in enumerate(lines) if line.startswith("(pass "))
+    assert not [line for line in lines if line.startswith("M0")]
     bottom = -(first["top_mm"] + 5.0)
     assert f"G1 Z{bottom:g} F{form['program']['plunge_feed_mm_min']:g}" in lines
     assert engine.run_round(deeper["round"], machine=machine)["rounds"][-1]["analysed"]

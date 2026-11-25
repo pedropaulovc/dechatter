@@ -398,7 +398,7 @@ def test_a_round_uses_what_every_lane_has_left_before_it_faces_the_top_down(writ
     rapid = min(i for i, b in enumerate(found) if b.step is gcode.Step.RAPID and b.leg == 3)
     assert cut < faces[0] and faces[-1] < rapid
 
-    # The program says where the lane changes, and stops either side of the facing.
+    # The program says where the lane changes and where the top is faced, with no M0 stops.
     program = gcode.render(plan, setup, MM).splitlines()
 
     def at(prefix: str) -> int:
@@ -406,12 +406,13 @@ def test_a_round_uses_what_every_lane_has_left_before_it_faces_the_top_down(writ
 
     assert at(f"(pass {legs[0].passes[-1].id} ") < at("(LANE CHANGE: lane 2 of 3")
     assert at("(LANE CHANGE: lane 2 of 3") < at(f"(pass {legs[1].passes[0].id} ")
-    pause = program.index("M0 (the top is faced next: pause the recording now, then resume)")
-    resume = program.index("M0 (top faced: resume the recording now, then resume)")
-    assert at(f"(pass {legs[2].passes[-1].id} ") < at("(FACING THE TOP DOWN") < pause < resume
-    assert resume < at(f"(pass {legs[3].passes[0].id} ")
-    assert sum(line.startswith("G1 X") for line in program[pause:resume]) == len(rows)
-    assert any(line.startswith("(RECORD:") and "pause it" in line for line in program)
+    facing_comment = at("(FACING THE TOP DOWN")
+    after_facing = at(f"(pass {legs[3].passes[0].id} ")
+    assert at(f"(pass {legs[2].passes[-1].id} ") < facing_comment < after_facing
+    assert sum(line.startswith("G1 X") for line in program[facing_comment:after_facing]) == len(
+        rows
+    )
+    assert not [line for line in program if line.startswith("M0")]
 
     # The facing's feed moves count in the run time.
     cuts = sum(plan.dwell_s + p.plunge_s + p.lead_in_s + p.expected_cut_s for p in plan.passes)

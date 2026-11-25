@@ -1,7 +1,7 @@
 [project]
 name = "dechatter"
 dynamic = ["version"]
-description = "Find chatter-free milling parameters from test cuts and a phone recording"
+description = "cncjs widget that finds chatter-free milling parameters from test cuts and sound"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
@@ -9,7 +9,6 @@ authors = [{ name = "Pedro Paulo Vezza Campos", email = "pedro@vezza.com.br" }]
 dependencies = [
     "numpy>=2.0",
     "scipy>=1.14",
-    "soundfile>=0.12",
 ]
 
 [project.scripts]
