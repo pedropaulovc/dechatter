@@ -1467,8 +1467,10 @@ def test_a_check_holds_only_as_far_as_its_cuts_were_heard(setup):
     assert session._cut_by(setup, early, best)
     assert not session._cut_by(setup, stopped, best)
     # Held 3/16 in deep: its passes carry that depth rounded to the micron, the level not.
+    # Every cut held, so only the best cut itself can answer.
+    held = check((1.0, status.ANALYSED, stable), (2.0, status.ANALYSED, stable))
     inch = dataclasses.replace(
-        ramp, level_mm=4.7625, cuts=tuple(dataclasses.replace(c, depth_mm=4.763) for c in ramp.cuts)
+        held, level_mm=4.7625, cuts=tuple(dataclasses.replace(c, depth_mm=4.763) for c in held.cuts)
     )
     assert session._cut_by(setup, inch, session.StableCut(1000.0, 4.7625, 2000.0, 2.0))
 
