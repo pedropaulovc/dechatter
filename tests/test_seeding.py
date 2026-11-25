@@ -561,3 +561,68 @@ def test_a_plan_keeps_what_was_expected_of_each_confirmation_cut(measured):
     # A plan of the earlier session, written without the field, loads as before.
     old = Plan.load(session.round_dir(engine.root / NAME, 1) / session.PLAN_FILE)
     assert all(p.expected is None for p in old.passes)
+
+
+def test_a_slot_of_an_inch_size_cutter_is_a_slot_though_plans_keep_three_decimals(write_setup):
+    text = write_setup().read_text(encoding="utf-8")
+    assert "diameter_mm = 9.525" in text
+    seed = Seed(
+        "earlier",
+        text.replace("diameter_mm = 9.525", "diameter_mm = 4.7625"),
+        passes((4000, 4.762, 1.0, Verdict.STABLE)),
+    )
+    cut = dataclasses.replace(
+        seed.setup.cut, vary=Vary.DEPTH, radial_width_mm=4.7625, depth_max_mm=3.0
+    )
+    slots = dataclasses.replace(seed.setup, cut=dataclasses.replace(cut, axial_depth_mm=None))
+    assert seeding.carry(seed, seed.passes[0], slots) is Carry.SAME
+    assert seeding.carry(seed, seed.passes[0], seed.setup) is Carry.SPEEDS
+
+
+def test_limits_that_predict_no_best_cut_plan_no_confirmation(setup, write_setup):
+    text = write_setup().read_text(encoding="utf-8")
+    env = envelope(setup)
+    # Its one stable pass is contradicted by chatter in a lighter cut at the same speed.
+    seed = Seed(
+        "earlier",
+        text,
+        passes((4000, 2.0, 5.0, Verdict.STABLE), (4000, 1.0, 5.0, Verdict.UNSTABLE)),
+    )
+    assert seeding.transfer(seed, setup, env) is seeding.Transfer.LIMITS
+    assert seeding.prior(seed, setup, env)
+    # Not the grid's sizes at that speed instead: the limits carried over say no to them.
+    assert seeding.confirmation(seed, setup, env) == []
+    assert session.seed_status(seed, setup, env, []) is SeedStatus.UNTESTED
+    assert session.next_stage(setup, env, [], [], seed).planner is PlannerKind.GRID
+
+
+def test_the_control_is_the_deepest_chatter_band_not_a_pocket_probed_to_its_ceiling(
+    setup, write_setup
+):
+    text = write_setup().read_text(encoding="utf-8")
+    climb = dataclasses.replace(
+        setup, cut=dataclasses.replace(setup.cut, direction=Direction.CLIMB)
+    )
+    env = envelope(climb)
+    seed = Seed(
+        "earlier",
+        text,
+        passes(
+            (4600, 3.0, 5.0, Verdict.STABLE),
+            (3700, 2.5, 5.0, Verdict.STABLE),
+            # A third pocket, probed again and again at its ceiling: heavy cuts only.
+            (3100, 2.0, 5.0, Verdict.STABLE),
+            (3100, 2.4, 5.0, Verdict.UNSTABLE),
+            (3100, 2.5, 5.0, Verdict.UNSTABLE),
+            (3100, 2.6, 5.0, Verdict.UNSTABLE),
+            # The trough: chatter in a light cut, heard once.
+            (2200, 1.0, 5.0, Verdict.UNSTABLE),
+            # Chatter a stable pass as heavy at that speed contradicts is no band at all.
+            (2700, 0.5, 5.0, Verdict.UNSTABLE),
+            (2700, 0.8, 5.0, Verdict.STABLE),
+        ),
+    )
+    tests = seeding.confirmation(seed, climb, env)
+    control = [(rpm, expected) for rpm, _, _, _, expected in tests if expected is not None]
+    assert control == [(2200.0, Verdict.UNSTABLE)]
+    assert {rpm for rpm, *_ in tests} == {4600.0, 3700.0, 2200.0}

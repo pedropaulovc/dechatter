@@ -55,6 +55,9 @@ STICKOUT_TOLERANCE_MM = 0.6
 DIAMETER_TOLERANCE_MM = 0.05
 # A pass is at this session's own depth (or width) when it is this close to it.
 SAME_LEVEL_MM = 0.01
+# A pass is a full-width slot when its width, kept to 0.001 mm in a plan, is this close to
+# the cutter diameter.
+SLOT_TOLERANCE_MM = 0.001
 STEP_DOWN = 2 / 3  # the second confirmation cut, as a share of the predicted best one
 POCKETS = 2  # speeds confirmed when only the speeds carry over
 # Two speeds are in different pockets, or one clear of a chatter band, when this share of
@@ -143,10 +146,10 @@ def load(session_dir: Path) -> Seed | None:
         for p in passes:
             sizes = [p.rpm, p.width_mm, p.depth_mm]
             sizes += [] if p.chatter_hz is None else [p.chatter_hz]
-            if not all(isinstance(v, int | float) and math.isfinite(v) and v > 0 for v in sizes):
+            if not all(type(v) in (int, float) and math.isfinite(v) and v > 0 for v in sizes):
                 raise ValueError(f"pass {p.round}.{p.id} holds a size that is no positive number")
         seed = Seed(str(data["source"]), str(data["setup"]), passes)
-        seed.setup  # noqa: B018  the setup must load
+        materials.lookup(seed.setup.cut.material)  # the setup must load, its material be known
     except (KeyError, TypeError, ValueError) as exc:
         problem = f"missing {exc}" if isinstance(exc, KeyError) else str(exc)
         raise SeedError(
@@ -213,7 +216,7 @@ def _arc(width_mm: float, diameter_mm: float) -> float:
 
 def carry(seed: Seed, p: SeedPass, setup: Setup) -> Carry:
     """How pass `p` carries over to `setup`'s depth (or where it steps the depth, width)."""
-    slot = p.width_mm >= seed.setup.tool.diameter_mm - ENGAGEMENT_TOLERANCE_MM
+    slot = p.width_mm >= seed.setup.tool.diameter_mm - SLOT_TOLERANCE_MM
     if slot is not (milling(setup) is Milling.SLOT):
         return Carry.SPEEDS
     if seed.setup.cut.direction is not setup.cut.direction:
@@ -267,13 +270,13 @@ def _observe(setup: Setup, env: Envelope, p: SeedPass, size_mm: float, weight: f
         steps = top if math.isinf(size_mm) else min(math.floor(size_mm / step + 1e-6), top)
         if steps < 1:
             return None
-        return Observation(p.rpm, steps * step, p.verdict, p.chatter_hz, weight)
+        return Observation(p.rpm, steps * step, p.verdict, p.chatter_hz, weight=weight)
     if math.isinf(size_mm):
         return None
     steps = max(1, math.ceil(size_mm / step - 1e-6))
     if steps * step > env.engagement_top_mm + ENGAGEMENT_TOLERANCE_MM:
         return None
-    return Observation(p.rpm, steps * step, p.verdict, p.chatter_hz, weight)
+    return Observation(p.rpm, steps * step, p.verdict, p.chatter_hz, weight=weight)
 
 
 def carried(seed: Seed, setup: Setup, env: Envelope) -> list[Carried]:
@@ -298,9 +301,9 @@ def _relied(seed: Seed, setup: Setup, env: Envelope) -> list[Observation]:
 
 
 def transfer(seed: Seed, setup: Setup, env: Envelope) -> Transfer:
-    """What round 1 confirms: limits, when the seed predicts a best cut here; else speeds."""
-    predicted = _limit_tests(setup, env, _relied(seed, setup, env))
-    return Transfer.LIMITS if predicted else Transfer.SPEEDS
+    """What a session relies on of its seed: limits, where any pass inside the search
+    carries one over; else speeds."""
+    return Transfer.LIMITS if _relied(seed, setup, env) else Transfer.SPEEDS
 
 
 def _sigma(setup: Setup, rpm: float) -> float:
@@ -320,17 +323,12 @@ def _within_power(setup: Setup, env: Envelope, rpm: float, size_mm: float) -> fl
     return steps * step if steps >= 1 else None
 
 
-def _band(setup: Setup, chatter: list[tuple[float, float]], taken: list[float]):
-    """(rpm, size) of the control: in the chatter band heard most often, clear of the speeds
-    in `taken`, its lightest cut that chattered."""
+def _band(chatter: list[tuple[float, float]], taken: list[float]):
+    """(rpm, size) of the control: the lightest cut that chattered, clear of the speeds in
+    `taken`. That is the bottom of the deepest chatter band, and not the ceiling of a stable
+    pocket, where the search for the limit leaves the most chatter but only in heavy cuts."""
     free = [(rpm, size) for rpm, size in chatter if _apart(rpm, taken)]
-    if not free:
-        return None
-
-    def heard(rpm: float) -> int:
-        return sum(abs(other - rpm) <= _sigma(setup, rpm) for other, _ in free)
-
-    return min(free, key=lambda cut: (-heard(cut[0]), cut[1], cut[0]))
+    return min(free, key=lambda cut: (cut[1], cut[0]), default=None)
 
 
 def _snap(setup: Setup, env: Envelope, rpm: float) -> float:
@@ -393,7 +391,7 @@ def _limit_tests(setup: Setup, env: Envelope, known: list[Observation]) -> list[
             for other, reached in stable_at
         )
     ]
-    control = _band(setup, loud, taken)
+    control = _band(loud, taken)
     if control is not None:
         tests.append(test(*control, Verdict.UNSTABLE))
     unique = {(rpm, size): (rpm, size, *rest) for rpm, size, *rest in tests}
@@ -402,10 +400,10 @@ def _limit_tests(setup: Setup, env: Envelope, known: list[Observation]) -> list[
 
 def _speed_tests(seed: Seed, setup: Setup, env: Envelope) -> list[tuple]:
     """Round 1's sizes at the speeds of the earlier session's best cuts, one per pocket, and
-    as a control its heaviest size within the power cap in the chatter band heard most often
-    (of two as often, the one that chattered under the lighter load), expected to chatter.
-    The sizes are the grid's: no limit is predicted for them. A speed the power cap leaves
-    no size at is passed over."""
+    as a control its heaviest size within the power cap at the speed of the lightest cut
+    that chattered there (by width x depth, and not where a stable pass as heavy was made at
+    that speed), expected to chatter. The sizes are the grid's: no limit is predicted for
+    them. A speed the power cap leaves no size at is passed over."""
     sizes = grid_engagements(setup, env)
 
     def allowed(rpm: float) -> list[float]:
@@ -426,8 +424,15 @@ def _speed_tests(seed: Seed, setup: Setup, env: Envelope) -> list[tuple]:
     if not pockets:
         return []
     tests = [(rpm, size, None, None, None) for rpm in pockets for size in allowed(rpm)]
-    chatter = [(rpm, load) for rpm, load, verdict in inside if verdict is Verdict.UNSTABLE]
-    control = _band(setup, chatter, pockets)
+    chatter = [
+        (rpm, load)
+        for rpm, load, verdict in inside
+        if verdict is Verdict.UNSTABLE
+        and not any(
+            abs(other - rpm) <= _sigma(setup, rpm) and reached >= load for other, reached in stable
+        )
+    ]
+    control = _band(chatter, pockets)
     if control is not None:
         tests.append((control[0], allowed(control[0])[-1], None, None, Verdict.UNSTABLE))
     return tests
@@ -435,20 +440,25 @@ def _speed_tests(seed: Seed, setup: Setup, env: Envelope) -> list[tuple]:
 
 def confirmation(seed: Seed, setup: Setup, env: Envelope) -> list[tuple]:
     """Round 1 of a seeded session, instead of the grid: (rpm, engagement, P(stable), None,
-    the verdict expected) per cut; empty when nothing of the seed lies inside the search.
+    the verdict expected) per cut; empty when the seed tells the map searched nothing, or
+    predicts no best cut where its limits carry over (the grid is cut then).
 
     Where limits carry over (see Transfer): the predicted best cut, that is the earlier
     session's stable pass of the highest removal rate here, within the power cap; the same
     speed at two thirds of it; the best such pass of another speed pocket; and a control,
-    the lightest cut that chattered in the chatter band heard most often. The first three
-    are expected stable, the control to chatter.
+    the lightest cut that chattered. The first three are expected stable, the control to
+    chatter.
 
     Where only the speeds do: the grid's own sizes at the speeds of the earlier session's two
     best pockets, with nothing expected of them, and the control at the heaviest of those
-    sizes in its chatter band, expected to chatter.
+    sizes at the speed of its lightest cut that chattered, expected to chatter.
     """
-    tests = _limit_tests(setup, env, _relied(seed, setup, env))
-    return tests or _speed_tests(seed, setup, env)
+    if not prior(seed, setup, env):
+        return []
+    relied = _relied(seed, setup, env)
+    if relied:
+        return _limit_tests(setup, env, relied)
+    return _speed_tests(seed, setup, env)
 
 
 def judged(cuts: list[tuple[Verdict | None, Verdict]]) -> SeedStatus | None:

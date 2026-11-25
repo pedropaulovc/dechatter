@@ -397,11 +397,11 @@ def render(session_dir: Path, units: Units) -> str:
 
     maps = []
     shown_levels = {r.plan.fixed_mm for r in rounds}
-    if session.carried(seed, setup, env, rounds, session.levels(setup)[0]):
+    if session.carried(seed, status, setup, env, session.levels(setup)[0]):
         shown_levels.add(session.levels(setup)[0])
     carried_over = False
     for level in sorted(shown_levels, reverse=True):
-        seeded = session.carried(seed, setup, env, rounds, level)
+        seeded = session.carried(seed, status, setup, env, level)
         carried_over = carried_over or bool(seeded)
         stability = bayes.build_map(
             session.at_level(setup, level),

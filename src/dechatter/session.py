@@ -435,13 +435,12 @@ def seed_status(seed: Seed, setup: Setup, env: Envelope, rounds: list[Round]) ->
 
 
 def carried(
-    seed: Seed | None, setup: Setup, env: Envelope, rounds: list[Round], level_mm: float
+    seed: Seed | None, status: SeedStatus | None, setup: Setup, env: Envelope, level_mm: float
 ) -> list[Observation]:
     """What the session it was started from tells a session's map at one level, each pass at
-    its weight; nothing once its confirmation cuts rejected it, or when it is not used."""
-    if seed is None:
-        return []
-    if seed_status(seed, setup, env, rounds) in (SeedStatus.REJECTED, SeedStatus.UNUSED):
+    its weight; nothing once its confirmation cuts rejected it, or when it is not used.
+    `status` is where the session stands with it (from seed_status; None without a seed)."""
+    if seed is None or status in (SeedStatus.REJECTED, SeedStatus.UNUSED):
         return []
     return seeding.prior(seed, at_level(setup, level_mm), env)
 
@@ -484,7 +483,7 @@ def next_stage(
     target = found[0].mrr_mm3_min if found else 0.0
     stage = Stage(base, PlannerKind.BAYES, [], 0.0)
     for level in levels(setup):
-        known = [*evidence(rounds, level, env), *carried(seed, setup, env, rounds, level)]
+        known = [*evidence(rounds, level, env), *carried(seed, status, setup, env, level)]
         proposal = bayes.propose(at_level(setup, level), env, known, target)
         stage = Stage(level, PlannerKind.BAYES, proposal.tests, proposal.expected_improvement)
         if stage.tests:

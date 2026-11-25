@@ -88,10 +88,10 @@ class Sessions:
             origin = self._existing(source)
             # The other session must open as it would in the widget, and its rounds belong
             # to its setup: a setup changed by hand since they were cut measured other cuts.
-            measured_with = self._app(source).setup
-            text = (origin / session.SETUP_FILE).read_text(encoding="utf-8")
+            measured = self._app(source).source
+            text = measured.text
             rounds = session.load_rounds(origin)
-            session.check_measured(rounds, measured_with)
+            session.check_measured(rounds, measured.setup)
             passes = session.seed_passes(rounds)
             if not passes:
                 raise SessionError(
@@ -103,7 +103,7 @@ class Sessions:
             (target / session.SETUP_FILE).write_text(text, encoding="utf-8")
             if seed is not None:
                 seed.save(target / seeding.SEED_FILE)
-        except OSError:
+        except Exception:
             # Not half a session: without its seed it would pass for one started on its own.
             shutil.rmtree(target, ignore_errors=True)
             raise

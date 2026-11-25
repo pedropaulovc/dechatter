@@ -80,16 +80,16 @@ class App:
         level = rounds[-1].plan.fixed_mm if rounds else fixed_mm(self.setup)
         observations = session.observations(rounds, level, self.env)
         at = session.at_level(self.setup, level)
-        seeded = session.carried(self.seed, self.setup, self.env, rounds, level)
+        status = None
+        if self.seed is not None:
+            status = session.seed_status(self.seed, self.setup, self.env, rounds)
+        seeded = session.carried(self.seed, status, self.setup, self.env, level)
         known = [*session.evidence(rounds, level, self.env), *seeded]
         stability = bayes.build_map(at, self.env, known)
         shown = bayes.coarse(stability)
 
         found = session.best_cuts(self.setup, self.env, rounds)
         sweep = session.swept(found, session.sweeps(rounds, self.env))
-        status = None
-        if self.seed is not None:
-            status = session.seed_status(self.seed, self.setup, self.env, rounds)
         upcoming, next_level = Next.PLAN, fixed_mm(self.setup)
         planner = PlannerKind.CONFIRM if status is SeedStatus.UNCONFIRMED else PlannerKind.GRID
         if rounds and rounds[-1].results is None:

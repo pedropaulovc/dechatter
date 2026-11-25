@@ -216,9 +216,12 @@ async function createSession() {
     closeInfo();
     $('new-dialog').close();
     try {
+      // As openSession does: nothing of the session shown before stays, its wizard least.
       current = name;
       localStorage.setItem(SESSION_KEY, current);
+      editing = null;
       state = null;
+      setupStatus = null;
       await checkSetup(current);
       await openWizard();
       showError('');
@@ -877,7 +880,7 @@ function seedPlanText() {
     return `The confirmation cuts disagreed with ${seed.source}: half or more of those it predicted came out the other way. Its cuts are left out of the map. Plan the coarse grid of test cuts.`;
   }
   if (seed.status === 'untested') {
-    return `None of the cuts ${seed.source} made inside this session's search was stable, so there is no best cut to confirm: its chatter stays on the map. Plan a coarse grid of test cuts.`;
+    return `${seed.source} predicts no best cut to confirm here (none of its stable cuts lies inside this session's search and power cap): what it measured stays on the map. Plan a coarse grid of test cuts.`;
   }
   return `Nothing ${seed.source} measured lies inside this session's search, so it is not used. Plan a coarse grid of test cuts.`;
 }
@@ -1353,9 +1356,12 @@ $('new-form').onsubmit = (event) => {
 };
 $('new-cancel').onclick = () => $('new-dialog').close();
 // Escape closes an open (i) bubble first, not the dialog with it; and nothing closes the
-// dialog while it waits for an answer.
-$('new-dialog').addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' && (busy() || $('new-dialog').querySelector('.bubble:not([hidden])'))) {
+// dialog while it waits for an answer. Heard on the page, wherever the focus is.
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape' || !$('new-dialog').open) {
+    return;
+  }
+  if (busy() || $('new-dialog').querySelector('.bubble:not([hidden])')) {
     event.preventDefault();
   }
 }, true);
