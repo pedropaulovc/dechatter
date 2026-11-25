@@ -186,15 +186,19 @@ def load_setup(path: Path) -> Setup:
     return parse_setup(path.read_text(encoding="utf-8"), path.name)
 
 
+# Field path ("stock.height_mm") and note, for each value written ahead of time that is
+# still to be confirmed on the machine.
+type Pending = tuple[tuple[str, str], ...]
+
+
 @dataclass(frozen=True)
 class SetupFile:
     """A setup and the file text it was parsed from, which a planned round keeps."""
 
     text: str
     setup: Setup
-    # Field path ("stock.height_mm") -> note: values written ahead of time, still to be
-    # confirmed on the machine. Planning waits until they are; saving the wizard confirms them.
-    pending: dict[str, str] = field(default_factory=dict)
+    # Planning waits until these are confirmed; saving the wizard confirms them.
+    pending: Pending = ()
 
 
 def read_setup(text: str, origin: str) -> SetupFile:
@@ -209,23 +213,60 @@ def parse_setup(text: str, origin: str) -> Setup:
 
 PENDING = "pending"
 
+# The fields that go with one way of stepping the cut: the wizard shows them only then (the
+# `when` of its fields, in wizard.js).
+ONLY_WITH = {
+    "cut.axial_depth_mm": Vary.WIDTH,
+    "cut.other_depths_mm": Vary.WIDTH,
+    "cut.width_max_mm": Vary.WIDTH,
+    "planner.round1_width_fractions": Vary.WIDTH,
+    "cut.radial_width_mm": Vary.DEPTH,
+    "cut.depth_max_mm": Vary.DEPTH,
+    "cut.other_widths_mm": Vary.DEPTH,
+    "program.slot_wall_mm": Vary.DEPTH,
+    "planner.round1_depth_fractions": Vary.DEPTH,
+}
 
-def _pending(entries: object) -> dict[str, str]:
-    """The `[pending]` table: each key a field the wizard shows, each value its note."""
-    if not isinstance(entries, dict):
-        raise ConfigError(f"[{PENDING}] must be a table of field = note")
+
+def _shown_fields() -> set[str]:
+    """Every field the wizard can show, as `section.field`."""
     hints = typing.get_type_hints(Setup)
+    shown = {
+        f"{section.name}.{entry.name}"
+        for section in dataclasses.fields(Setup)
+        for entry in dataclasses.fields(hints[section.name])
+    }
+    return shown - {f"planner.{key}" for key in UNLISTED_PLANNER}
+
+
+def _pending(entries: object, setup: Setup) -> Pending:
+    """The `[pending]` table: each key a field the wizard shows this setup, each value a note
+    saying how to check it."""
+    if not isinstance(entries, dict):
+        raise ConfigError(f'[{PENDING}] must be a table of "section.field" = "note"')
+    flat = {}
     for at, note in entries.items():
-        section, _, key = at.partition(".")
-        known = section in hints and key in typing.get_type_hints(hints[section])
-        if not known or (section == "planner" and key in UNLISTED_PLANNER):
+        # Unquoted, stock.height_mm is a TOML dotted key: a table of the section's fields.
+        if isinstance(note, dict):
+            flat.update({f"{at}.{key}": value for key, value in note.items()})
+        else:
+            flat[at] = note
+    shown = _shown_fields()
+    for at, note in flat.items():
+        if at not in shown:
             raise ConfigError(f'[{PENDING}] "{at}" is not a setup field the wizard shows')
-        if not isinstance(note, str):
-            raise ConfigError(f'[{PENDING}] "{at}" needs a note in quotes')
-    return dict(entries)
+        wanted = ONLY_WITH.get(at)
+        if wanted is not None and wanted is not setup.cut.vary:
+            raise ConfigError(
+                f'[{PENDING}] "{at}" does not apply with vary = "{setup.cut.vary}", so the '
+                "wizard never shows it"
+            )
+        if not isinstance(note, str) or not note.strip():
+            raise ConfigError(f'[{PENDING}] "{at}" needs a note in quotes: how to check it')
+    return tuple(flat.items())
 
 
-def _parse(text: str, origin: str) -> tuple[Setup, dict[str, str]]:
+def _parse(text: str, origin: str) -> tuple[Setup, Pending]:
     try:
         data = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
@@ -237,7 +278,7 @@ def _parse(text: str, origin: str) -> tuple[Setup, dict[str, str]]:
             "spindle_power_hp: the spindle motor's rated power in horsepower, "
             f"1 hp = {WATTS_PER_HP} W.)"
         )
-    pending = _pending(data.pop(PENDING, {}))
+    entries = data.pop(PENDING, {})
     sections = {f.name: f for f in dataclasses.fields(Setup)}
     unknown = set(data) - set(sections)
     if unknown:
@@ -250,7 +291,7 @@ def _parse(text: str, origin: str) -> tuple[Setup, dict[str, str]]:
         built[name] = _build(cls, name, data.get(name, {}))
     setup = Setup(**built)
     _validate(setup)
-    return setup, pending
+    return setup, _pending(entries, setup)
 
 
 def setup_source(text: str) -> SetupSource:

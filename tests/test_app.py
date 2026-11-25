@@ -19,7 +19,7 @@ from scipy import signal
 import dechatter
 from dechatter import browser, plan, session
 from dechatter.app import TIMELINE_FILE, App
-from dechatter.config import ConfigError, load_setup, read_setup
+from dechatter.config import ONLY_WITH, ConfigError, Vary, load_setup, read_setup
 from dechatter.detect import Verdict
 from dechatter.plan import Plan, envelope
 
@@ -299,6 +299,13 @@ def test_a_prepared_session_plans_only_once_its_pending_values_are_confirmed(eng
     exported = zipfile.ZipFile(io.BytesIO(engine.call("export_zip", "prepared", "mm")))
     assert "[pending]" in exported.read(f"prepared/{session.SETUP_FILE}").decode("utf-8")
 
+    # A refused save leaves the setup, and so what is still to confirm, as it was.
+    bad = json.loads(json.dumps(form["values"]))
+    bad["cut"]["material"] = "unobtainium"
+    with pytest.raises(RuntimeError, match="unknown material"):
+        engine.call("save_setup", "prepared", json.dumps(bad))
+    assert engine.call("state", "prepared")["pending"] == pending
+
     # Saving the wizard is the confirmation: the setup is written without [pending].
     form["values"]["stock"]["height_mm"] = 12.5
     state = engine.call("save_setup", "prepared", json.dumps(form["values"]))
@@ -316,15 +323,29 @@ def test_a_prepared_session_plans_only_once_its_pending_values_are_confirmed(eng
         ('"stock" = "a section"', "not a setup field"),
         ('"vise.height_mm" = "no such section"', "not a setup field"),
         ('"planner.power_fraction" = "the wizard never shows it"', "not a setup field"),
+        ('"cut.radial_width_mm" = "hidden when the width is stepped"', 'vary = "width"'),
         ('"stock.height_mm" = 25', "needs a note"),
+        ('"stock.height_mm" = "  "', "needs a note"),
     ],
 )
 def test_pending_entries_must_name_fields_the_wizard_shows(engine, entry, reason):
     filled_in = (engine.root / NAME / session.SETUP_FILE).read_text(encoding="utf-8")
     with pytest.raises(ConfigError, match=reason):
         read_setup(f"{filled_in}\n[pending]\n{entry}\n", session.SETUP_FILE)
+
+
+def test_pending_is_a_table_and_takes_unquoted_dotted_keys_too(engine):
+    filled_in = (engine.root / NAME / session.SETUP_FILE).read_text(encoding="utf-8")
     with pytest.raises(ConfigError, match="must be a table"):
         read_setup(f'pending = "everything"\n{filled_in}', session.SETUP_FILE)
+    dotted = f'{filled_in}\n[pending]\nstock.height_mm = "calipers"\n'
+    assert read_setup(dotted, session.SETUP_FILE).pending == (("stock.height_mm", "calipers"),)
+
+
+def test_the_fields_pending_refuses_by_vary_are_those_the_wizard_hides():
+    wizard = (Path(dechatter.__file__).parent / "widget" / "wizard.js").read_text(encoding="utf-8")
+    hidden = re.findall(r"at: '([^']+)', when: STEPS_(WIDTH|DEPTH)", wizard)
+    assert {at: Vary(when.lower()) for at, when in hidden} == ONLY_WITH
 
 
 def files(folder) -> dict:

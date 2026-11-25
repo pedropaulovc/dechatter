@@ -768,7 +768,7 @@ function summary({ summary: s, spindle, vary, pending }) {
   const levels = s.levels_mm.map((level) => length(level, units())).join(', ');
   const cut = vary === 'depth' ? `width ${levels}, depth stepped` : `depth ${levels}`;
   const count = Object.keys(pending).length;
-  const confirm = count === 0 ? '' : `. ${count} ${count === 1 ? 'value' : 'values'} to confirm on the machine`;
+  const confirm = count === 0 ? '' : `. ${plural(count, 'value')} to confirm on the machine`;
   return `Ø ${length(s.diameter_mm, units())}, ${s.flutes} flutes, ${s.material}, ${cut}, ${chipLoad(s.chip_load_mm, units())} per tooth${spindle === 'manual' ? ', manual spindle' : ''}${confirm}`;
 }
 

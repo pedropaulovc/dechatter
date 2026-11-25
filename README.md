@@ -219,7 +219,8 @@ as the stock's size and height above the jaws or the tool's actual stickout, are
 "tool.stickout_mm" = "measure from the collet face after the tool setter"
 ```
 
-Each key is a field the wizard shows, as `section.field`. The widget shows how many values are
+Each key is a field the wizard shows, as `section.field` (one that goes with the other way of
+stepping the cut is refused, since the wizard hides it). The widget shows how many values are
 to confirm on the machine and plans nothing until they are: the setup wizard highlights each
 one with its note, opening the Advanced section that holds it, and saving the wizard writes
 the setup without `[pending]`. Export keeps the table while it is there.

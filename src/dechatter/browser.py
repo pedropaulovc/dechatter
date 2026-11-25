@@ -141,7 +141,7 @@ class Sessions:
             "values": setup_values(self._dir(name) / session.SETUP_FILE),
             "defaults": setup_defaults(),
             "materials": sorted(materials.MATERIALS),
-            "pending": app.source.pending,
+            "pending": dict(app.source.pending),
         }
 
     def setup_preview(self, values_json: str) -> dict:

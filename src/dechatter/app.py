@@ -112,7 +112,7 @@ class App:
             # width in it. `level_mm` is the one the map and the observations are at.
             "vary": self.setup.cut.vary,
             # Field path -> note, for the values the setup marks to confirm on the machine.
-            "pending": self.source.pending,
+            "pending": dict(self.source.pending),
             "next": upcoming,
             "next_level_mm": next_level,
             "level_mm": level,

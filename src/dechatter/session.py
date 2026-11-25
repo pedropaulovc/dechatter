@@ -664,7 +664,7 @@ def _rounds_to_plan_after(session: Path, source: SetupFile) -> list[Round]:
             "before planning"
         )
     if source.pending:
-        listed = "; ".join(f"{at} ({note})" for at, note in source.pending.items())
+        listed = "; ".join(f"{at} ({note})" for at, note in source.pending)
         raise PlanError(
             f"{SETUP_FILE} has values to confirm on the machine before planning: {listed}. "
             "Check each in the setup wizard and save it."
