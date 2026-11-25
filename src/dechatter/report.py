@@ -12,7 +12,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import __version__, bayes, materials, session
+from . import __version__, bayes, materials, seeding, session
 from .config import WATTS_PER_HP, SpindleControl, Vary, load_setup
 from .detect import Verdict
 from .gcode import MM_PER_INCH, Units
@@ -40,6 +40,21 @@ PLANNER_NAMES = {
     PlannerKind.GRID: "grid of round 1",
     PlannerKind.BAYES: "chosen from the map",
     PlannerKind.SWEEP: "chip-load sweep",
+    PlannerKind.CONFIRM: "confirmation of the session it was started from",
+}
+
+SEED_STATUS = {
+    seeding.SeedStatus.UNCONFIRMED: "its confirmation round is still to be cut",
+    seeding.SeedStatus.CONFIRMED: "confirmed by this session's first cuts, and part of the map",
+    seeding.SeedStatus.REJECTED: "rejected by this session's confirmation cuts: half or more "
+    "of those it predicted came out the other way, so it is left out of the map and the "
+    "round-1 grid was planned after all",
+    seeding.SeedStatus.UNUSED: "not used: none of it lies inside this session's search",
+}
+CARRY = {
+    seeding.Carry.SAME: "same cut",
+    seeding.Carry.CONVERTED: "converted by equal load",
+    seeding.Carry.SPEEDS: "speed only",
 }
 
 STABLE_FILL, UNSURE_FILL, CHATTER_FILL = "#ffffff", "#c8c8c8", "#555555"
@@ -114,7 +129,12 @@ def _dates(rounds: list[Round]) -> str:
 
 
 def _map_svg(
-    stability: bayes.StabilityMap, cuts: list[bayes.Observation], units, cfg, vary: Vary
+    stability: bayes.StabilityMap,
+    cuts: list[bayes.Observation],
+    units,
+    cfg,
+    vary: Vary,
+    seeded: list[bayes.Observation] = (),
 ) -> str:
     shown = bayes.coarse(stability)
     p, rpm, mm = shown.p, shown.speeds, shown.engagements
@@ -145,6 +165,19 @@ def _map_svg(
         f'<rect x="{LEFT}" y="{TOP}" width="{width_px}" height="{height_px}" '
         'fill="none" stroke="#000" stroke-width="0.8"/>'
     )
+    # Carried over from the session this one was started from: not cut here, so drawn apart.
+    for cut in seeded:
+        cx, cy = x(cut.rpm), y(cut.engagement_mm)
+        if cut.verdict is Verdict.STABLE:
+            parts.append(
+                f'<rect x="{cx - 2.4:.1f}" y="{cy - 2.4:.1f}" width="4.8" height="4.8" '
+                'fill="none" stroke="#000" stroke-width="0.7"/>'
+            )
+            continue
+        parts.append(
+            f'<path d="M{cx - 3:.1f},{cy:.1f}L{cx + 3:.1f},{cy:.1f}'
+            f'M{cx:.1f},{cy - 3:.1f}L{cx:.1f},{cy + 3:.1f}" stroke="#000" stroke-width="0.7"/>'
+        )
     for cut in cuts:
         cx, cy = x(cut.rpm), y(cut.engagement_mm)
         if cut.verdict is Verdict.STABLE:
@@ -183,6 +216,64 @@ def _map_svg(
     )
 
 
+def _seed_section(seed: seeding.Seed, status, setup, env, units: Units) -> str:
+    """The session this one was started from: what it measured, and how each of its passes
+    carries over to this session's own depth (or width)."""
+    old = seed.setup
+    vary = setup.cut.vary
+    rows = []
+    for c in seeding.carried(seed, setup, env):
+        here = "outside the search" if c.observation is None else _verdict(c.observation.verdict)
+        size = "" if c.observation is None else _length(c.observation.engagement_mm, units)
+        rows.append(
+            [
+                f"{c.source.round}.{c.source.id}",
+                str(c.source.rpm),
+                _length(c.source.width_mm, units),
+                _length(c.source.depth_mm, units),
+                _verdict(c.source.verdict),
+                CARRY[c.carry],
+                size,
+                here,
+                f"{setup.planner.misclassification ** seeding.WEIGHT[c.carry]:.0%}",
+            ]
+        )
+    relied = seeding.transfer(seed, setup, env)
+    how = (
+        "its limits, converted: round 1 confirms the predicted best cut"
+        if relied is seeding.Transfer.LIMITS
+        else "its speeds only: round 1 cuts the grid's sizes at its best speeds"
+    )
+    return f"""<section>
+<h2>Seeded from {_e(seed.source)}</h2>
+<p class="note">This session was started from session {_e(seed.source)}, measured on the same
+machine, holder, cutter and stickout in {_e(old.cut.material)}, {_e(old.cut.direction.value)}
+milling. Its {len(seed.passes)} analysed passes are kept with this session and are not cuts
+of it. Each becomes the {STEPPED[vary].lower()} that loads the tool as much here (specific
+energy × depth × arc of engagement), and counts as a cut misheard as often as its last
+column says, against {setup.planner.misclassification:.0%} for a cut made here. A pass in the
+other direction, or a slot against a side cut, carries over as a speed in the main. This
+session relies on {how}. The seed is {_e(SEED_STATUS[status])}.</p>
+{
+        _table(
+            [
+                "Round.pass there",
+                "rpm",
+                "Width there",
+                "Depth there",
+                "Verdict there",
+                "Carried over as",
+                f"{STEPPED[vary]} here",
+                "Says here",
+                "Taken as misheard",
+            ],
+            rows,
+            "log",
+        )
+    }
+</section>"""
+
+
 def render(session_dir: Path, units: Units) -> str:
     """The session's report as one HTML document; lengths in `units`, with mm beside."""
     setup = load_setup(session_dir / session.SETUP_FILE)
@@ -193,6 +284,8 @@ def render(session_dir: Path, units: Units) -> str:
     material = materials.lookup(cut.material)
     name = session_dir.resolve().name
     deep = cut.vary
+    seed = seeding.load(session_dir)
+    status = None if seed is None else session.seed_status(seed, setup, env, rounds)
 
     header = _table(
         ["", ""],
@@ -223,6 +316,7 @@ def render(session_dir: Path, units: Units) -> str:
                 ", ".join(_length(level, units) for level in session.levels(setup)),
             ],
             ["Chip load", f"{_length(env.chip_load_mm, units, 3)} per tooth"],
+            *([] if seed is None else [["Started from", f"{seed.source}: {SEED_STATUS[status]}"]]),
         ],
         "facts",
     )
@@ -296,15 +390,31 @@ def render(session_dir: Path, units: Units) -> str:
         )
 
     maps = []
-    for level in sorted({r.plan.fixed_mm for r in rounds}, reverse=True):
+    shown_levels = {r.plan.fixed_mm for r in rounds}
+    if session.carried(seed, setup, env, rounds, session.levels(setup)[0]):
+        shown_levels.add(session.levels(setup)[0])
+    carried_over = False
+    for level in sorted(shown_levels, reverse=True):
+        seeded = session.carried(seed, setup, env, rounds, level)
+        carried_over = carried_over or bool(seeded)
         stability = bayes.build_map(
-            session.at_level(setup, level), env, session.evidence(rounds, level, env)
+            session.at_level(setup, level),
+            env,
+            [*session.evidence(rounds, level, env), *seeded],
         )
         cuts = session.observations(rounds, level, env)
         maps.append(
             f"<figure><figcaption>{_e(_length(level, units))} {HELD[deep]}</figcaption>"
-            f"{_map_svg(stability, cuts, units, cfg, deep)}</figure>"
+            f"{_map_svg(stability, cuts, units, cfg, deep, seeded)}</figure>"
         )
+    seeded_note = ""
+    if carried_over:
+        seeded_note = (
+            f" Small squares (stable) and plus signs (chatter) are seeded from {_e(seed.source)}:"
+            " cuts of that session as they carry over, not cut in this one, and counted for"
+            " less."
+        )
+    seed_section = "" if seed is None else _seed_section(seed, status, setup, env, units)
     if not maps:
         maps.append("<p>No round has been cut yet.</p>")
 
@@ -329,7 +439,7 @@ def render(session_dir: Path, units: Units) -> str:
             rows.append(
                 [
                     str(p.id),
-                    p.kind.value,
+                    f"{p.kind.value}, control" if p.expected is Verdict.UNSTABLE else p.kind.value,
                     str(p.rpm),
                     _length(r.plan.engagement_mm(p), units),
                     _length(p.chip_load_mm or r.plan.chip_load_mm, units, 3),
@@ -392,9 +502,10 @@ the spindle's estimated draw, and its share of the rated {machine.spindle_power_
 <section>
 <h2>Stability map</h2>
 <p class="note">White: likely stable (at least {cfg.min_probability:.0%}). Dark: likely chatter.
-Grey: not settled by the cuts made. Circles are stable cuts, crosses chatter.</p>
+Grey: not settled by the cuts made. Circles are stable cuts, crosses chatter.{seeded_note}</p>
 {"".join(maps)}
 </section>
+{seed_section}
 <section class="log">
 <h2>Round log</h2>
 {"".join(log)}

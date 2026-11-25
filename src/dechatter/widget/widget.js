@@ -5,7 +5,7 @@
 import { Mic } from './mic.js';
 import { PHASE, Stepper } from './stepper.js';
 import { chipLoad, feed, length, rate } from './units.js';
-import { STEPS, applicable, draw, placehold, read, reveal } from './wizard.js';
+import { START_FROM, STEPS, applicable, draw, info, placehold, read, reveal } from './wizard.js';
 
 const params = new URLSearchParams(location.search);
 const token = params.get('token') ?? '';
@@ -62,6 +62,9 @@ let dialog = 'closed';
 // null with no session open. Reset and Export need it to load; the rounds need not.
 let setupStatus = null;
 let stockChoice = 'same'; // survives redraws: planning on the wrong face position cuts air or too deep
+// What the file picked next is imported for: 'open' it as a session, or 'seed' the session
+// being created in the New dialog.
+let importing = 'open';
 
 // ---- engine (Python in a worker) -------------------------------------------------------
 
@@ -159,15 +162,42 @@ async function checkSetup(name) {
   }
 }
 
-async function newSession() {
-  const name = window.prompt('Name this tool assembly, for example al-10mm-3fl');
-  if (!name) {
+// The New dialog: a name, and optionally an earlier session on the same tool assembly to
+// start from. While it is open the session shown cannot change.
+function newSession() {
+  $('new-name').value = '';
+  fillSources('');
+  newError('');
+  dialog = 'open';
+  $('new-dialog').showModal();
+  render();
+}
+
+function fillSources(chosen) {
+  $('new-from').replaceChildren(
+    el('option', { value: '' }, 'nothing: plan the coarse grid'),
+    ...names.map((name) => el('option', { value: name }, name)),
+  );
+  $('new-from').value = chosen;
+}
+
+function newError(message) {
+  $('new-error').textContent = message;
+  $('new-error').hidden = !message;
+}
+
+async function createSession() {
+  const name = $('new-name').value.trim();
+  try {
+    await engine('create', name, $('new-from').value);
+    names = await engine('names');
+  } catch (err) {
+    newError(err.message);
     return;
   }
+  $('new-dialog').close();
   try {
-    await engine('create', name.trim());
-    names = await engine('names');
-    current = name.trim();
+    current = name;
     localStorage.setItem(SESSION_KEY, current);
     state = null;
     await checkSetup(current);
@@ -175,6 +205,20 @@ async function newSession() {
     showError('');
   } catch (err) {
     showError(err.message);
+  }
+  render();
+}
+
+// An exported session to start the new one from: stored in this browser like any import,
+// then chosen in the dialog.
+async function importSource(file) {
+  try {
+    const name = await engine('import_zip', new Uint8Array(await file.arrayBuffer()));
+    names = await engine('names');
+    fillSources(name);
+    newError('');
+  } catch (err) {
+    newError(err.message);
   }
   render();
 }
@@ -762,14 +806,15 @@ function renderSessions() {
   $('reset-session').disabled ||= setupStatus !== 'loads';
 }
 
-// The session's tool and cut in one line, lengths in the machine's units, and how many
-// values prepared ahead of time are still to be confirmed on the machine.
-function summary({ summary: s, spindle, vary, pending }) {
+// The session's tool and cut in one line, lengths in the machine's units, the session it was
+// started from, and how many values prepared ahead of time are still to be confirmed on the
+// machine.
+function summary({ summary: s, spindle, vary, pending, seed }) {
   const levels = s.levels_mm.map((level) => length(level, units())).join(', ');
   const cut = vary === 'depth' ? `width ${levels}, depth stepped` : `depth ${levels}`;
   const count = Object.keys(pending).length;
   const confirm = count === 0 ? '' : `. ${plural(count, 'value')} to confirm on the machine`;
-  return `Ø ${length(s.diameter_mm, units())}, ${s.flutes} flutes, ${s.material}, ${cut}, ${chipLoad(s.chip_load_mm, units())} per tooth${spindle === 'manual' ? ', manual spindle' : ''}${confirm}`;
+  return `Ø ${length(s.diameter_mm, units())}, ${s.flutes} flutes, ${s.material}, ${cut}, ${chipLoad(s.chip_load_mm, units())} per tooth${spindle === 'manual' ? ', manual spindle' : ''}${seed ? `, started from ${seed.source}` : ''}${confirm}`;
 }
 
 // A setup field by its path ("stock.height_mm"), as the wizard names it and the step it is on.
@@ -781,6 +826,28 @@ function wizardField(at) {
     }
   }
   return at;
+}
+
+// What a session started from another plans first, or why it plans the grid after all;
+// null when the usual text applies.
+function seedPlanText() {
+  const seed = state.seed;
+  if (!seed) {
+    return null;
+  }
+  if (state.next_planner === 'confirm') {
+    const cuts = seed.transfer === 'speeds'
+      ? `the round-1 cuts at the speeds of ${seed.source}'s best cuts only (its limits do not carry over to this kind of cut)`
+      : `a few cuts around the best cut ${seed.source} predicts here`;
+    return `Plan a short confirmation round instead of the coarse grid: ${cuts}, and one in its chatter band as a control. If they disagree with ${seed.source}, the grid follows.`;
+  }
+  if (state.next_planner !== 'grid') {
+    return null;
+  }
+  if (seed.status === 'rejected') {
+    return `The confirmation cuts disagreed with ${seed.source}: half or more of those it predicted came out the other way. Its cuts are left out of the map. Plan the coarse grid of test cuts.`;
+  }
+  return `Nothing ${seed.source} measured lies inside this session's search, so it is not used. Plan a coarse grid of test cuts.`;
 }
 
 // A round's level, as the dimension its cuts share: "5 mm deep", or where the session steps
@@ -801,7 +868,8 @@ function renderSetup() {
   }
   const step = STEPS[editing.step];
   $('setup-title').textContent = `Setup ${editing.step + 1} of ${STEPS.length}: ${step.title}`;
-  $('setup-hint').textContent = step.hint;
+  const kept = editing.seed && editing.step < 2 ? ` Started from ${editing.seed}: the machine, holder, cutter and stickout must stay as they were there.` : '';
+  $('setup-hint').textContent = `${step.hint}${kept}`;
   $('setup-back').hidden = editing.step === 0;
   $('setup-next').textContent = editing.step === STEPS.length - 1 ? 'Save' : 'Next';
   $('setup-next').disabled = busy();
@@ -985,7 +1053,7 @@ function renderStep() {
       ? `${length(state.level_mm, units(), { mmToo: true })} width is settled. Next come cuts ${held(state.next_level_mm, { mmToo: true })}, starting from the depths that were stable.`
       : `${length(state.level_mm, units(), { mmToo: true })} depth is settled. Next come cuts ${held(state.next_level_mm, { mmToo: true })}, starting from the widths that were stable.`;
     const next = moved ? settled : 'Plan the next cuts from what was measured.';
-    step.append(el('p', {}, first ? 'Plan a coarse grid of test cuts.' : next));
+    step.append(el('p', {}, seedPlanText() ?? (first ? 'Plan a coarse grid of test cuts.' : next)));
     step.append(el('p', {}, plan, ...(first ? [] : [' on the ', stock])));
     return;
   }
@@ -1097,7 +1165,7 @@ function renderRound() {
   if (!round) {
     return;
   }
-  const kind = round.planner === 'sweep' ? ' (chip-load sweep)' : '';
+  const kind = { sweep: ' (chip-load sweep)', confirm: ' (confirmation)' }[round.planner] ?? '';
   const lanes = round.legs.map((leg) => leg.lane);
   const where = round.lanes > 1 ? `, ${lanes.length > 1 ? 'lanes' : 'lane'} ${lanes.join(', ')} of ${round.lanes}` : '';
   const faced = round.legs.slice(1).some((leg) => leg.reface_mm > 0) ? ', top faced midway' : '';
@@ -1113,7 +1181,7 @@ function renderRound() {
         el('td', {}, String(p.rpm)),
         el('td', {}, length(deep ? p.depth_mm : p.width_mm, units())),
         el('td', {}, feed(p.feed_mm_min, units())),
-        el('td', {}, p.p_stable === null ? '' : p.p_stable.toFixed(2)),
+        el('td', {}, p.expected === 'unstable' ? 'control' : p.p_stable === null ? '' : p.p_stable.toFixed(2)),
         verdictCell(round, p),
       ),
     ]),
@@ -1123,7 +1191,8 @@ function renderRound() {
 function renderMap() {
   // A level that has no cuts of its own yet still has a map: what deeper (or wider) cuts
   // showed stable. Its rows are the dimension the session steps.
-  $('map-section').hidden = editing !== null || !state || !state.rounds.some((r) => r.analysed);
+  const seeded = state?.seeded ?? [];
+  $('map-section').hidden = editing !== null || !state || !(state.rounds.some((r) => r.analysed) || seeded.length);
   if ($('map-section').hidden) {
     return;
   }
@@ -1149,6 +1218,25 @@ function renderMap() {
 
   const x = (rpm) => pad.left + ((rpm - speeds[0]) / (speeds.at(-1) - speeds[0])) * (w - cellW) + cellW / 2;
   const y = (size) => pad.top + h - ((size - engagements[0]) / (engagements.at(-1) - engagements[0])) * (h - cellH) - cellH / 2;
+  // Carried over from the session this one was started from: not cut here, so drawn apart,
+  // as small squares (stable) and plus signs (chatter).
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = '#555';
+  for (const o of seeded) {
+    const [cx, cy] = [x(o.rpm), y(o.engagement_mm)];
+    ctx.beginPath();
+    if (o.verdict === 'stable') {
+      ctx.rect(cx - 2, cy - 2, 4, 4);
+    } else {
+      ctx.moveTo(cx - 3, cy);
+      ctx.lineTo(cx + 3, cy);
+      ctx.moveTo(cx, cy - 3);
+      ctx.lineTo(cx, cy + 3);
+    }
+    ctx.stroke();
+  }
+  $('seed-legend').hidden = seeded.length === 0;
+  $('seed-legend').textContent = seeded.length ? ` Squares and plus signs are seeded from ${state.seed.source}: its cuts as they carry over, not cut here, and counted for less.` : '';
   ctx.lineWidth = 1.5;
   ctx.strokeStyle = '#000';
   for (const o of state.observations) {
@@ -1226,6 +1314,20 @@ function render() {
 
 $('sessions').onchange = () => openSession($('sessions').value);
 $('new-session').onclick = newSession;
+$('new-form').onsubmit = (event) => {
+  event.preventDefault();
+  createSession();
+};
+$('new-cancel').onclick = () => $('new-dialog').close();
+$('new-dialog').addEventListener('close', () => {
+  dialog = 'closed';
+  render();
+});
+$('new-import').onclick = () => {
+  importing = 'seed';
+  $('import-file').click();
+};
+$('new-from-row').append(...Object.values(info('new-from', 'Start from', START_FROM)));
 $('edit-setup').onclick = editSetup;
 $('setup-back').onclick = previousStep;
 $('setup-form').onsubmit = (event) => {
@@ -1235,6 +1337,10 @@ $('setup-form').onsubmit = (event) => {
 $('cancel-setup').onclick = () => {
   editing = null;
   showError('');
+  // A session just created has no state yet: show it as it stands, on the setup it holds.
+  if (state === null && current) {
+    act('state');
+  }
   render();
 };
 $('export').onclick = () => exportSession();
@@ -1254,13 +1360,21 @@ $('confirm-export').onclick = async () => {
 $('confirm-go').onclick = confirmed;
 $('confirm-cancel').onclick = () => $('confirm-dialog').close();
 $('download-report').onclick = downloadReport;
-$('import').onclick = () => $('import-file').click();
+$('import').onclick = () => {
+  importing = 'open';
+  $('import-file').click();
+};
 $('import-file').onchange = () => {
   const [file] = $('import-file').files;
   $('import-file').value = '';
-  if (file) {
-    importSession(file);
+  if (!file) {
+    return;
   }
+  if (importing === 'seed') {
+    importSource(file);
+    return;
+  }
+  importSession(file);
 };
 $('enable-mic').onclick = () => openMic(localStorage.getItem(DEVICE_KEY) || undefined);
 $('device').onchange = () => openMic($('device').value || undefined);

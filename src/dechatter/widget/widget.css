@@ -29,11 +29,11 @@ header button { padding: 4px 6px; }
 #setup-form .field.pending { padding: 4px 6px; background: #fcf8e3; border: 1px solid #f0ad4e; border-radius: 3px; }
 #setup-form .field.pending strong { grid-column: 1 / -1; font-size: 12px; }
 #setup-form details.advanced { margin-top: 4px; }
-#setup-form button.info {
+#setup-form button.info, #new-form button.info {
   width: 16px; height: 16px; padding: 0; margin-left: 2px; vertical-align: 1px;
   font: italic bold 11px/14px Georgia, serif; color: #337ab7; border-radius: 50%;
 }
-#setup-form .bubble {
+#setup-form .bubble, #new-form .bubble {
   grid-column: 1 / -1; margin: 2px 0 0; padding: 6px 8px; font-size: 12px; line-height: 1.4;
   background: #f7f7f7; border: 1px solid #ccc; border-radius: 3px;
 }
@@ -86,6 +86,8 @@ button.danger { color: #fff; background: #c9302c; border-color: #ac2925; }
 button.danger:hover:not(:disabled) { background: #ac2925; }
 dialog { max-width: min(360px, calc(100vw - 32px)); border: 1px solid #ccc; border-radius: 3px; }
 dialog p { margin: 0 0 8px; }
+#new-from-row { margin: 0 0 8px; }
+#new-from { max-width: 150px; }
 td select { padding: 1px 2px; }
 
 .recording { color: #c9302c; font-weight: bold; }

@@ -19,7 +19,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import gcode, materials, report, session
+from . import gcode, materials, report, seeding, session
 from .app import App
 from .audio import AudioError
 from .config import (
@@ -45,7 +45,7 @@ class SetupLoad(StrEnum):
 
 
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
-EXPECTED = (ConfigError, PlanError, SessionError, AudioError)
+EXPECTED = (ConfigError, PlanError, SessionError, AudioError, seeding.SeedError)
 
 
 class Sessions:
@@ -72,12 +72,33 @@ class Sessions:
     def names(self) -> list[str]:
         return sorted(p.parent.name for p in self.root.glob(f"*/{session.SETUP_FILE}"))
 
-    def create(self, name: str) -> str:
+    def create(self, name: str, source: str = "") -> str:
+        """A new session: on the template setup, or started from the session `source`.
+
+        Started from another, it takes that session's setup as its own, to be changed in what
+        the new cuts differ in, and keeps its analysed passes that got a verdict, with the
+        setup they were measured with, in its own folder (see seeding). The other session
+        must load, rounds and all, and hold such a pass.
+        """
         target = self._dir(name)
         if target.exists():
             raise SessionError(f"session {name!r} already exists")
+        text, seed = TEMPLATE, None
+        if source:
+            origin = self._existing(source)
+            text = (origin / session.SETUP_FILE).read_text(encoding="utf-8")
+            parse_setup(text, f"{source}/{session.SETUP_FILE}")
+            passes = session.seed_passes(session.load_rounds(origin))
+            if not passes:
+                raise SessionError(
+                    f"session {source!r} has no analysed cut with a verdict to start from"
+                )
+            seed = seeding.Seed(source, text, passes)
         target.mkdir()
-        (target / session.SETUP_FILE).write_text(TEMPLATE, encoding="utf-8")
+        (target / session.SETUP_FILE).write_text(text, encoding="utf-8")
+        if seed is not None:
+            seed.save(target / seeding.SEED_FILE)
+            log.info("%s: started from %d passes of %s", name, len(passes), source)
         return name
 
     def _existing(self, name: str) -> Path:
@@ -142,6 +163,8 @@ class Sessions:
             "defaults": setup_defaults(),
             "materials": sorted(materials.MATERIALS),
             "pending": dict(app.source.pending),
+            # The session this one was started from, whose tool assembly it must keep.
+            "seed": None if app.seed is None else app.seed.source,
         }
 
     def setup_preview(self, values_json: str) -> dict:

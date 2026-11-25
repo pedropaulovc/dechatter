@@ -15,6 +15,7 @@ import numpy as np
 
 from . import materials
 from .config import Direction, Setup, SpindleControl, Vary, full_width, slot_wall_mm
+from .detect import Verdict
 
 # 2: dechatter 0.2.0 (planned_on, per-pass chip loads); 3: 0.6.0 (a round in legs, across
 # lanes and faced tops; what the session varies, and each pass's own depth). A schema-2
@@ -48,6 +49,9 @@ class PlannerKind(StrEnum):
     GRID = "grid"
     BAYES = "bayes"
     SWEEP = "sweep"  # one cut at rising chip loads; not part of the stability map
+    # A session started from an earlier one: a few cuts where that one predicts the best
+    # cut, and one in its chatter band as a control, instead of the grid (see seeding).
+    CONFIRM = "confirm"
 
 
 class Milling(StrEnum):
@@ -97,6 +101,8 @@ class Pass:
     plunge_s: float  # feed move from the clearance plane down to depth, beside the stock
     p_stable: float | None = None
     chip_load_mm: float | None = None  # a chip-load sweep's own; else the plan's
+    # A confirmation cut: what the session this one was started from predicts for it.
+    expected: Verdict | None = None
 
 
 @dataclass(frozen=True)
@@ -203,9 +209,7 @@ class Plan:
             Leg(
                 **{
                     **leg,
-                    "passes": tuple(
-                        Pass(**{**p, "kind": PassKind(p["kind"])}) for p in leg["passes"]
-                    ),
+                    "passes": tuple(_pass(p) for p in leg["passes"]),
                 }
             )
             for leg in data.pop("legs")
@@ -219,6 +223,11 @@ class Plan:
                 "legs": legs,
             }
         )
+
+
+def _pass(p: dict) -> Pass:
+    expected = Verdict(p["expected"]) if p.get("expected") else None
+    return Pass(**{**p, "kind": PassKind(p["kind"]), "expected": expected})
 
 
 def _stepping_width(data: dict) -> dict:
@@ -450,6 +459,7 @@ def make_pass(
     path: Travel,
     p_stable: float | None = None,
     chip_load_mm: float | None = None,
+    expected: Verdict | None = None,
 ) -> Pass:
     feed = (chip_load_mm or env.chip_load_mm) * setup.tool.flutes * rpm
     plunge_mm = setup.program.clearance_mm + depth_mm
@@ -465,6 +475,7 @@ def make_pass(
         plunge_s=round(plunge_mm / setup.program.plunge_feed_mm_min * 60, 2),
         p_stable=None if p_stable is None else round(p_stable, 3),
         chip_load_mm=chip_load_mm,
+        expected=expected,
     )
 
 
@@ -853,8 +864,9 @@ def assemble(
     """Lay the tests out on the stock from `face` on, in legs that each prepare their face
     first (see _lay_out), on the setup's lanes unless `lanes` says otherwise.
 
-    A test is (rpm, engagement, P(stable)), or in a chip-load sweep (rpm, engagement, None,
-    chip load), already lightest first; the engagement is the width, or the depth when the
+    A test is (rpm, engagement, P(stable)), in a chip-load sweep (rpm, engagement, None,
+    chip load), already lightest first, or in a confirmation round (rpm, engagement,
+    P(stable), None, the verdict expected); the engagement is the width, or the depth when the
     setup steps that. `made` are the passes cut into the top as it stands (none: it is
     untouched). Tests left over once the stock runs out are dropped, the heaviest ones: a
     ramp leaves them for last, and a round that runs deepest first is laid out again without
@@ -914,23 +926,29 @@ def sweep_tests(setup: Setup, env: Envelope, rpm: float, engagement_mm: float) -
     return tests
 
 
+def grid_engagements(setup: Setup, env: Envelope) -> list[float]:
+    """The engagements round 1 cuts each of its speeds at, lightest first."""
+    cfg = setup.planner
+    deep = setup.cut.vary is Vary.DEPTH
+    step = engagement_step_mm(setup)
+    fractions = cfg.round1_depth_fractions if deep else cfg.round1_width_fractions
+    return sorted(
+        {
+            min(env.engagement_top_mm, max(step, round(f * env.engagement_max_mm / step) * step))
+            for f in fractions
+        }
+    )
+
+
 def grid_tests(setup: Setup, env: Envelope) -> list[tuple[float, float, None]]:
     """Round 1: coarse grid of speeds and engagements inside the power cap."""
     cfg = setup.planner
     speeds = np.linspace(env.speed_min_rpm, env.speed_max_rpm, cfg.round1_speeds)
     speeds = np.unique(np.round(speeds / cfg.speed_step_rpm) * cfg.speed_step_rpm)
     deep = setup.cut.vary is Vary.DEPTH
-    step = engagement_step_mm(setup)
-    fractions = cfg.round1_depth_fractions if deep else cfg.round1_width_fractions
-    engagements = sorted(
-        {
-            min(env.engagement_top_mm, max(step, round(f * env.engagement_max_mm / step) * step))
-            for f in fractions
-        }
-    )
     tests = [
         (float(rpm), float(engagement), None)
-        for engagement in engagements
+        for engagement in grid_engagements(setup, env)
         for rpm in speeds
         if mrr_mm3_min(setup, env, rpm, engagement) <= env.mrr_limit_mm3_min
     ]

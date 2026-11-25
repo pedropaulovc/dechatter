@@ -1,0 +1,443 @@
+"""A session started from an earlier one on the same tool assembly: what carries over, the
+confirmation round that replaces the grid, and the way back to the grid."""
+
+from __future__ import annotations
+
+import dataclasses
+import json
+import math
+
+import pytest
+import synth
+from test_app import NAME, Engine
+
+from dechatter import bayes, seeding, session
+from dechatter.bayes import Observation
+from dechatter.config import Direction, Vary, load_setup
+from dechatter.detect import Thresholds, Verdict
+from dechatter.plan import PassKind, Plan, PlannerKind, envelope, grid_tests
+from dechatter.seeding import Carry, Seed, SeedPass, SeedStatus
+from dechatter.session import PassResult, PassStatus, Results
+
+MACHINE = synth.Machine()
+# A machine that chatters in every cut the planner would try.
+HOPELESS = synth.Machine(floor_mm=0.05, pocket_gain=0.0)
+NEW = "al-10mm-again"
+
+
+def cut(engine: Engine, name: str, number: int, machine: synth.Machine = MACHINE) -> dict:
+    """Write the round's results as the simulated machine would have sounded: every test
+    cut heard, chattering where the machine's lobes say so. No audio is involved."""
+    folder = session.round_dir(engine.root / name, number)
+    plan = Plan.load(folder / session.PLAN_FILE)
+    passes = []
+    for p in plan.passes:
+        verdict = chatter_hz = None
+        if p.kind is PassKind.TEST:
+            chatters = machine.chatters(p.rpm, p.width_mm, plan.flutes, p.depth_mm)
+            verdict = Verdict.UNSTABLE if chatters else Verdict.STABLE
+            chatter_hz = machine.natural_hz * 1.03 if chatters else None
+        passes.append(
+            PassResult(
+                p.id,
+                p.kind,
+                p.rpm,
+                p.width_mm,
+                PassStatus.ANALYSED,
+                verdict,
+                chatter_hz=chatter_hz,
+                detected=verdict,
+            )
+        )
+    results = Results(number, session.RECORDING_FILE, Thresholds(), tuple(passes))
+    results.save(folder / session.RESULTS_FILE)
+    return engine.call("state", name)
+
+
+def run(engine: Engine, name: str, machine: synth.Machine = MACHINE) -> dict:
+    """Plan and cut rounds until nothing is left to plan."""
+    state = engine.call("state", name)
+    for _ in range(16):
+        if state["next"] != "plan":
+            return state
+        state = engine.call("plan", name, "fresh")
+        state = cut(engine, name, state["rounds"][-1]["round"], machine)
+    pytest.fail("did not converge in 16 rounds")
+
+
+def cuts_of(round_json: dict) -> list[dict]:
+    return [p for p in round_json["passes"] if p["kind"] == "test"]
+
+
+def change(engine: Engine, name: str, **entries) -> dict:
+    """Save the session's setup with `section.key` entries changed (dots as double underscores)."""
+    values = engine.call("setup_form", name)["values"]
+    for at, value in entries.items():
+        section, key = at.split("__")
+        values[section][key] = value
+    return engine.call("save_setup", name, json.dumps(values))
+
+
+@pytest.fixture
+def engine(tmp_path) -> Engine:
+    """A session whose setup was saved through the wizard with the values it offered."""
+    engine = Engine(tmp_path / "sessions")
+    engine.call("create", NAME)
+    engine.call("save_setup", NAME, json.dumps(engine.call("setup_form", NAME)["values"]))
+    return engine
+
+
+@pytest.fixture
+def measured(engine) -> Engine:
+    """The engine's session, run to convergence on the simulated machine."""
+    state = run(engine, NAME)
+    assert state["next"] in ("converged", "sweep")
+    assert state["seed"] is None and state["seeded"] == []
+    return engine
+
+
+def test_a_seeded_session_confirms_the_predicted_best_cut_instead_of_cutting_the_grid(measured):
+    engine = measured
+    source = engine.call("state", NAME)
+    best = source["best"][0]
+    cuts_there = sum(len(cuts_of(r)) for r in source["rounds"])
+    setup = load_setup(engine.root / NAME / session.SETUP_FILE)
+    grid = len(grid_tests(setup, envelope(setup)))
+
+    assert engine.call("create", NEW, NAME) == NEW
+    state = engine.call("state", NEW)
+    assert state["seed"] == {
+        "source": NAME,
+        "material": "aluminum-6061",
+        "passes": cuts_there,
+        "status": "unconfirmed",
+        "transfer": "limits",
+    }
+    # The earlier cuts are on the map before any cut here, apart from this session's own.
+    assert len(state["seeded"]) == cuts_there and state["observations"] == []
+    assert (state["next"], state["next_planner"]) == ("plan", "confirm")
+    assert f"started from {NAME}" not in json.dumps(state["rounds"])
+
+    state = engine.call("plan", NEW, "fresh")
+    first = state["rounds"][0]
+    assert first["planner"] == "confirm"
+    planned = cuts_of(first)
+    assert 2 <= len(planned) < grid
+    # The predicted best cut is the earlier session's best, and one cut is the control.
+    assert (best["rpm"], best["width_mm"]) in {(p["rpm"], p["width_mm"]) for p in planned}
+    control = [p for p in planned if p["expected"] == "unstable"]
+    assert len(control) == 1
+    assert MACHINE.chatters(control[0]["rpm"], control[0]["width_mm"], setup.tool.flutes)
+    assert all(p["expected"] == "stable" for p in planned if p not in control)
+
+    # On the same machine the cuts agree: the seed stands, and far fewer cuts settle the map.
+    state = cut(engine, NEW, 1)
+    assert state["seed"]["status"] == "confirmed" and state["seeded"]
+    state = run(engine, NEW)
+    assert state["next"] in ("converged", "sweep")
+    assert state["best"][0]["mrr_cm3_min"] >= best["mrr_cm3_min"]
+    assert sum(len(cuts_of(r)) for r in state["rounds"]) < cuts_there / 2
+    assert all(r["planner"] != "grid" for r in state["rounds"])
+
+
+def test_confirmation_cuts_that_disagree_drop_the_seed_and_bring_back_the_grid(measured):
+    engine = measured
+    engine.call("create", NEW, NAME)
+    setup = load_setup(engine.root / NEW / session.SETUP_FILE)
+    grid = grid_tests(setup, envelope(setup))
+    engine.call("plan", NEW, "fresh")
+
+    # Another machine entirely: every cut chatters, so every cut predicted stable is wrong.
+    state = cut(engine, NEW, 1, HOPELESS)
+    assert state["seed"]["status"] == "rejected"
+    assert state["seeded"] == []
+    assert (state["next"], state["next_planner"]) == ("plan", "grid")
+
+    state = engine.call("plan", NEW, "fresh")
+    second = state["rounds"][1]
+    assert second["planner"] == "grid"
+    assert {(p["rpm"], p["width_mm"]) for p in cuts_of(second)} == {
+        (rpm, round(width, 3)) for rpm, width, _ in grid
+    }
+    # The confirmation cuts were real cuts: they stay on the map as this session's own.
+    assert len(state["observations"]) == len(cuts_of(state["rounds"][0]))
+    # After the grid the session goes on from its own cuts alone.
+    state = cut(engine, NEW, 2, HOPELESS)
+    assert state["seed"]["status"] == "rejected" and state["next_planner"] != "grid"
+
+    # One surprise among the predicted cuts leaves the seed standing: the control was stable.
+    engine.call("create", "one-off", NAME)
+    planned = engine.call("plan", "one-off", "fresh")["rounds"][0]
+    state = cut(engine, "one-off", 1)
+    control = next(p for p in cuts_of(planned) if p["expected"] == "unstable")
+    state = engine.call("set_verdict", "one-off", 1, control["id"], "stable")
+    assert state["seed"]["status"] == "confirmed"
+
+
+def test_a_session_on_another_tool_assembly_is_refused_with_the_reason(measured):
+    engine = measured
+    engine.call("create", NEW, NAME)
+    setup_file = engine.root / NEW / session.SETUP_FILE
+    before = setup_file.read_bytes()
+    stickout = load_setup(setup_file).tool.stickout_mm
+
+    refused = {
+        "tool__stickout_mm": (stickout + 1.0, "stickout was"),
+        "tool__diameter_mm": (12.0, "cutter diameter was 9.525 mm, not 12 mm"),
+        "tool__flutes": (2, "cutter had 3 flutes, not 2"),
+        "tool__material": ("hss", "cutter was carbide, not hss"),
+        "tool__holder": ("shrink fit", "holder was"),
+        "machine__weight_kg": (900.0, "machine weighed"),
+        "machine__name": ("another mill", "machine was"),
+    }
+    for at, (value, reason) in refused.items():
+        with pytest.raises(RuntimeError, match=reason) as refusal:
+            change(engine, NEW, **{at: value})
+        assert f"starts from {NAME}" in str(refusal.value)
+        assert setup_file.read_bytes() == before
+    # The session still opens on the setup it had.
+    assert engine.call("state", NEW)["seed"]["source"] == NAME
+
+    # A cutter put back within the stickout tolerance is the same assembly, and what the cut
+    # differs in is never refused: material, depth, direction, what is stepped.
+    state = change(
+        engine,
+        NEW,
+        tool__stickout_mm=stickout + 0.5,
+        cut__material="brass-360",
+        cut__axial_depth_mm=3.0,
+        cut__direction="climb",
+    )
+    assert state["seed"]["source"] == NAME
+
+    # A seed whose setup was changed by hand to another assembly stops the session opening.
+    seed_file = engine.root / NEW / seeding.SEED_FILE
+    data = json.loads(seed_file.read_text(encoding="utf-8"))
+    data["setup"] = data["setup"].replace("flutes = 3", "flutes = 4")
+    seed_file.write_text(json.dumps(data), encoding="utf-8")
+    fresh = Engine(engine.root)
+    assert fresh.call("setup_status", NEW)["status"] == "refused"
+    assert "4 flutes" in fresh.call("setup_status", NEW)["reason"]
+
+
+def test_a_session_with_no_verdict_cannot_be_started_from(engine):
+    with pytest.raises(RuntimeError, match="no analysed cut with a verdict to start from"):
+        engine.call("create", NEW, NAME)
+    with pytest.raises(RuntimeError, match="no session named 'missing'"):
+        engine.call("create", NEW, "missing")
+    assert NEW not in engine.call("names")
+    # Verdicts set by hand count like the detector's; a pass left without one is left out.
+    engine.call("plan", NAME, "fresh")
+    state = cut(engine, NAME, 1)
+    first, second = cuts_of(state["rounds"][0])[:2]
+    path = session.round_dir(engine.root / NAME, 1) / session.RESULTS_FILE
+    data = json.loads(path.read_text(encoding="utf-8"))
+    for p in data["passes"]:
+        if p["id"] == second["id"]:
+            p["verdict"] = p["detected"] = None
+    path.write_text(json.dumps(data), encoding="utf-8")
+    flipped = "unstable" if first["verdict"] == "stable" else "stable"
+    engine.call("set_verdict", NAME, 1, first["id"], flipped)
+    engine.call("create", NEW, NAME)
+    seed = seeding.load(engine.root / NEW)
+    verdicts = {p.id: p.verdict for p in seed.passes}
+    assert verdicts[first["id"]] == flipped and second["id"] not in verdicts
+    assert len(seed.passes) == len(cuts_of(state["rounds"][0])) - 1
+
+
+def test_export_and_import_keep_the_seed_with_the_session(measured, tmp_path):
+    engine = measured
+    engine.call("create", NEW, NAME)
+    engine.call("plan", NEW, "fresh")
+    before = cut(engine, NEW, 1)
+    archive = engine.call("export_zip", NEW, "mm")
+
+    # Another browser, which never held the earlier session.
+    other = Engine(tmp_path / "elsewhere")
+    assert other.call("import_zip", archive) == NEW
+    assert other.call("names") == [NEW]
+    after = other.call("state", NEW)
+    assert after["seed"] == before["seed"] and after["seed"]["source"] == NAME
+    assert after["seeded"] == before["seeded"] and after["seeded"]
+    assert after["map"] == before["map"]
+    kept = seeding.load(other.root / NEW)
+    assert kept == seeding.load(engine.root / NEW)
+    assert kept.setup == load_setup(engine.root / NAME / session.SETUP_FILE)
+    assert len(kept.passes) == before["seed"]["passes"]
+
+    # The earlier session may go: the new one holds what it took from it. A reset keeps it.
+    engine.call("delete", NAME)
+    assert Engine(engine.root).call("state", NEW)["seed"] == before["seed"]
+    assert engine.call("reset", NEW)["seed"]["status"] == "unconfirmed"
+
+    report = other.call("report_html", NEW, "mm")
+    assert f"Seeded from {NAME}" in report and "Started from" in report
+    assert "confirmation of the session it was started from" in report
+    assert "Small squares (stable) and plus signs (chatter) are seeded from" in report
+    # A session started on its own says nothing of a seed.
+    plain = Engine(tmp_path / "plain")
+    plain.call("create", "solo")
+    assert "eeded from" not in plain.call("report_html", "solo", "mm")
+
+
+def test_a_damaged_seed_is_refused_with_what_to_do(measured):
+    engine = measured
+    engine.call("create", NEW, NAME)
+    (engine.root / NEW / seeding.SEED_FILE).write_text('{"schema": 99}', encoding="utf-8")
+    status = Engine(engine.root).call("setup_status", NEW)
+    assert status["status"] == "refused"
+    assert "seed.json cannot be read (schema 99)" in status["reason"]
+
+
+def test_the_other_direction_carries_over_the_speeds_and_hardly_the_limits(measured):
+    engine = measured
+    source = engine.call("state", NAME)
+    best = source["best"][0]
+    engine.call("create", NEW, NAME)
+    state = change(engine, NEW, cut__direction="climb")
+    assert state["seed"]["transfer"] == "speeds" and state["seed"]["status"] == "unconfirmed"
+    setup = load_setup(engine.root / NEW / session.SETUP_FILE)
+    assert setup.cut.direction is Direction.CLIMB
+    env = envelope(setup)
+    seed = seeding.load(engine.root / NEW)
+    carried = seeding.carried(seed, setup, env)
+    assert {c.carry for c in carried} == {Carry.SPEEDS}
+    assert {c.observation.weight for c in carried if c.observation} == {0.15}
+
+    grid = grid_tests(setup, env)
+    state = engine.call("plan", NEW, "fresh")
+    planned = cuts_of(state["rounds"][0])
+    assert state["rounds"][0]["planner"] == "confirm" and len(planned) < len(grid)
+    control = [p for p in planned if p["expected"] == "unstable"]
+    pockets = [p for p in planned if p not in control]
+    # The grid's own sizes at the earlier session's best speeds: nothing is predicted of them.
+    assert all(p["expected"] is None and p["p_stable"] is None for p in pockets)
+    assert {p["width_mm"] for p in pockets} == {round(width, 3) for _, width, _ in grid}
+    speeds = sorted({p["rpm"] for p in pockets})
+    assert best["rpm"] in speeds and len(speeds) == 2
+    assert speeds[1] - speeds[0] > 0.05 * speeds[0]
+    # The control sits in a band the earlier session heard chatter in, at the heaviest size.
+    assert len(control) == 1 and control[0]["width_mm"] == max(p["width_mm"] for p in pockets)
+    heard = [p.rpm for p in seed.passes if p.verdict is Verdict.UNSTABLE]
+    assert control[0]["rpm"] in heard
+
+    # Its chatter band chattering confirms the speeds; had it not, the grid would follow.
+    state = cut(engine, NEW, 1)
+    assert state["seed"]["status"] == "confirmed"
+    state = engine.call("set_verdict", NEW, 1, control[0]["id"], "stable")
+    assert state["seed"]["status"] == "rejected" and state["next_planner"] == "grid"
+
+
+def passes(*cuts) -> tuple[SeedPass, ...]:
+    return tuple(
+        SeedPass(1, number, rpm, width, depth, verdict)
+        for number, (rpm, width, depth, verdict) in enumerate(cuts)
+    )
+
+
+def test_limits_scale_with_the_specific_energy_and_the_arc_of_engagement(setup, write_setup):
+    text = write_setup().read_text(encoding="utf-8")
+    diameter = setup.tool.diameter_mm
+    seed = Seed(
+        "earlier",
+        text,
+        passes((4000, 2.0, 5.0, Verdict.STABLE), (4000, 3.0, 5.0, Verdict.UNSTABLE)),
+    )
+    stable, chatter = seed.passes
+
+    def at(**cut):
+        return dataclasses.replace(setup, cut=dataclasses.replace(setup.cut, **cut))
+
+    def arc(width):
+        return math.acos(1 - 2 * width / diameter)
+
+    # The same cut in the same material is itself.
+    assert seeding.carry(seed, stable, setup) is Carry.SAME
+    assert seeding.equivalent_mm(seed, stable, setup) == pytest.approx(2.0)
+
+    # Stepping the depth at the same width, another material scales the depth by the Ks ratio.
+    deep = at(vary=Vary.DEPTH, radial_width_mm=2.0, depth_max_mm=8.0, material="steel-1018")
+    assert seeding.carry(seed, stable, deep) is Carry.SAME
+    assert seeding.equivalent_mm(seed, stable, deep) == pytest.approx(5.0 * 0.70 / 2.20)
+
+    # At another width the depth trades against the arc a tooth stays in the cut.
+    narrow = at(vary=Vary.DEPTH, radial_width_mm=0.5, depth_max_mm=20.0)
+    assert seeding.carry(seed, stable, narrow) is Carry.CONVERTED
+    assert seeding.equivalent_mm(seed, stable, narrow) == pytest.approx(5.0 * arc(2.0) / arc(0.5))
+
+    # Stepping the width in a harder material, it is the arc that shrinks, so the width
+    # shrinks faster than the Ks ratio.
+    steel = at(material="steel-1018")
+    width = seeding.equivalent_mm(seed, stable, steel)
+    assert arc(width) == pytest.approx(arc(2.0) * 0.70 / 2.20)
+    assert width < 2.0 * 0.70 / 2.20
+
+    # A full-width slot against a side cut carries over the speed only.
+    slot = at(vary=Vary.DEPTH, radial_width_mm=diameter, depth_max_mm=5.0)
+    assert seeding.carry(seed, stable, slot) is Carry.SPEEDS
+
+    # Fitted to the map, a stable pass claims no more than it measured and chatter no less:
+    # stable rounds down to a step, chatter up; what falls outside the search says nothing.
+    env = envelope(steel)
+    seen = {c.source.id: c.observation for c in seeding.carried(seed, steel, env)}
+    assert seen[stable.id] is None or seen[stable.id].engagement_mm <= width
+    assert seen[chatter.id].engagement_mm >= seeding.equivalent_mm(seed, chatter, steel)
+    slow = dataclasses.replace(seed, passes=passes((100, 2.0, 5.0, Verdict.STABLE)))
+    assert seeding.prior(slow, setup, envelope(setup)) == []
+    assert seeding.confirmation(slow, setup, envelope(setup)) == []
+
+
+def test_a_carried_over_cut_counts_for_less_than_one_made_here(setup):
+    env = envelope(setup)
+    cell = (4000.0, 2.0)
+
+    def p_stable(*known: Observation) -> float:
+        stability = bayes.build_map(setup, env, list(known))
+        s, e = stability.speed_index(cell[0]), stability.engagement_index(cell[1])
+        return float(stability.p_stable()[s, e])
+
+    made = Observation(*cell, Verdict.STABLE)
+    same = Observation(*cell, Verdict.STABLE, weight=seeding.WEIGHT[Carry.SAME])
+    converted = Observation(*cell, Verdict.STABLE, weight=seeding.WEIGHT[Carry.CONVERTED])
+    speeds = Observation(*cell, Verdict.STABLE, weight=seeding.WEIGHT[Carry.SPEEDS])
+    assert p_stable() < p_stable(speeds) < p_stable(converted) < p_stable(same) < p_stable(made)
+    # A cut made here outweighs a carried-over one that says the opposite.
+    assert p_stable(same, Observation(*cell, Verdict.UNSTABLE)) < p_stable()
+
+    # A carried-over cut is neither the best cut to beat nor a cut already made: the planner
+    # may cut it here.
+    assert bayes.best_stable(setup, env, [same]) == []
+    assert bayes.made([same, made]) == [made]
+    assert any(rpm == cell[0] for rpm, _, _ in bayes.propose(setup, env, [same]).tests)
+    assert all(rpm != cell[0] for rpm, _, _ in bayes.propose(setup, env, [made]).tests)
+
+
+def test_what_the_confirmation_cuts_make_of_the_seed():
+    stable, chatter = Verdict.STABLE, Verdict.UNSTABLE
+    assert seeding.judged([]) is None
+    assert seeding.judged([(stable, stable), (stable, stable), (chatter, chatter)]) is (
+        SeedStatus.CONFIRMED
+    )
+    # One surprise in four stands, two do not.
+    agreed = [(stable, stable), (stable, stable), (chatter, chatter)]
+    assert seeding.judged([*agreed, (stable, chatter)]) is SeedStatus.CONFIRMED
+    assert seeding.judged([*agreed[1:], (stable, chatter), (stable, chatter)]) is (
+        SeedStatus.REJECTED
+    )
+    # Cuts nothing was predicted of decide nothing; the control alone does.
+    assert seeding.judged([(None, chatter), (None, stable)]) is SeedStatus.CONFIRMED
+    assert seeding.judged([(None, chatter), (chatter, stable)]) is SeedStatus.REJECTED
+
+
+def test_a_plan_keeps_what_was_expected_of_each_confirmation_cut(measured):
+    engine = measured
+    engine.call("create", NEW, NAME)
+    engine.call("plan", NEW, "fresh")
+    plan = Plan.load(session.round_dir(engine.root / NEW, 1) / session.PLAN_FILE)
+    assert plan.planner is PlannerKind.CONFIRM
+    expected = [p.expected for p in plan.passes if p.kind is PassKind.TEST]
+    assert Verdict.STABLE in expected and expected.count(Verdict.UNSTABLE) == 1
+    assert all(p.expected is None for p in plan.passes if p.kind is not PassKind.TEST)
+    # A plan of the earlier session, written without the field, loads as before.
+    old = Plan.load(session.round_dir(engine.root / NAME, 1) / session.PLAN_FILE)
+    assert all(p.expected is None for p in old.passes)

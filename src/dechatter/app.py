@@ -15,10 +15,11 @@ from pathlib import Path
 
 import numpy as np
 
-from . import audio, bayes, gcode, session
+from . import audio, bayes, gcode, seeding, session
 from .config import Setup, SetupSource, read_setup, setup_source
 from .detect import Thresholds, Verdict
-from .plan import PassKind, envelope, feed_mm_min, fixed_mm, lane_x_mm
+from .plan import PassKind, PlannerKind, envelope, feed_mm_min, fixed_mm, lane_x_mm
+from .seeding import SeedStatus
 from .session import PassStatus, SessionError, Stock
 
 log = logging.getLogger(__name__)
@@ -48,6 +49,10 @@ class App:
         )
         self.setup = self.source.setup
         self.env = envelope(self.setup)
+        # The session this one was started from, if any: it must be the same tool assembly.
+        self.seed = seeding.load(session_dir)
+        if self.seed is not None:
+            seeding.check(self.seed, self.setup)
         self.recording_round: int | None = None
         self.discarded_round: int | None = None  # unrun round a setup change threw away
 
@@ -74,20 +79,25 @@ class App:
         # depth, or where the session steps the depth, its width.
         level = rounds[-1].plan.fixed_mm if rounds else fixed_mm(self.setup)
         observations = session.observations(rounds, level, self.env)
-        stability = bayes.build_map(
-            session.at_level(self.setup, level), self.env, session.evidence(rounds, level, self.env)
-        )
+        at = session.at_level(self.setup, level)
+        seeded = session.carried(self.seed, self.setup, self.env, rounds, level)
+        known = [*session.evidence(rounds, level, self.env), *seeded]
+        stability = bayes.build_map(at, self.env, known)
         shown = bayes.coarse(stability)
 
         found = session.best_cuts(self.setup, self.env, rounds)
         sweep = session.swept(found, session.sweeps(rounds, self.env))
+        status = None
+        if self.seed is not None:
+            status = session.seed_status(self.seed, self.setup, self.env, rounds)
         upcoming, next_level = Next.PLAN, fixed_mm(self.setup)
+        planner = PlannerKind.CONFIRM if status is SeedStatus.UNCONFIRMED else PlannerKind.GRID
         if rounds and rounds[-1].results is None:
             upcoming, next_level = Next.RUN, level
         if rounds and rounds[-1].results is not None:
-            stage = session.next_stage(self.setup, self.env, rounds, found)
+            stage = session.next_stage(self.setup, self.env, rounds, found, self.seed)
             upcoming = Next.PLAN if stage.tests else Next.CONVERGED
-            next_level = stage.level_mm
+            next_level, planner = stage.level_mm, stage.planner
         if upcoming is Next.CONVERGED and session.to_sweep(self.setup, self.env, found, sweep):
             upcoming = Next.SWEEP
         template = setup_source(self.source.text) is SetupSource.TEMPLATE
@@ -114,6 +124,9 @@ class App:
             # Field path -> note, for the values the setup marks to confirm on the machine.
             "pending": dict(self.source.pending),
             "next": upcoming,
+            # How the round to plan next is chosen: "confirm" (a seeded session's first),
+            # "grid" or "bayes". Only meant with `next` = "plan".
+            "next_planner": planner,
             "next_level_mm": next_level,
             "level_mm": level,
             "recording_round": self.recording_round,
@@ -122,6 +135,13 @@ class App:
             "observations": [
                 {"rpm": o.rpm, "engagement_mm": o.engagement_mm, "verdict": o.verdict}
                 for o in observations
+            ],
+            # The session this one was started from, and its cuts as they carry over to the
+            # level shown: not cut here, so the widget draws them apart.
+            "seed": None if status is None else self._seed_json(at, status),
+            "seeded": [
+                {"rpm": o.rpm, "engagement_mm": o.engagement_mm, "verdict": o.verdict}
+                for o in seeded
             ],
             "best": [
                 {
@@ -141,6 +161,16 @@ class App:
             "sweep": None if sweep is None else self._sweep_json(sweep),
         }
 
+    def _seed_json(self, at: Setup, status: SeedStatus) -> dict:
+        return {
+            "source": self.seed.source,
+            "material": self.seed.setup.cut.material,
+            "passes": len(self.seed.passes),
+            "status": status,
+            # What round 1 confirms of it at the level shown: "limits" or "speeds".
+            "transfer": seeding.transfer(self.seed, at, self.env),
+        }
+
     def _round_json(self, r: session.Round) -> dict:
         results = {p.id: p for p in r.results.passes} if r.results else {}
         passes = []
@@ -155,6 +185,7 @@ class App:
                     "depth_mm": p.depth_mm,
                     "feed_mm_min": p.feed_mm_min,
                     "p_stable": p.p_stable,
+                    "expected": p.expected,
                     "chip_load_mm": p.chip_load_mm or r.plan.chip_load_mm,
                     "status": result.status if result else None,
                     "verdict": result.verdict if result else None,

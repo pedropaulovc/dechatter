@@ -58,6 +58,26 @@
       </p>
     </dialog>
 
+    <dialog id="new-dialog" aria-labelledby="new-title">
+      <form id="new-form">
+        <p id="new-title">New session: one per tool assembly and kind of cut.</p>
+        <p>
+          <label for="new-name">Name</label>
+          <input id="new-name" required pattern="[A-Za-z0-9][A-Za-z0-9._\-]{0,63}" placeholder="al-10mm-3fl" title="Letters, digits, dot, dash and underscore">
+        </p>
+        <div id="new-from-row">
+          <label for="new-from">Start from</label>
+          <select id="new-from"></select>
+          <button id="new-import" type="button">Import…</button>
+        </div>
+        <p id="new-error" class="error" hidden></p>
+        <p class="wizard-buttons">
+          <button id="new-create" class="primary" type="submit">Create</button>
+          <button id="new-cancel" type="button">Cancel</button>
+        </p>
+      </form>
+    </dialog>
+
     <section id="step" hidden></section>
 
     <section id="round" hidden>
@@ -74,7 +94,7 @@
       <h2 id="map-title">Stability map</h2>
       <canvas id="map" width="320" height="180"></canvas>
       <p class="muted legend">
-        Green is likely stable, red likely chatter. Dots are stable cuts, crosses chatter.
+        Green is likely stable, red likely chatter. Dots are stable cuts, crosses chatter.<span id="seed-legend" hidden></span>
       </p>
     </section>
 

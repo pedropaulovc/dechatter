@@ -14,7 +14,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import audio, bayes, detect, gcode
+from . import audio, bayes, detect, gcode, seeding
 from .bayes import Observation
 from .config import Setup, SetupFile, SetupSource, Vary, load_setup, setup_source
 from .detect import Thresholds, Verdict
@@ -41,6 +41,7 @@ from .plan import (
     mrr_mm3_min,
     sweep_tests,
 )
+from .seeding import Seed, SeedPass, SeedStatus
 
 log = logging.getLogger(__name__)
 
@@ -381,16 +382,91 @@ class Stage:
     expected_improvement: float
 
 
-def next_stage(setup: Setup, env: Envelope, rounds: list[Round], found: list[StableCut]) -> Stage:
+def seed_passes(rounds: list[Round]) -> tuple[SeedPass, ...]:
+    """What another session may start from: every test cut with a verdict, the detector's
+    or one set by hand, as it was made. A chip-load sweep is left out, as from the map."""
+    found = []
+    for r in rounds:
+        if r.results is None or r.plan.planner is PlannerKind.SWEEP:
+            continue
+        planned = {p.id: p for p in r.plan.passes}
+        found += [
+            SeedPass(
+                r.plan.round,
+                p.id,
+                p.rpm,
+                planned[p.id].width_mm,
+                planned[p.id].depth_mm,
+                p.verdict,
+                p.chatter_hz,
+            )
+            for p in r.results.passes
+            if p.kind is PassKind.TEST and p.verdict is not None
+        ]
+    return tuple(found)
+
+
+def seed_status(seed: Seed, setup: Setup, env: Envelope, rounds: list[Round]) -> SeedStatus:
+    """Where a seeded session stands with its seed: what the confirmation cuts that got a
+    verdict made of it (see seeding.judged); until one has, still to confirm, unless nothing
+    of the seed lies inside the search or the session went on without confirming."""
+    cuts = []
+    for r in rounds:
+        if r.results is None or r.plan.planner is not PlannerKind.CONFIRM:
+            continue
+        expected = {p.id: p.expected for p in r.plan.passes}
+        cuts += [
+            (expected[p.id], p.verdict)
+            for p in r.results.passes
+            if p.kind is PassKind.TEST and p.verdict is not None
+        ]
+    told = seeding.judged(cuts)
+    if told is not None:
+        return told
+    if any(r.plan.planner is not PlannerKind.CONFIRM for r in rounds):
+        return SeedStatus.UNUSED
+    if not seeding.confirmation(seed, setup, env):
+        return SeedStatus.UNUSED
+    return SeedStatus.UNCONFIRMED
+
+
+def carried(
+    seed: Seed | None, setup: Setup, env: Envelope, rounds: list[Round], level_mm: float
+) -> list[Observation]:
+    """What the session it was started from tells a session's map at one level, each pass at
+    its weight; nothing once its confirmation cuts rejected it, or when it is not used."""
+    if seed is None:
+        return []
+    if seed_status(seed, setup, env, rounds) in (SeedStatus.REJECTED, SeedStatus.UNUSED):
+        return []
+    return seeding.prior(seed, at_level(setup, level_mm), env)
+
+
+def next_stage(
+    setup: Setup,
+    env: Envelope,
+    rounds: list[Round],
+    found: list[StableCut],
+    seed: Seed | None = None,
+) -> Stage:
     """The first level, in session order, that still has a cut worth making; `found` is
-    the session's best cuts, which set the removal rate to beat."""
+    the session's best cuts, which set the removal rate to beat.
+
+    A session started from another (`seed`) confirms that one's prediction first, instead
+    of the grid, and cuts the grid after all once its confirmation cuts rejected it."""
     base = fixed_mm(setup)
-    if not rounds:
+    status = None if seed is None else seed_status(seed, setup, env, rounds)
+    if status is SeedStatus.UNCONFIRMED:
+        tests = seeding.confirmation(seed, setup, env)
+        return Stage(base, PlannerKind.CONFIRM, tests, 0.0)
+    gridded = any(r.plan.planner is PlannerKind.GRID for r in rounds)
+    if not rounds or (status is SeedStatus.REJECTED and not gridded):
         return Stage(base, PlannerKind.GRID, grid_tests(setup, env), 0.0)
     target = found[0].mrr_mm3_min if found else 0.0
     stage = Stage(base, PlannerKind.BAYES, [], 0.0)
     for level in levels(setup):
-        proposal = bayes.propose(at_level(setup, level), env, evidence(rounds, level, env), target)
+        known = [*evidence(rounds, level, env), *carried(seed, setup, env, rounds, level)]
+        proposal = bayes.propose(at_level(setup, level), env, known, target)
         stage = Stage(level, PlannerKind.BAYES, proposal.tests, proposal.expected_improvement)
         if stage.tests:
             return stage
@@ -760,7 +836,9 @@ def plan_next(session: Path, source: SetupFile, env: Envelope, stock: Stock) -> 
     rounds = _rounds_to_plan_after(session, source)
     if rounds:
         face_after(rounds[-1])  # the last round must have been analysed
-    stage = next_stage(source.setup, env, rounds, best_cuts(source.setup, env, rounds))
+    setup = source.setup
+    seed = seeding.load(session)
+    stage = next_stage(setup, env, rounds, best_cuts(setup, env, rounds), seed)
     if not stage.tests:
         return Planned(None, stage.expected_improvement)
     plan = _place(session, source, env, rounds, stock, stage.level_mm, stage.planner, stage.tests)
@@ -777,7 +855,7 @@ def plan_sweep(session: Path, source: SetupFile, env: Envelope, stock: Stock) ->
     if rounds:
         face_after(rounds[-1])
     found = best_cuts(source.setup, env, rounds)
-    if next_stage(source.setup, env, rounds, found).tests:
+    if next_stage(source.setup, env, rounds, found, seeding.load(session)).tests:
         raise PlanError("the stability map has not converged yet: plan the next round first")
     if not found:
         raise PlanError("no stable cut has been measured to sweep")
