@@ -95,9 +95,15 @@ class Sessions:
                 )
             seed = seeding.Seed(source, text, passes)
         target.mkdir()
-        (target / session.SETUP_FILE).write_text(text, encoding="utf-8")
+        try:
+            (target / session.SETUP_FILE).write_text(text, encoding="utf-8")
+            if seed is not None:
+                seed.save(target / seeding.SEED_FILE)
+        except OSError:
+            # Not half a session: without its seed it would pass for one started on its own.
+            shutil.rmtree(target, ignore_errors=True)
+            raise
         if seed is not None:
-            seed.save(target / seeding.SEED_FILE)
             log.info("%s: started from %d passes of %s", name, len(passes), source)
         return name
 

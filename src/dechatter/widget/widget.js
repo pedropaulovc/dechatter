@@ -839,13 +839,16 @@ function seedPlanText() {
     const cuts = seed.transfer === 'speeds'
       ? `the round-1 cuts at the speeds of ${seed.source}'s best cuts only (its limits do not carry over to this kind of cut)`
       : `a few cuts around the best cut ${seed.source} predicts here`;
-    return `Plan a short confirmation round instead of the coarse grid: ${cuts}, and one in its chatter band as a control. If they disagree with ${seed.source}, the grid follows.`;
+    return `Plan a short confirmation round instead of the coarse grid: ${cuts}, and, where ${seed.source} heard chatter within reach, one cut in its chatter band as a control. If they disagree with ${seed.source}, the grid follows.`;
   }
   if (state.next_planner !== 'grid') {
     return null;
   }
   if (seed.status === 'rejected') {
     return `The confirmation cuts disagreed with ${seed.source}: half or more of those it predicted came out the other way. Its cuts are left out of the map. Plan the coarse grid of test cuts.`;
+  }
+  if (seed.status === 'untested') {
+    return `None of the cuts ${seed.source} made inside this session's search was stable, so there is no best cut to confirm: its chatter stays on the map. Plan a coarse grid of test cuts.`;
   }
   return `Nothing ${seed.source} measured lies inside this session's search, so it is not used. Plan a coarse grid of test cuts.`;
 }

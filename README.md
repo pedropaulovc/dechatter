@@ -371,8 +371,9 @@ What carries over follows the usual stability-lobe picture:
   specific energy (`materials.py`) × depth × arc of engagement, the arc being
   `acos(1 - 2 width / diameter)`. From 6061 to 1018 a depth limit shrinks by 0.70 / 2.20; a
   width limit at a set depth shrinks faster, since it is the arc that shrinks by that ratio.
-  A stable pass is rounded down to the map's step and chatter up, and a pass outside the
-  speeds or sizes searched now says nothing.
+  A stable pass is rounded down to the map's step and chatter up. A stable pass beyond the
+  largest size searched counts as stable at that size; a pass at a speed outside the search,
+  chatter beyond the largest size, or a stable pass under the smallest step says nothing.
 - Less trust than a cut made here. A new cut is taken as misheard 5% of the time. A
   carried-over pass at this session's own depth (or, stepping the depth, width) counts as
   misheard 22% of the time; one converted from another depth or width 41%; and one cut in
@@ -390,6 +391,12 @@ Round 1 of such a session is a short confirmation instead of the grid:
 - Where only the speeds do: the grid's own widths (or depths) at the speeds of the earlier
   session's two best pockets, with nothing predicted of them, and the control at the
   heaviest of those sizes in its chatter band, expected to chatter.
+
+There is a control only where the earlier session heard chatter inside this search, within
+the power cap and away from the speeds being confirmed; without one, where only the speeds
+carried over, nothing is predicted and the seed stands. With no stable pass inside the
+search there is no best cut to confirm: the earlier chatter stays on the map and round 1 is
+the grid. With nothing inside the search at all, the earlier session is not used.
 
 The confirmation cuts are cuts of this session like any other. If half or more of the cuts
 with a prediction that got a verdict come out the other way (two of four, or the one control

@@ -408,8 +408,10 @@ def seed_passes(rounds: list[Round]) -> tuple[SeedPass, ...]:
 
 def seed_status(seed: Seed, setup: Setup, env: Envelope, rounds: list[Round]) -> SeedStatus:
     """Where a seeded session stands with its seed: what the confirmation cuts that got a
-    verdict made of it (see seeding.judged); until one has, still to confirm, unless nothing
-    of the seed lies inside the search or the session went on without confirming."""
+    verdict made of it (see seeding.judged); until one has, still to confirm, unless there
+    is nothing to confirm (no stable pass of the seed inside the search) or the session went
+    on without confirming. The seed then stays on the map untested, or where none of it
+    lies inside the search, is not used."""
     cuts = []
     for r in rounds:
         if r.results is None or r.plan.planner is not PlannerKind.CONFIRM:
@@ -423,10 +425,12 @@ def seed_status(seed: Seed, setup: Setup, env: Envelope, rounds: list[Round]) ->
     told = seeding.judged(cuts)
     if told is not None:
         return told
+    inside = seeding.prior(seed, setup, env)
+    unconfirmed = SeedStatus.UNTESTED if inside else SeedStatus.UNUSED
     if any(r.plan.planner is not PlannerKind.CONFIRM for r in rounds):
-        return SeedStatus.UNUSED
+        return unconfirmed
     if not seeding.confirmation(seed, setup, env):
-        return SeedStatus.UNUSED
+        return unconfirmed
     return SeedStatus.UNCONFIRMED
 
 

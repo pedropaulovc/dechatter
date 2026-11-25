@@ -22,8 +22,9 @@ What changed for people who use the dechatter widget and command line. The forma
   and their limits by equal specific energy × depth × arc of engagement, counted for much
   less than cuts made here; they show apart on the map and in the report ("Seeded from").
   Round 1 is then a short confirmation round (the predicted best cut, a lighter one, another
-  pocket and a control in a known chatter band; or, where only the speeds carry over, the
-  round-1 sizes at the two best speeds and the control) instead of the grid. If half or more
+  pocket and, where chatter was heard within reach, a control in a known chatter band; or,
+  where only the speeds carry over, the round-1 sizes at the two best speeds and the
+  control) instead of the grid. If half or more
   of the predicted cuts come out the other way, the earlier passes are dropped and the grid
   follows. Another machine, holder, cutter or a stickout more than 0.6 mm off is refused
   with the reason.

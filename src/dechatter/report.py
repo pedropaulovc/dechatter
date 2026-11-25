@@ -49,6 +49,8 @@ SEED_STATUS = {
     seeding.SeedStatus.REJECTED: "rejected by this session's confirmation cuts: half or more "
     "of those it predicted came out the other way, so it is left out of the map and the "
     "round-1 grid was planned after all",
+    seeding.SeedStatus.UNTESTED: "on the map untested: none of its cuts inside this "
+    "session's search was stable, so there was no best cut to confirm and round 1 was the grid",
     seeding.SeedStatus.UNUSED: "not used: none of it lies inside this session's search",
 }
 CARRY = {
@@ -238,12 +240,15 @@ def _seed_section(seed: seeding.Seed, status, setup, env, units: Units) -> str:
                 f"{setup.planner.misclassification ** seeding.WEIGHT[c.carry]:.0%}",
             ]
         )
-    relied = seeding.transfer(seed, setup, env)
-    how = (
-        "its limits, converted: round 1 confirms the predicted best cut"
-        if relied is seeding.Transfer.LIMITS
-        else "its speeds only: round 1 cuts the grid's sizes at its best speeds"
-    )
+    relies = ""
+    if status in (seeding.SeedStatus.UNCONFIRMED, seeding.SeedStatus.CONFIRMED):
+        relied = seeding.transfer(seed, setup, env)
+        how = (
+            "its limits, converted: round 1 confirms the predicted best cut"
+            if relied is seeding.Transfer.LIMITS
+            else "its speeds only: round 1 cuts the grid's sizes at its best speeds"
+        )
+        relies = f" This session relies on {how}."
     return f"""<section>
 <h2>Seeded from {_e(seed.source)}</h2>
 <p class="note">This session was started from session {_e(seed.source)}, measured on the same
@@ -252,8 +257,8 @@ milling. Its {len(seed.passes)} analysed passes are kept with this session and a
 of it. Each becomes the {STEPPED[vary].lower()} that loads the tool as much here (specific
 energy × depth × arc of engagement), and counts as a cut misheard as often as its last
 column says, against {setup.planner.misclassification:.0%} for a cut made here. A pass in the
-other direction, or a slot against a side cut, carries over as a speed in the main. This
-session relies on {how}. The seed is {_e(SEED_STATUS[status])}.</p>
+other direction, or a slot against a side cut, carries over as a speed in the main.{relies}
+The seed is {_e(SEED_STATUS[status])}.</p>
 {
         _table(
             [

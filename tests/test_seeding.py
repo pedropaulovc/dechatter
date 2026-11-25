@@ -289,6 +289,40 @@ def test_a_damaged_seed_is_refused_with_what_to_do(measured):
     assert "seed.json cannot be read (schema 99)" in status["reason"]
 
 
+def test_a_seed_that_only_chattered_stays_on_the_map_and_round_1_is_the_grid(engine):
+    engine.call("plan", NAME, "fresh")
+    cut(engine, NAME, 1, HOPELESS)
+    engine.call("create", NEW, NAME)
+    state = engine.call("state", NEW)
+    # No stable pass: no best cut to confirm. Its chatter is still what it knows of the map.
+    assert state["seed"]["status"] == "untested"
+    assert state["seeded"] and {o["verdict"] for o in state["seeded"]} == {"unstable"}
+    assert (state["next"], state["next_planner"]) == ("plan", "grid")
+    state = engine.call("plan", NEW, "fresh")
+    assert state["rounds"][0]["planner"] == "grid"
+    state = cut(engine, NEW, 1)
+    assert state["seed"]["status"] == "untested" and state["seeded"]
+    report = engine.call("report_html", NEW, "mm")
+    assert "on the map untested" in report and "This session relies on" not in report
+
+    # Nothing of it inside the search at all: not used.
+    engine.call("create", "slow", NAME)
+    state = change(engine, "slow", cut__speed_min_rpm=500, cut__speed_max_rpm=1000)
+    assert state["seed"]["status"] == "unused" and state["seeded"] == []
+
+
+def test_a_session_whose_seed_cannot_be_written_is_not_left_half_made(measured, monkeypatch):
+    engine = measured
+
+    def full(self, path):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(Seed, "save", full)
+    with pytest.raises(RuntimeError, match="disk full"):
+        engine.call("create", NEW, NAME)
+    assert NEW not in engine.call("names") and not (engine.root / NEW).exists()
+
+
 def test_the_other_direction_carries_over_the_speeds_and_hardly_the_limits(measured):
     engine = measured
     source = engine.call("state", NAME)

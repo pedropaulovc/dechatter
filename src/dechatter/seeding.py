@@ -90,6 +90,9 @@ class SeedStatus(StrEnum):
     UNCONFIRMED = "unconfirmed"  # the confirmation round is still to be cut
     CONFIRMED = "confirmed"
     REJECTED = "rejected"  # the confirmation cuts disagreed: dropped, the grid follows
+    # No stable pass of it inside the search: nothing to confirm. It stays on the map, and
+    # round 1 is the grid.
+    UNTESTED = "untested"
     UNUSED = "unused"  # nothing of it lies inside this session's search
 
 
