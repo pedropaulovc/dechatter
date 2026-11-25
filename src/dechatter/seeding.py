@@ -101,7 +101,8 @@ class SeedStatus(StrEnum):
 
 @dataclass(frozen=True)
 class SeedPass:
-    """An analysed test cut of the earlier session, as it was made there."""
+    """An analysed test cut of the earlier session, as it was made there: at the speed asked
+    for (`rpm`) and, where one was found, the speed heard in it."""
 
     round: int
     id: int
@@ -110,6 +111,12 @@ class SeedPass:
     depth_mm: float
     verdict: Verdict
     chatter_hz: float | None = None
+    heard_rpm: float | None = None
+
+    @property
+    def speed(self) -> float:
+        """Where it goes on the map: at the speed heard, else at the one asked for."""
+        return self.rpm if self.heard_rpm is None else self.heard_rpm
 
 
 @dataclass(frozen=True)
@@ -145,7 +152,7 @@ def load(session_dir: Path) -> Seed | None:
         passes = tuple(SeedPass(**{**p, "verdict": Verdict(p["verdict"])}) for p in data["passes"])
         for p in passes:
             sizes = [p.rpm, p.width_mm, p.depth_mm]
-            sizes += [] if p.chatter_hz is None else [p.chatter_hz]
+            sizes += [v for v in (p.chatter_hz, p.heard_rpm) if v is not None]
             if not all(type(v) in (int, float) and math.isfinite(v) and v > 0 for v in sizes):
                 raise ValueError(f"pass {p.round}.{p.id} holds a size that is no positive number")
         seed = Seed(str(data["source"]), str(data["setup"]), passes)
@@ -262,7 +269,7 @@ def _observe(setup: Setup, env: Envelope, p: SeedPass, size_mm: float, weight: f
     """A stable pass says the map is stable up to the step under its size, chatter that it
     chatters from the step over it: neither claims more than was measured. A stable pass
     beyond the largest size searched is stable at that size; chatter beyond it says nothing."""
-    if not env.holds_speed(p.rpm):
+    if not env.holds_speed(p.speed):
         return None
     step = engagement_step_mm(setup)
     top = round(env.engagement_top_mm / step)
@@ -270,13 +277,13 @@ def _observe(setup: Setup, env: Envelope, p: SeedPass, size_mm: float, weight: f
         steps = top if math.isinf(size_mm) else min(math.floor(size_mm / step + 1e-6), top)
         if steps < 1:
             return None
-        return Observation(p.rpm, steps * step, p.verdict, p.chatter_hz, weight=weight)
+        return Observation(p.speed, steps * step, p.verdict, p.chatter_hz, weight=weight)
     if math.isinf(size_mm):
         return None
     steps = max(1, math.ceil(size_mm / step - 1e-6))
     if steps * step > env.engagement_top_mm + ENGAGEMENT_TOLERANCE_MM:
         return None
-    return Observation(p.rpm, steps * step, p.verdict, p.chatter_hz, weight=weight)
+    return Observation(p.speed, steps * step, p.verdict, p.chatter_hz, weight=weight)
 
 
 def carried(seed: Seed, setup: Setup, env: Envelope) -> list[Carried]:
@@ -332,7 +339,10 @@ def _band(chatter: list[tuple[float, float]], taken: list[float]):
 
 
 def _snap(setup: Setup, env: Envelope, rpm: float) -> float:
-    """The test speed nearest `rpm`: on the planner's speed step, inside the search."""
+    """The test speed nearest `rpm`: the nearest speed stop, if the machine has any; else on
+    the planner's speed step, inside the search."""
+    if env.speed_stops_rpm:
+        return env.nearest_stop(rpm)
     step = setup.planner.speed_step_rpm
     return float(min(max(round(rpm / step) * step, env.speed_min_rpm), env.speed_max_rpm))
 
@@ -410,9 +420,9 @@ def _speed_tests(seed: Seed, setup: Setup, env: Envelope) -> list[tuple]:
         return [e for e in sizes if mrr_mm3_min(setup, env, rpm, e) <= env.mrr_limit_mm3_min]
 
     inside = [
-        (_snap(setup, env, p.rpm), p.width_mm * p.depth_mm, p.verdict)
+        (_snap(setup, env, p.speed), p.width_mm * p.depth_mm, p.verdict)
         for p in seed.passes
-        if env.holds_speed(p.rpm)
+        if env.holds_speed(p.speed)
     ]
     inside = [cut for cut in inside if allowed(cut[0])]
     stable = [(rpm, load) for rpm, load, verdict in inside if verdict is Verdict.STABLE]

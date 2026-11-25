@@ -387,7 +387,7 @@ def test_a_facing_set_by_hand_drops_what_was_heard_after_it(write_setup, tmp_pat
     observed = session._tests([r], lambda depth: True)
     heard_before = [p for p in r.results.passes[:start] if p.kind is PassKind.TEST and p.verdict]
     assert len(observed) == len(heard_before) > 0
-    assert [(o.rpm, o.engagement_mm) for o in observed] == [
+    assert [(o.asked, o.engagement_mm) for o in observed] == [
         (p.rpm, p.width_mm) for p in heard_before
     ]
 

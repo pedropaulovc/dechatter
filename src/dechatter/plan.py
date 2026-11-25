@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import date
 from enum import StrEnum
 from functools import cached_property
@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 
 from . import materials
-from .config import Direction, Setup, SpindleControl, Vary, full_width, slot_wall_mm
+from .config import Direction, Planner, Setup, SpindleControl, Vary, full_width, slot_wall_mm
 from .detect import Verdict
 
 # 2: dechatter 0.2.0 (planned_on, per-pass chip loads); 3: 0.6.0 (a round in legs, across
@@ -272,6 +272,9 @@ class Envelope:
     speed_low_rpm: float
     speed_high_rpm: float
     engagement_top_mm: float
+    # A manual spindle's speed stops inside the search: the only speeds a cut is planned at.
+    # Empty: any speed on the planner's step.
+    speed_stops_rpm: tuple[int, ...] = ()
 
     def holds_speed(self, rpm: float) -> bool:
         return (
@@ -288,7 +291,19 @@ class Envelope:
         )
 
     def speeds(self, step_rpm: int) -> np.ndarray:
-        return np.arange(self.speed_min_rpm, self.speed_max_rpm + 1, step_rpm, dtype=float)
+        """The speed axis of the map: the planner's steps, and the speed stops among them."""
+        stepped = np.arange(self.speed_min_rpm, self.speed_max_rpm + 1, step_rpm, dtype=float)
+        return np.union1d(stepped, np.array(self.speed_stops_rpm, dtype=float))
+
+    def settable(self, speeds: np.ndarray) -> np.ndarray:
+        """Which of `speeds` a cut may be planned at: the speed stops, if the machine has any."""
+        if not self.speed_stops_rpm:
+            return np.ones(len(speeds), dtype=bool)
+        return np.isin(speeds, np.array(self.speed_stops_rpm, dtype=float))
+
+    def nearest_stop(self, rpm: float) -> float:
+        """The speed stop nearest `rpm`; the machine must have some."""
+        return float(min(self.speed_stops_rpm, key=lambda stop: abs(stop - rpm)))
 
     def engagements(self, step_mm: float) -> np.ndarray:
         count = max(1, int(round(self.engagement_top_mm / step_mm)))
@@ -365,7 +380,7 @@ def envelope(setup: Setup) -> Envelope:
     else:
         engagement_max = setup.cut.width_max_mm or diameter / 2
     engagement_step = engagement_step_mm(setup)
-    return Envelope(
+    speed_range = Envelope(
         chip_load_mm=round(chip_load, 4),
         speed_min_rpm=speed_min,
         speed_max_rpm=speed_max,
@@ -375,6 +390,16 @@ def envelope(setup: Setup) -> Envelope:
         speed_high_rpm=speed_high,
         engagement_top_mm=engagement_step * _levels(setup, engagement_max, engagement_step),
     )
+    stops = setup.machine.speed_stops_rpm
+    if not stops:
+        return speed_range
+    inside = tuple(stop for stop in stops if speed_range.holds_speed(stop))
+    if not inside:
+        raise PlanError(
+            f"no speed stop ([machine] speed_stops_rpm) lies within the speeds searched, "
+            f"{speed_low:.0f}..{speed_high:.0f} rpm"
+        )
+    return replace(speed_range, speed_stops_rpm=inside)
 
 
 def feed_mm_min(setup: Setup, env: Envelope, rpm: float) -> float:
@@ -431,10 +456,12 @@ def travel(setup: Setup, lane: int, lanes: int, face_mm: float, width_mm: float)
 def auto_lanes(setup: Setup, env: Envelope) -> int:
     """The setup's lanes, or when it leaves them empty, as many as the stock length holds
     with every cut at least `planner.min_cut_s` long at the fastest test speed (where cuts
-    are shortest) and every lane at least twice the cutter diameter long."""
+    are shortest; with speed stops, the fastest stop) and every lane at least twice the
+    cutter diameter long."""
     if setup.stock.lanes is not None:
         return setup.stock.lanes
-    feed_mm_s = env.chip_load_mm * setup.tool.flutes * env.speed_max_rpm / 60
+    fastest = env.speed_stops_rpm[-1] if env.speed_stops_rpm else env.speed_max_rpm
+    feed_mm_s = env.chip_load_mm * setup.tool.flutes * fastest / 60
     shortest = max(2 * setup.tool.diameter_mm, feed_mm_s * setup.planner.min_cut_s)
     return max(1, int(setup.stock.length_mm / shortest + 1e-9))
 
@@ -940,11 +967,21 @@ def grid_engagements(setup: Setup, env: Envelope) -> list[float]:
     )
 
 
+def _round1_speeds(cfg: Planner, env: Envelope) -> np.ndarray:
+    """Round 1's speeds, evenly over the search: on the planner's step, or with speed stops,
+    the stops spread from the slowest to the fastest."""
+    stops = env.speed_stops_rpm
+    if stops:
+        picks = np.linspace(0, len(stops) - 1, min(cfg.round1_speeds, len(stops)))
+        return np.array([stops[i] for i in np.unique(picks.round().astype(int))], dtype=float)
+    speeds = np.linspace(env.speed_min_rpm, env.speed_max_rpm, cfg.round1_speeds)
+    return np.unique(np.round(speeds / cfg.speed_step_rpm) * cfg.speed_step_rpm)
+
+
 def grid_tests(setup: Setup, env: Envelope) -> list[tuple[float, float, None]]:
     """Round 1: coarse grid of speeds and engagements inside the power cap."""
     cfg = setup.planner
-    speeds = np.linspace(env.speed_min_rpm, env.speed_max_rpm, cfg.round1_speeds)
-    speeds = np.unique(np.round(speeds / cfg.speed_step_rpm) * cfg.speed_step_rpm)
+    speeds = _round1_speeds(cfg, env)
     deep = setup.cut.vary is Vary.DEPTH
     tests = [
         (float(rpm), float(engagement), None)

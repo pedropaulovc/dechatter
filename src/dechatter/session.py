@@ -124,6 +124,31 @@ def spindle_fit(p: PassResult) -> SpindleFit | None:
     return SpindleFit.EDGE if off >= EDGE_FRACTION * detect.RPM_TOLERANCE else SpindleFit.NEAR
 
 
+class SpeedSource(StrEnum):
+    """Where the speed a pass is mapped at comes from."""
+
+    HEARD = "heard"  # the spindle speed the detector found in the cut
+    ASKED = "asked"  # none was found reliably (no cut heard, or "speed?"): the speed asked for
+
+
+def heard_rpm(p: PassResult) -> float | None:
+    """The spindle speed found in the pass's cut, when it can be trusted: none in a pass
+    with no cut heard or not run, nor one found at the edge of the search around the speed
+    asked."""
+    if p.spindle_hz is None or p.status is PassStatus.QUIET or p.status in UNHEARD:
+        return None
+    if spindle_fit(p) is SpindleFit.EDGE:
+        return None
+    return round(p.spindle_hz * 60, 1)
+
+
+def chip_load_cut_mm(p: PassResult, feed_mm_min: float, flutes: int) -> float | None:
+    """The chip load a pass really cut at: its programmed feed (from the speed asked for)
+    over the speed heard; None where no speed was heard."""
+    heard = heard_rpm(p)
+    return None if heard is None else round(feed_mm_min / (flutes * heard), 4)
+
+
 class Facing(StrEnum):
     """What became of facing the top down mid-round, for a run that got to it: no sound
     tells (see facing_asked)."""
@@ -258,7 +283,8 @@ def load_rounds(session: Path) -> list[Round]:
 
 
 def _tests(rounds: list[Round], wanted) -> list[Observation]:
-    """Classified test cuts of the rounds whose level `wanted` accepts, as they were made.
+    """Classified test cuts of the rounds whose level `wanted` accepts, as they were made:
+    at the speed heard in each cut, else at the one asked for (see heard_rpm).
 
     A round's level is what its test cuts share: the depth, or where the session steps the
     depth, the width. A chip-load sweep is left out: its cuts are not at the session's chip
@@ -272,11 +298,18 @@ def _tests(rounds: list[Round], wanted) -> list[Observation]:
             continue
         sizes = {p.id: r.plan.engagement_mm(p) for p in r.plan.passes}
         found += [
-            Observation(p.rpm, sizes[p.id], p.verdict, p.chatter_hz)
+            _observed(p, sizes[p.id])
             for p in r.results.passes
             if p.kind is PassKind.TEST and p.verdict is not None
         ]
     return found
+
+
+def _observed(p: PassResult, engagement_mm: float) -> Observation:
+    heard = heard_rpm(p)
+    if heard is None:
+        return Observation(float(p.rpm), engagement_mm, p.verdict, p.chatter_hz)
+    return Observation(heard, engagement_mm, p.verdict, p.chatter_hz, float(p.rpm))
 
 
 def _at(level_mm: float):
@@ -286,17 +319,19 @@ def _at(level_mm: float):
 def _cuts(rounds: list[Round], env: Envelope, wanted) -> list[Observation]:
     """What the cuts tell the map searched now; its bounds may have narrowed since.
 
-    A cut at a speed outside the search, or chatter beyond the largest engagement searched,
-    says nothing about the cells searched. A stable cut that large proves every smaller one
-    stable, so it counts as stable at the largest engagement. The cuts stay in their rounds.
+    A cut asked for at a speed outside the search, or chatter beyond the largest engagement
+    searched, says nothing about the cells searched. A stable cut that large proves every
+    smaller one stable, so it counts as stable at the largest engagement. The cuts stay in
+    their rounds. The speed asked for is what the search bounded; the one heard may lie a
+    little beyond it.
     """
     found = []
     for o in _tests(rounds, wanted):
-        if env.contains(o.rpm, o.engagement_mm):
+        if env.contains(o.asked, o.engagement_mm):
             found.append(o)
             continue
-        if env.holds_speed(o.rpm) and o.verdict is Verdict.STABLE:
-            found.append(Observation(o.rpm, env.engagement_top_mm, o.verdict, o.chatter_hz))
+        if env.holds_speed(o.asked) and o.verdict is Verdict.STABLE:
+            found.append(dataclasses.replace(o, engagement_mm=env.engagement_top_mm))
     return found
 
 
@@ -314,7 +349,7 @@ def evidence(rounds: list[Round], level_mm: float, env: Envelope) -> list[Observ
     """
     above = _cuts(rounds, env, lambda level: level > level_mm + DEPTH_TOLERANCE_MM)
     carried = [
-        Observation(o.rpm, o.engagement_mm, o.verdict) for o in above if o.verdict is Verdict.STABLE
+        dataclasses.replace(o, chatter_hz=None) for o in above if o.verdict is Verdict.STABLE
     ]
     return [*observations(rounds, level_mm, env), *carried]
 
@@ -340,10 +375,15 @@ def at_level(setup: Setup, level_mm: float) -> Setup:
 
 @dataclass(frozen=True)
 class StableCut:
+    """A stable test cut: at the speed heard in it (`speed` says if it was, else the speed
+    asked for), with the speed asked for and the removal rate of the feed it was cut at."""
+
     mrr_mm3_min: float
     depth_mm: float
     rpm: float
     width_mm: float
+    asked_rpm: float
+    speed: SpeedSource
 
 
 def level_of(setup: Setup, cut: StableCut) -> float:
@@ -358,16 +398,18 @@ def engagement_of(setup: Setup, cut: StableCut) -> float:
 
 def best_cuts(setup: Setup, env: Envelope, rounds: list[Round]) -> list[StableCut]:
     """Every stable test cut of the session inside the search now, power cap included, at
-    whatever level, highest removal rate first."""
+    whatever level, highest removal rate first. Its feed is the one programmed, from the
+    speed asked for."""
     made = []
     for level in sorted({r.plan.fixed_mm for r in rounds}, reverse=True):
         at = at_level(setup, level)
         for o in _tests(rounds, _at(level)):
-            if o.verdict is not Verdict.STABLE or not env.contains(o.rpm, o.engagement_mm):
+            if o.verdict is not Verdict.STABLE or not env.contains(o.asked, o.engagement_mm):
                 continue
             width, depth = cut_size(at, o.engagement_mm)
-            rate = float(mrr_mm3_min(at, env, o.rpm, o.engagement_mm))
-            made.append(StableCut(rate, depth, o.rpm, width))
+            rate = float(mrr_mm3_min(at, env, o.asked, o.engagement_mm))
+            speed = SpeedSource.ASKED if o.asked_rpm is None else SpeedSource.HEARD
+            made.append(StableCut(rate, depth, o.rpm, width, o.asked, speed))
     found = [cut for cut in made if cut.mrr_mm3_min <= env.mrr_limit_mm3_min * (1 + 1e-9)]
     return sorted(found, key=lambda cut: -cut.mrr_mm3_min)
 
@@ -384,7 +426,8 @@ class Stage:
 
 def seed_passes(rounds: list[Round]) -> tuple[SeedPass, ...]:
     """What another session may start from: every test cut with a verdict, the detector's
-    or one set by hand, as it was made. A chip-load sweep is left out, as from the map."""
+    or one set by hand, as it was made, with the speed heard in it. A chip-load sweep is left
+    out, as from the map."""
     found = []
     for r in rounds:
         if r.results is None or r.plan.planner is PlannerKind.SWEEP:
@@ -399,6 +442,7 @@ def seed_passes(rounds: list[Round]) -> tuple[SeedPass, ...]:
                 planned[p.id].depth_mm,
                 p.verdict,
                 p.chatter_hz,
+                heard_rpm(p),
             )
             for p in r.results.passes
             if p.kind is PassKind.TEST and p.verdict is not None
@@ -885,9 +929,18 @@ def plan_sweep(session: Path, source: SetupFile, env: Envelope, stock: Stock) ->
     return _place(session, source, env, rounds, stock, level, PlannerKind.SWEEP, tests)
 
 
+def ask_rpm(env: Envelope, cut: StableCut) -> float:
+    """The speed to ask for to make a stable cut again: the one it was asked for, which ran
+    as heard. On a machine with speed stops that has dropped that speed from its stops
+    since, the stop nearest the speed heard."""
+    if not env.speed_stops_rpm or round(cut.asked_rpm) in env.speed_stops_rpm:
+        return cut.asked_rpm
+    return env.nearest_stop(cut.rpm)
+
+
 def _sweep_of(setup: Setup, env: Envelope, best: StableCut) -> list:
     at = at_level(setup, level_of(setup, best))
-    return sweep_tests(at, env, best.rpm, engagement_of(setup, best))
+    return sweep_tests(at, env, ask_rpm(env, best), engagement_of(setup, best))
 
 
 def to_sweep(
@@ -902,7 +955,7 @@ def to_sweep(
 
 @dataclass(frozen=True)
 class Sweep:
-    """What a chip-load sweep found at one cut."""
+    """What a chip-load sweep found at one cut, asked for at `rpm`."""
 
     round: int
     rpm: float
@@ -916,6 +969,8 @@ class Sweep:
     mrr_mm3_min: float | None
     # Every chip load tried stayed stable: the limit lies above them, not at the last one.
     untopped: bool = False
+    # The spindle speed heard in that pass, else in the first; None where neither was heard.
+    heard_rpm: float | None = None
 
 
 def sweeps(rounds: list[Round], env: Envelope) -> list[Sweep]:
@@ -929,6 +984,7 @@ def sweeps(rounds: list[Round], env: Envelope) -> list[Sweep]:
     for r in rounds:
         if r.plan.planner is not PlannerKind.SWEEP or r.results is None:
             continue
+        results = {p.id: p for p in r.results.passes}
         verdicts = {p.id: p.verdict for p in r.results.passes}
         tests = [p for p in r.plan.passes if p.kind is PassKind.TEST]
         stable, capped = None, False
@@ -942,6 +998,10 @@ def sweeps(rounds: list[Round], env: Envelope) -> list[Sweep]:
         if stable is None and capped:
             continue
         first = tests[0]
+        heard = [
+            heard_rpm(results[p.id]) for p in (stable, first) if p is not None and p.id in results
+        ]
+        heard = [rpm for rpm in heard if rpm is not None]
         found.append(
             Sweep(
                 r.plan.round,
@@ -953,20 +1013,21 @@ def sweeps(rounds: list[Round], env: Envelope) -> list[Sweep]:
                 None if stable is None else stable.feed_mm_min,
                 None if stable is None else stable.depth_mm * stable.width_mm * stable.feed_mm_min,
                 untopped=stable is not None and stable is tests[-1],
+                heard_rpm=heard[0] if heard else None,
             )
         )
     return found
 
 
-def swept(found: list[StableCut], done: list[Sweep]) -> Sweep | None:
+def swept(env: Envelope, found: list[StableCut], done: list[Sweep]) -> Sweep | None:
     """The sweep of the best cut as it stands (`found`, from best_cuts), if `done` (from
-    sweeps) holds one."""
+    sweeps) holds one: at the speed the cut was asked for, or would be asked for now."""
     if not found:
         return None
     best = found[0]
     for sweep in reversed(done):
         same = (
-            round(sweep.rpm) == round(best.rpm)
+            round(sweep.rpm) in (round(best.asked_rpm), round(ask_rpm(env, best)))
             and abs(sweep.width_mm - best.width_mm) <= 1e-6
             and abs(sweep.depth_mm - best.depth_mm) <= DEPTH_TOLERANCE_MM
         )
@@ -986,6 +1047,7 @@ FREE_AFTER_CUT = frozenset(
         "machine.min_rpm",
         "machine.max_rpm",
         "machine.spindle_power_hp",
+        "machine.speed_stops_rpm",
         "cut.width_max_mm",
         "cut.depth_max_mm",
         "cut.speed_min_rpm",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 
 import numpy as np
@@ -8,10 +9,18 @@ import synth
 
 from dechatter import audio, bayes, session
 from dechatter.bayes import Observation
-from dechatter.config import TEMPLATE, read_setup
+from dechatter.config import TEMPLATE, SpindleControl, read_setup
 from dechatter.detect import Thresholds, Verdict
-from dechatter.plan import PlanError, PlannerKind, envelope, grid_tests, mrr_mm3_min
-from dechatter.session import SessionError, Stock
+from dechatter.plan import (
+    PassKind,
+    PlanError,
+    PlannerKind,
+    assemble,
+    envelope,
+    grid_tests,
+    mrr_mm3_min,
+)
+from dechatter.session import PassResult, PassStatus, SessionError, SpeedSource, Stock
 
 MACHINE = synth.Machine()
 
@@ -110,6 +119,93 @@ def test_a_depth_is_left_once_no_likely_cut_would_beat_what_another_depth_reache
     assert bayes.propose(setup, env, here, out_of_reach).tests == []
 
 
+def test_each_cut_goes_on_the_map_at_the_speed_heard_in_it_else_at_the_one_asked(setup, tmp_path):
+    env = envelope(setup)
+    plan = assemble(setup, env, 1, PlannerKind.GRID, grid_tests(setup, env))
+    tests = [p for p in plan.passes if p.kind is PassKind.TEST]
+    heard, edge, quiet, unheard = tests[:4]
+    # Wider than `heard` at its speed: with it stable below, the chatter sets sweet spots.
+    chatter = next(p for p in tests if p.rpm == heard.rpm and p.width_mm > heard.width_mm)
+    off = {heard.id: 1.03, edge.id: 1.048, quiet.id: 1.02, chatter.id: 1.03}
+    passes = []
+    for p in plan.passes:
+        if p.kind is not PassKind.TEST:
+            passes.append(PassResult(p.id, p.kind, p.rpm, p.width_mm, PassStatus.ANALYSED))
+            continue
+        spindle = None if p is unheard else p.rpm * off.get(p.id, 0.98) / 60
+        verdict = Verdict.UNSTABLE if p is chatter else Verdict.STABLE
+        status = PassStatus.QUIET if p is quiet else PassStatus.ANALYSED
+        passes.append(
+            PassResult(
+                p.id,
+                p.kind,
+                p.rpm,
+                p.width_mm,
+                status,
+                verdict=verdict,
+                chatter_hz=900.0 if p is chatter else None,
+                spindle_hz=spindle,
+                detected=verdict,
+            )
+        )
+    results = session.Results(1, session.RECORDING_FILE, Thresholds(), tuple(passes))
+    r = session.Round(tmp_path, plan, results)
+
+    # Heard: at the speed found. At the edge of the search ("speed?"), with no cut heard, or
+    # with no speed found at all: at the speed asked for.
+    asked = {edge.id, quiet.id, unheard.id}
+    expected = [
+        Observation(
+            float(p.rpm) if p.id in asked else round(p.rpm * off.get(p.id, 0.98) / 60 * 60, 1),
+            p.width_mm,
+            Verdict.UNSTABLE if p is chatter else Verdict.STABLE,
+            900.0 if p is chatter else None,
+            None if p.id in asked else float(p.rpm),
+        )
+        for p in tests
+    ]
+    seen = session.observations([r], plan.fixed_mm, env)
+    assert seen == expected
+    sigma = setup.planner.speed_sigma_fraction
+    assert bayes.chatter_modes(seen, sigma) == [(900.0, heard.width_mm)]
+    # The map, and the sweet spots the chatter predicts, are those of cuts at those speeds.
+    plain = [Observation(o.rpm, o.engagement_mm, o.verdict, o.chatter_hz) for o in expected]
+    assert np.array_equal(
+        bayes.build_map(setup, env, seen).p_stable(), bayes.build_map(setup, env, plain).p_stable()
+    )
+
+    best = session.best_cuts(setup, env, [r])
+    found = next(c for c in best if c.width_mm == heard.width_mm and c.asked_rpm == heard.rpm)
+    assert (found.rpm, found.speed) == (expected[0].rpm, SpeedSource.HEARD)
+    # Its removal rate is that of the feed programmed from the speed asked for.
+    assert found.mrr_mm3_min == pytest.approx(mrr_mm3_min(setup, env, heard.rpm, heard.width_mm))
+    guessed = next(c for c in best if c.width_mm == unheard.width_mm and c.asked_rpm == unheard.rpm)
+    assert (guessed.rpm, guessed.speed) == (unheard.rpm, SpeedSource.ASKED)
+    # The chip load the cut really took, at the speed heard.
+    taken = session.chip_load_cut_mm(passes[plan.passes.index(heard)], heard.feed_mm_min, 3)
+    assert taken == pytest.approx(env.chip_load_mm / 1.03, rel=1e-3)
+    assert session.chip_load_cut_mm(passes[plan.passes.index(unheard)], 100.0, 3) is None
+
+
+def test_a_stable_cut_is_asked_for_again_at_its_stop_even_heard_nearer_the_next(setup):
+    stops = (1513, 1839, 1950, 2275, 2380, 2482, 2590, 2692, 2795)
+    manual = dataclasses.replace(
+        setup, machine=dataclasses.replace(setup.machine, spindle=SpindleControl.MANUAL)
+    )
+
+    def env_with(stops):
+        machine = dataclasses.replace(manual.machine, speed_stops_rpm=stops)
+        return envelope(dataclasses.replace(manual, machine=machine))
+
+    # Asked at 2795 and heard 2% slow, nearer 2692: the dial is set to 2795 again.
+    cut = session.StableCut(1000.0, 5.0, 2739.1, 1.0, 2795.0, SpeedSource.HEARD)
+    assert session.ask_rpm(env_with(stops), cut) == 2795.0
+    # Stops edited since, without 2795: the stop nearest the speed heard.
+    assert session.ask_rpm(env_with(stops[:-1]), cut) == 2692.0
+    # Without stops: the speed asked for, which ran as heard.
+    assert session.ask_rpm(env_with(()), cut) == 2795.0
+
+
 def true_optimum(setup, env) -> float:
     flutes = setup.tool.flutes
     return max(
@@ -161,7 +257,7 @@ def test_session_converges_near_the_true_optimum(tmp_path, setup):
     rounds = session.load_rounds(work)
     cuts = session.observations(rounds, setup.cut.axial_depth_mm, env)
     for obs in cuts:
-        truth = MACHINE.chatters(obs.rpm, obs.engagement_mm, setup.tool.flutes)
+        truth = MACHINE.chatters(obs.asked, obs.engagement_mm, setup.tool.flutes)
         assert (obs.verdict is Verdict.UNSTABLE) == truth
     best_mrr, _ = bayes.best_stable(setup, env, cuts)[0]
     assert best_mrr >= 0.85 * true_optimum(setup, env)
@@ -169,7 +265,8 @@ def test_session_converges_near_the_true_optimum(tmp_path, setup):
 
     # Converged: a chip-load sweep of the best cut is offered, planned, and analysed.
     found = session.best_cuts(setup, env, rounds)
-    assert session.to_sweep(setup, env, found, session.swept(found, session.sweeps(rounds, env)))
+    done = session.swept(env, found, session.sweeps(rounds, env))
+    assert session.to_sweep(setup, env, found, done)
     session.plan_sweep(work, source, env, Stock.FRESH)
     sweep = session.load_rounds(work)[-1]
     assert sweep.plan.planner is PlannerKind.SWEEP

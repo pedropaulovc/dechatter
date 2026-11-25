@@ -30,7 +30,9 @@ class Machine:
     depth_power: float = 1.5
 
     def limit_mm(self, rpm: float, flutes: int, depth_mm: float | None = None) -> float:
-        lobes = 60 * self.natural_hz / (flutes * rpm)
+        """The widest stable cut at a commanded `rpm`: the machine runs it `rpm_error` off,
+        and its lobes follow the speed it really runs at."""
+        lobes = 60 * self.natural_hz / (flutes * rpm * (1 + self.rpm_error))
         offset = abs(lobes - round(lobes))
         limit = self.floor_mm * (
             1 + self.pocket_gain * np.exp(-0.5 * (offset / self.pocket_width) ** 2)

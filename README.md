@@ -146,8 +146,8 @@ a page the microphone on those. Then, in the widget:
    machine's weight and spindle control, the tool, the work material, depth, direction and
    chip load, the stock length and lanes, the dwell and the coolant), since the stability map belongs
    to the setup it was measured with: start a new session instead. What only bounds the
-   search may still change (the machine's speed range and power, the cut's speed and width
-   limits and shallower depths), as may the machine's name, the safe height, clearance,
+   search may still change (the machine's speed range, speed stops and power, the cut's speed
+   and width limits and shallower depths), as may the machine's name, the safe height, clearance,
    plunge feed, truing width, stock width and the planner's settings. Cuts outside narrowed
    bounds stay in their round but are not recommended, nor are cuts over a lowered power
    cap. On the map, a stable cut wider than a narrowed width limit counts as stable at the
@@ -234,9 +234,30 @@ and shows the speed to set: set it and press Continue. Cuts are grouped by speed
 speed: five in round 1. The first stop is where you start the spindle, and you stop it yourself
 after the round ends.
 
-Set the speed within 5% of what is asked; the detector finds the actual speed inside that
-range. The stability map is built on the requested speeds, so a dial that reads off by a
-constant amount shifts the whole map by that amount.
+Set the speed within 5% of what is asked; the detector finds the speed the spindle really ran
+at inside that range. Each cut goes on the stability map, into the best cuts and into the
+report at that speed, with the speed asked for beside it, so a dial that reads off, or one
+that comes to rest a little away from the speed asked, does not move the map. A cut whose
+speed was not found (no cut heard, or "speed?") goes on the map at the speed asked for, and
+the widget and the report say so. Feeds are the ones programmed from the speed asked for;
+the report also gives the chip load each cut really took at the speed heard. A session started
+from an earlier one (see below) carries that one's cuts over at the speeds heard in them, by
+the same rule.
+
+If the speed control only comes to rest on certain speeds, as a variable-speed dial with
+detents does, list them in the wizard's Speeds the spindle rests on
+(`speed_stops_rpm = [1513, 1839, 1950, 2275, 2380, 2482, 2590, 2692, 2795]` under
+`[machine]`: whole rpm, slowest first, between `min_rpm` and `max_rpm`, as the tachometer
+shows them). Every round then plans its cuts only at the stops inside the session's speed
+limits: round 1 spreads its speeds over them from the slowest to the fastest (a session
+started from an earlier one confirms it at the stops nearest that one's speeds), and later
+rounds choose among them. Each stop of the round names the speed stop to set ("speed stop 5
+of 9, counting from the slowest"). The map still covers the speeds between the stops, from
+the cuts made near them. The stops only bound the search, so they may change after a round
+was cut. With `spindle = "program"` they are refused: a program sets any speed it asks for.
+The best cuts and the chip-load sweep ask for a cut again at the speed it was asked for; only
+if that speed has since been dropped from the stops, at the stop nearest the speed it was
+heard at.
 
 Round 1 is a coarse grid of speeds and widths (or depths, in a session that steps the
 depth). Later rounds are chosen from what was measured. A program that steps the width
@@ -279,8 +300,11 @@ on, and a verdict can be set by hand.
 As the widget runs the round, it records where every cut and every dwell is, and those
 windows are used as they are: the cut from where the cutter meets the stock to where it
 leaves it, without any time the machine was held, and the dwell before it as the air
-reference. A pass the run never reached is "not run", and a pass whose spindle speed was found
-at the edge of its ±5% search is flagged ("speed?" in the widget). A pass the run cut, but where nothing
+reference. Every pass goes on the map, the best cuts and the report at the spindle speed found
+in it, with the speed asked for beside it (see [Manual spindle](#manual-spindle)). A pass the
+run never reached is "not run", and a pass whose spindle speed was found at the edge of its
+±5% search is flagged ("speed?" in the widget) and goes on the map at the speed asked for, not
+the one found. A pass the run cut, but where nothing
 could be analysed (its window silent or too short, as when the recording stopped first), is
 "no cut heard", with no verdict; its face still counts as moved on. A run that ended before
 its first cut is not analysed, and the round stays planned to run again. Facing the top
@@ -339,7 +363,9 @@ Three things differ from the paper, which tests one cut at a time under closed-l
   distance in speed (1.5% of the speed, one standard deviation).
 - Chatter frequency is used. A chatter tone at `f` Hz predicts stable pockets where tooth
   passing divides it, at `60 f / (flutes k)` rpm. Those speeds get partial credit for the
-  width that was stable where the chatter was heard, so the planner tries them.
+  width that was stable where the chatter was heard, so the planner tries them. Every cut is
+  on the map at the speed heard in it, as the pockets are: both follow from the true tooth
+  passing, so a spindle that ran off the speed asked does not shift one against the other.
 
 The stock runs out before the search does on small blocks. When it does, mount fresh stock,
 reset the face to `Y0` and plan on the "fresh block, face at Y0" in the widget.

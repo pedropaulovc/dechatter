@@ -23,7 +23,8 @@ const INFO = {
   'machine.min_rpm': SPEED_RANGE,
   'machine.spindle_power_hp': `From the motor plate. It only sets the power cap, which leaves out cuts that would remove metal faster than the spindle can drive. ${FREE}`,
   'machine.weight_kg': `A lighter machine starts with a lighter chip load: under 150 kg ×0.5, under 400 kg ×0.7, under 1500 kg ×0.85. ${FIXED} It sets the default chip load.`,
-  'machine.spindle': `"By hand": the round stops before each new speed and the widget shows the rpm to set. The detector allows for the spindle being up to 5% off. Cuts are grouped by speed, so there is one stop per speed. ${FIXED}`,
+  'machine.spindle': `"By hand": the round stops before each new speed and the widget shows the rpm to set. The detector allows for the spindle being up to 5% off, and each cut goes on the map at the speed it heard. Cuts are grouped by speed, so there is one stop per speed. ${FIXED}`,
+  'machine.speed_stops_rpm': `For a speed control that only comes to rest on certain speeds, like a variable-speed dial with detents: list them, slowest first, as your tachometer shows them. Every cut is then planned at one of these speeds, and the widget names the stop to set. Empty: any speed in 10 rpm steps. They only bound the search, so they may change after cuts.`,
   'tool.diameter_mm': `Sets the default chip load and the widest cut tried (half the diameter), and with the cutter material the top speed. ${FIXED}`,
   'tool.flutes': `Feed = chip load × flutes × rpm, and the detector listens for the tooth-passing frequency. ${FIXED}`,
   'tool.stickout_mm': 'From the holder face to the cutter tip. Chatter depends strongly on it, so the results apply only at this stickout. Change it and start a new session.',
@@ -95,6 +96,8 @@ export function info(id, label, text) {
 // The fields that go with what the session steps.
 const STEPS_WIDTH = { 'cut.vary': 'width' };
 const STEPS_DEPTH = { 'cut.vary': 'depth' };
+// The fields that go with a spindle set by hand.
+const MANUAL_SPINDLE = { 'machine.spindle': 'manual' };
 
 export const STEPS = [
   {
@@ -111,8 +114,10 @@ export const STEPS = [
         label: 'Spindle speed is set by',
         type: 'choice',
         options: [['program', 'the program (M3 S)'], ['manual', 'me, by hand']],
+        switches: true,
         note: 'By hand, the program stops before each speed and tells you what to set.',
       },
+      { at: 'machine.speed_stops_rpm', when: MANUAL_SPINDLE, label: 'Speeds the spindle rests on', type: 'list', unit: 'rpm', optional: true, placeholder: 'any speed', note: 'Separated by commas, slowest first. Leave empty if any speed can be set.' },
     ],
   },
   {
@@ -263,7 +268,8 @@ function placeholderFor(field, units, setup) {
   const [section, key] = field.at.split('.');
   const computed = setup.computed?.[section]?.[key];
   const fallback = computed ?? (has(setup.defaults[section], key) ? setup.defaults[section][key] : null);
-  return fallback === null || fallback === '' ? (field.placeholder ?? '') : shown(field, fallback, units);
+  const empty = fallback === null || fallback === '' || (Array.isArray(fallback) && fallback.length === 0);
+  return empty ? (field.placeholder ?? '') : shown(field, fallback, units);
 }
 
 function row(field, values, units, setup) {

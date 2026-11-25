@@ -455,11 +455,12 @@ def test_a_slotting_session_converges_on_the_depth_limit(tmp_path):
 
     cuts = session.observations(rounds, 12.7, env)
     for obs in cuts:
-        truth = MACHINE.chatters(obs.rpm, 12.7, 3, obs.engagement_mm)
-        assert (obs.verdict is Verdict.UNSTABLE) == truth or MACHINE.masked(obs.rpm), obs
+        # The simulated machine's truth is at the speed asked for; the map is at the one heard.
+        truth = MACHINE.chatters(obs.asked, 12.7, 3, obs.engagement_mm)
+        assert (obs.verdict is Verdict.UNSTABLE) == truth or MACHINE.masked(obs.asked), obs
     assert any(obs.verdict is Verdict.UNSTABLE for obs in cuts)
     best = session.best_cuts(setup, env, rounds)[0]
-    assert best.width_mm == 12.7 and not MACHINE.chatters(best.rpm, 12.7, 3, best.depth_mm)
+    assert best.width_mm == 12.7 and not MACHINE.chatters(best.asked_rpm, 12.7, 3, best.depth_mm)
     optimum = max(
         mrr_mm3_min(setup, env, rpm, min(MACHINE.depth_limit_mm(rpm, 3, 12.7), 0.75))
         for rpm in env.speeds(10)
@@ -537,10 +538,10 @@ def test_a_narrower_width_starts_from_the_depths_that_were_stable_at_the_wider_o
     assert order == sorted(order, reverse=True) and set(order) == {4.0, 2.0}
     wide = session.observations(rounds, 4.0, env)
     narrow = session.observations(rounds, 2.0, env)
-    stable_wide = {(o.rpm, o.engagement_mm) for o in wide if o.verdict is Verdict.STABLE}
+    stable_wide = {(o.asked, o.engagement_mm) for o in wide if o.verdict is Verdict.STABLE}
     # What was stable 4 mm wide is known to be stable 2 mm wide: it is not cut again, it
     # counts as evidence there, and the search goes on above it.
-    assert not stable_wide & {(o.rpm, o.engagement_mm) for o in narrow}
+    assert not stable_wide & {(o.asked, o.engagement_mm) for o in narrow}
     carried = session.evidence(rounds, 2.0, env)
     assert len(carried) == len(narrow) + len(stable_wide)
     # Below this depth a 4 mm cut is stable at any speed on this machine.
@@ -554,7 +555,7 @@ def test_a_narrower_width_starts_from_the_depths_that_were_stable_at_the_wider_o
     assert [cut.mrr_mm3_min for cut in best] == sorted((c.mrr_mm3_min for c in best), reverse=True)
     narrowest = next(cut for cut in best if cut.width_mm == 2.0)
     assert narrowest.mrr_mm3_min == pytest.approx(
-        mrr_mm3_min(session.at_level(setup, 2.0), env, narrowest.rpm, narrowest.depth_mm)
+        mrr_mm3_min(session.at_level(setup, 2.0), env, narrowest.asked_rpm, narrowest.depth_mm)
     )
     for r in rounds:
         for p in r.results.passes:

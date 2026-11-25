@@ -995,7 +995,8 @@ function updateRunView(view) {
   view.doing.textContent = `${doing}${where} (block ${Math.max((stepper.index ?? 0) + 1, 1)} of ${stepper.total || '…'}).`;
   const asking = stepper.phase === PHASE.SET_SPINDLE;
   view.ask.hidden = !asking;
-  view.askText.textContent = asking ? `Set the spindle to ${block.rpm} rpm, then ` : '';
+  const stop = block?.stop ? ` (speed stop ${block.stop} of ${block.stops}, counting from the slowest)` : '';
+  view.askText.textContent = asking ? `Set the spindle to ${block.rpm} rpm${stop}, then ` : '';
   view.hold.hidden = stepper.phase !== PHASE.MOVING;
   view.resume.hidden = stepper.phase !== PHASE.HELD;
   // Nothing moves before the first block: a double-clicked Start must not land on Stop.
@@ -1047,7 +1048,7 @@ function renderStep() {
     const stock = stockSelect();
     step.append(
       el('p', {}, 'Converged: no further cut is expected to add removal rate. The best stable cuts are below.'),
-      el('p', {}, `One more round can find how hard the best cut (${best.rpm} rpm, ${length(best.width_mm, units())} wide, ${length(best.depth_mm, units())} deep) can be pushed: the same cut at rising chip loads, lightest first. Its cuts do not change the map.`),
+      el('p', {}, `One more round can find how hard the best cut (${bestSpeed(best)}, ${length(best.width_mm, units())} wide, ${length(best.depth_mm, units())} deep) can be pushed: the same cut at rising chip loads, asked for at ${best.ask_rpm} rpm, lightest first. Its cuts do not change the map.`),
       el('p', {}, button('Plan the chip-load sweep', async () => {
         await act('plan_sweep', stockChoice);
         stockChoice = 'same';
@@ -1213,7 +1214,7 @@ function renderRound() {
       ...(starts.has(p.id) ? [legRow(round, starts.get(p.id))] : []),
       el('tr', { className: p.kind === 'test' ? '' : 'prep' },
         el('td', {}, String(p.id)),
-        el('td', {}, String(p.rpm)),
+        speedCell(round, p),
         el('td', {}, length(deep ? p.depth_mm : p.width_mm, units())),
         el('td', {}, feed(p.feed_mm_min, units())),
         el('td', {}, p.expected === 'unstable' ? 'control' : p.p_stable === null ? '' : p.p_stable.toFixed(2)),
@@ -1251,7 +1252,9 @@ function renderMap() {
     });
   });
 
-  const x = (rpm) => pad.left + ((rpm - speeds[0]) / (speeds.at(-1) - speeds[0])) * (w - cellW) + cellW / 2;
+  // A spindle that ran off the speed asked can be heard just beyond the speeds searched: its
+  // cut is drawn at the edge.
+  const x = (rpm) => pad.left + ((Math.min(Math.max(rpm, speeds[0]), speeds.at(-1)) - speeds[0]) / (speeds.at(-1) - speeds[0])) * (w - cellW) + cellW / 2;
   const y = (size) => pad.top + h - ((size - engagements[0]) / (engagements.at(-1) - engagements[0])) * (h - cellH) - cellH / 2;
   // Carried over from the session this one was started from: not cut here, so drawn apart,
   // as small squares (stable) and plus signs (chatter).
@@ -1302,13 +1305,41 @@ function renderMap() {
   ctx.fillText(length(engagements[0], units()), pad.left - 3, pad.top + h);
 }
 
+// A pass's speed: the one asked for, then the one heard in its cut where they differ. A test
+// cut with a verdict goes on the map at the speed heard; where none was heard reliably, at
+// the one asked for. A chip-load sweep's cuts stay off the map.
+function speedCell(round, pass) {
+  const heard = pass.heard_rpm === null ? null : Math.round(pass.heard_rpm);
+  const mapped = pass.kind === 'test' && pass.verdict !== null && round.planner !== 'sweep';
+  if (heard !== null && heard !== pass.rpm) {
+    const use = mapped ? ': the map and the results use the speed heard' : '';
+    return el('td', { title: `Asked for ${pass.rpm} rpm, heard ${heard} rpm in the cut${use}.` }, `${pass.rpm} → ${heard}`);
+  }
+  if (heard === null && mapped) {
+    return el('td', { title: 'No spindle speed heard reliably in this cut: the map uses the speed asked for.' }, String(pass.rpm));
+  }
+  return el('td', {}, String(pass.rpm));
+}
+
+// A stable cut's speed as heard, with the speed asked for beside it where they differ, and
+// the speed to set where that is another (speed stops changed since the cut).
+function bestSpeed(best) {
+  const heard = Math.round(best.rpm);
+  const asked = Math.round(best.asked_rpm);
+  const set = Math.round(best.ask_rpm) === asked ? '' : `; set ${Math.round(best.ask_rpm)}`;
+  if (best.speed !== 'heard') {
+    return `${asked} rpm asked, none heard${set}`;
+  }
+  return (heard === asked ? `${heard} rpm` : `${heard} rpm heard, asked ${asked}`) + set;
+}
+
 function renderBest() {
   const best = editing === null ? (state?.best ?? []) : [];
   $('best-section').hidden = best.length === 0;
   $('best').replaceChildren(
     ...best.map((b) =>
       el('tr', {},
-        el('td', {}, String(b.rpm)),
+        el('td', {}, bestSpeed(b)),
         el('td', {}, length(b.width_mm, units())),
         el('td', {}, length(b.depth_mm, units())),
         el('td', {}, feed(b.feed_mm_min, units())),
@@ -1322,7 +1353,8 @@ function renderBest() {
     return;
   }
   const u = units();
-  const where = `at ${sweep.rpm} rpm, ${length(sweep.width_mm, u)} wide and ${length(sweep.depth_mm, u)} deep`;
+  const heard = sweep.heard_rpm === null ? '' : ` (heard ${Math.round(sweep.heard_rpm)})`;
+  const where = `at ${sweep.rpm} rpm${heard}, ${length(sweep.width_mm, u)} wide and ${length(sweep.depth_mm, u)} deep`;
   $('sweep-result').textContent = sweep.chip_load_mm === null
     ? `Chip-load sweep: ${where}, even its lightest pass chattered. Keep the session's ${chipLoad(sweep.session_chip_load_mm, u, { mmToo: true })} per tooth.`
     : `Chip-load sweep: ${where}, the cut stayed stable ${sweep.untopped ? 'at every chip load tried, up to' : 'up to'} ${chipLoad(sweep.chip_load_mm, u, { mmToo: true })} per tooth (the session used ${chipLoad(sweep.session_chip_load_mm, u)}): feed ${feed(sweep.feed_mm_min, u, { mmToo: true })}, ${rate(sweep.mrr_cm3_min, u, { mmToo: true })}.${sweep.untopped ? ' None chattered, so its limit lies higher.' : ''}`;
