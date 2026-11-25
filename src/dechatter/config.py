@@ -244,15 +244,21 @@ def _pending(entries: object, setup: Setup) -> Pending:
     saying how to check it."""
     if not isinstance(entries, dict):
         raise ConfigError(f'[{PENDING}] must be a table of "section.field" = "note"')
-    flat = {}
+    if not entries:
+        return ()
+    flat = []
     for at, note in entries.items():
-        # Unquoted, stock.height_mm is a TOML dotted key: a table of the section's fields.
-        if isinstance(note, dict):
-            flat.update({f"{at}.{key}": value for key, value in note.items()})
+        # Unquoted, stock.height_mm is a TOML dotted key: a table of the section's fields. An
+        # empty table stays as it is, to be refused below.
+        if isinstance(note, dict) and note:
+            flat.extend((f"{at}.{key}", value) for key, value in note.items())
         else:
-            flat[at] = note
-    shown = _shown_fields()
-    for at, note in flat.items():
+            flat.append((at, note))
+    shown, seen = _shown_fields(), set()
+    for at, note in flat:
+        if at in seen:
+            raise ConfigError(f'[{PENDING}] "{at}" is listed twice')
+        seen.add(at)
         if at not in shown:
             raise ConfigError(f'[{PENDING}] "{at}" is not a setup field the wizard shows')
         wanted = ONLY_WITH.get(at)
@@ -263,7 +269,7 @@ def _pending(entries: object, setup: Setup) -> Pending:
             )
         if not isinstance(note, str) or not note.strip():
             raise ConfigError(f'[{PENDING}] "{at}" needs a note in quotes: how to check it')
-    return tuple(flat.items())
+    return tuple(flat)
 
 
 def _parse(text: str, origin: str) -> tuple[Setup, Pending]:

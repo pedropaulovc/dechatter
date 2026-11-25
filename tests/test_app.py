@@ -326,6 +326,9 @@ def test_a_prepared_session_plans_only_once_its_pending_values_are_confirmed(eng
         ('"cut.radial_width_mm" = "hidden when the width is stepped"', 'vary = "width"'),
         ('"stock.height_mm" = 25', "needs a note"),
         ('"stock.height_mm" = "  "', "needs a note"),
+        ('"stock.height_mm" = {}', "needs a note"),
+        ("[pending.typo]", "not a setup field"),
+        ('"stock.height_mm" = "calipers"\nstock.height_mm = "a rule"', "listed twice"),
     ],
 )
 def test_pending_entries_must_name_fields_the_wizard_shows(engine, entry, reason):
@@ -345,6 +348,7 @@ def test_pending_is_a_table_and_takes_unquoted_dotted_keys_too(engine):
 def test_the_fields_pending_refuses_by_vary_are_those_the_wizard_hides():
     wizard = (Path(dechatter.__file__).parent / "widget" / "wizard.js").read_text(encoding="utf-8")
     hidden = re.findall(r"at: '([^']+)', when: STEPS_(WIDTH|DEPTH)", wizard)
+    assert len(hidden) == wizard.count("when:"), "a field's `when` this test does not read"
     assert {at: Vary(when.lower()) for at, when in hidden} == ONLY_WITH
 
 
