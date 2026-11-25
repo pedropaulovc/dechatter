@@ -44,6 +44,9 @@ log = logging.getLogger(__name__)
 class SetupLoad(StrEnum):
     LOADS = "loads"
     REFUSED = "refused"  # from dechatter 0.1.x, or damaged: only Delete applies
+    # Its seed keeps it from loading (damaged, or measured another assembly) and no round is
+    # planned: removing the seed (unseed) lets it load.
+    SEED_REFUSED = "seed_refused"
 
 
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
@@ -240,14 +243,13 @@ class Sessions:
         The session it loads is kept, for the state asked next.
         """
         target = self._existing(name)
-        # Whether it starts from another, told without loading: a seed that keeps the session
-        # from loading can still be removed before round 1.
-        seeded = (target / seeding.SEED_FILE).exists()
         try:
             self._app(name)
         except EXPECTED as exc:
-            return {"status": SetupLoad.REFUSED, "reason": str(exc), "seeded": seeded}
-        return {"status": SetupLoad.LOADS, "reason": "", "seeded": seeded}
+            removable = isinstance(exc, seeding.SeedError) and not session.contents(target).rounds
+            status = SetupLoad.SEED_REFUSED if removable else SetupLoad.REFUSED
+            return {"status": status, "reason": str(exc)}
+        return {"status": SetupLoad.LOADS, "reason": ""}
 
     def delete(self, name: str) -> list[str]:
         """Remove a session for good, whether or not it loads; answer the names left."""

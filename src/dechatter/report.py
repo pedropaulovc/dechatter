@@ -230,9 +230,9 @@ def _seed_section(
     stickout is a placeholder still to confirm on the machine, not yet compared with it."""
     old = seed.setup
     assembly = (
-        f"machine, holder and cutter (this session's stickout is still to confirm on the "
-        f"machine, and must then be within {seeding.STICKOUT_TOLERANCE_MM:g} mm of its "
-        f"{_length(old.tool.stickout_mm, units, 1)})"
+        "machine, holder and cutter (this session's stickout is still to confirm on the "
+        f"machine, and must then be within {_length(seeding.STICKOUT_TOLERANCE_MM, units, 1)} "
+        f"of its {_length(old.tool.stickout_mm, units, 1)})"
         if stickout_pending
         else "machine, holder, cutter and stickout"
     )
@@ -528,7 +528,6 @@ def render(session_dir: Path, units: Units) -> str:
     if not log:
         log.append("<p>No round has been planned yet.</p>")
 
-    setup_text = (session_dir / session.SETUP_FILE).read_text(encoding="utf-8")
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -569,7 +568,7 @@ spindle speed heard in it, or where none was heard, the speed asked for.{seeded_
 <p class="note">The session's setup.toml, which this report was computed from. Each round
 keeps a copy of the setup it was planned from; those may differ from this one in what
 may change after a cut, such as the safe height or the speed limits.</p>
-<pre>{_e(setup_text)}</pre>
+<pre>{_e(source.text)}</pre>
 </section>
 <footer>dechatter {_e(__version__)}</footer>
 </body>

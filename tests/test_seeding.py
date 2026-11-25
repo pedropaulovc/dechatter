@@ -221,7 +221,7 @@ def test_a_session_on_another_tool_assembly_is_refused_with_the_reason(measured)
     data["setup"] = data["setup"].replace("flutes = 3", "flutes = 4")
     seed_file.write_text(json.dumps(data), encoding="utf-8")
     fresh = Engine(engine.root)
-    assert fresh.call("setup_status", NEW)["status"] == "refused"
+    assert fresh.call("setup_status", NEW)["status"] == "seed_refused"
     assert "4 flutes" in fresh.call("setup_status", NEW)["reason"]
 
 
@@ -288,14 +288,19 @@ def test_export_and_import_keep_the_seed_with_the_session(measured, tmp_path):
 def test_a_damaged_seed_is_refused_with_what_to_do(measured):
     engine = measured
     engine.call("create", NEW, NAME)
-    (engine.root / NEW / seeding.SEED_FILE).write_text('{"schema": 99}', encoding="utf-8")
+    engine.call("create", "planned", NAME)
+    engine.call("plan", "planned", "fresh")
+    for name in (NEW, "planned"):
+        (engine.root / name / seeding.SEED_FILE).write_text('{"schema": 99}', encoding="utf-8")
     status = Engine(engine.root).call("setup_status", NEW)
-    assert status["status"] == "refused" and status["seeded"]
+    assert status["status"] == "seed_refused"
     assert "seed.json cannot be read (schema 99)" in status["reason"]
     # Before round 1 it can be removed without being read, and the session loads again.
     fresh = Engine(engine.root)
     assert fresh.call("unseed", NEW)["seed"] is None
-    assert fresh.call("setup_status", NEW) == {"status": "loads", "reason": "", "seeded": False}
+    assert fresh.call("setup_status", NEW) == {"status": "loads", "reason": ""}
+    # After it, only Delete applies.
+    assert fresh.call("setup_status", "planned")["status"] == "refused"
 
 
 def test_a_seed_is_kept_when_the_session_does_not_load_without_it(measured):
@@ -305,6 +310,8 @@ def test_a_seed_is_kept_when_the_session_does_not_load_without_it(measured):
     kept = seed_file.read_bytes()
     (engine.root / NEW / session.SETUP_FILE).write_text("[machine\n", encoding="utf-8")
     fresh = Engine(engine.root)
+    # The setup is what refuses: the seed is no way out, and goes back.
+    assert fresh.call("setup_status", NEW)["status"] == "refused"
     with pytest.raises(RuntimeError, match="setup.toml"):
         fresh.call("unseed", NEW)
     assert seed_file.read_bytes() == kept
@@ -455,6 +462,11 @@ def test_limits_scale_with_the_specific_energy_and_the_arc_of_engagement(setup, 
     # this one is a hair larger, within the tolerance.
     larger = dataclasses.replace(setup, tool=dataclasses.replace(setup.tool, diameter_mm=9.56))
     assert seeding.mismatches(seed.setup, larger) == []
+    # Exactly at the tolerances passes, though the difference is not exact in binary.
+    stickout = seed.setup.tool.stickout_mm
+    for change in ({"stickout_mm": stickout + 0.6}, {"stickout_mm": stickout - 0.6}):
+        edge = dataclasses.replace(setup, tool=dataclasses.replace(setup.tool, **change))
+        assert seeding.mismatches(seed.setup, edge) == []
     slotted = dataclasses.replace(seed, passes=passes((4000, diameter, 1.0, Verdict.STABLE)))
     assert seeding.carry(slotted, slotted.passes[0], larger) is Carry.SPEEDS
     slots = dataclasses.replace(
@@ -582,7 +594,7 @@ def test_a_seed_with_a_size_that_is_no_number_is_refused(measured):
     data["passes"][0]["width_mm"] = 0
     seed_file.write_text(json.dumps(data), encoding="utf-8")
     status = Engine(engine.root).call("setup_status", NEW)
-    assert status["status"] == "refused" and "no positive number" in status["reason"]
+    assert status["status"] == "seed_refused" and "no positive number" in status["reason"]
 
 
 def test_a_carried_over_cut_counts_for_less_than_one_made_here(setup):

@@ -58,10 +58,10 @@ function requestDone() {
 // The delete or reset confirmation: closed, being prepared, or open. While it is not
 // closed, the session it names cannot change.
 let dialog = 'closed';
-// Whether the open session's setup loads ('loads' | 'refused'), as the engine checks it;
-// null with no session open. Reset and Export need it to load; the rounds need not.
+// Whether the open session's setup loads ('loads' | 'refused' | 'seed_refused': its seed keeps
+// it from loading before round 1, and can be removed), as the engine checks it; null with no
+// session open. Reset and Export need it to load; the rounds need not.
 let setupStatus = null;
-let seededOnDisk = false; // whether it holds a seed.json, loaded or not; read with setupStatus
 let stockChoice = 'same'; // survives redraws: planning on the wrong face position cuts air or too deep
 // What the file picked next is imported for: 'open' it as a session, or 'seed' a session from
 // it in the New dialog.
@@ -147,16 +147,14 @@ async function openSession(name) {
 }
 
 // Whether a session's setup loads, apart from its rounds: a session whose rounds do not
-// load can still be reset and exported. And whether it holds a seed, read or not: one that
-// keeps it from loading can still be removed before round 1.
+// load can still be reset and exported.
 async function checkSetup(name) {
   requests += 1;
   render();
   try {
-    const { status, seeded } = await engine('setup_status', name);
+    const { status } = await engine('setup_status', name);
     if (name === current) {
       setupStatus = status;
-      seededOnDisk = seeded;
     }
   } catch (err) {
     if (name === current) {
@@ -502,10 +500,12 @@ const ACTIONS = {
       ? `Don't start ${name} from ${seed.source}? Its copy of ${seed.source}'s ${plural(seed.passes, 'analysed cut')} is removed, and round 1 is the coarse grid. Its setup stays as it is.`
       : `Don't start ${name} from the earlier session? Its seed.json, with that session's cuts, is removed. Its setup stays as it is.`),
     note: 'Start from can pick it again while it is in this browser, or Import it. Export keeps a copy as a zip.',
-    // A session that did not load may load without its seed.
+    // A session its seed kept from loading loads once the engine has answered its state.
     async run(name) {
       await changeSession(name, 'unseed');
-      await checkSetup(name);
+      if (name === current) {
+        setupStatus = 'loads';
+      }
     },
   },
 };
@@ -927,11 +927,11 @@ function renderSessions() {
 }
 
 // What the button beside Setup offers: 'start' from an earlier session or 'unseed', before
-// round 1; null otherwise. A seed that keeps the session from loading can still go (the
-// engine refuses if the session has rounds); the example setup is filled in first.
+// round 1; null otherwise. A seed that keeps the session from loading can still go; the
+// example setup is filled in first.
 function seedAction() {
   if (state === null) {
-    return setupStatus === 'refused' && seededOnDisk ? 'unseed' : null;
+    return setupStatus === 'seed_refused' ? 'unseed' : null;
   }
   if (setupStatus !== 'loads' || state.rounds.length > 0) {
     return null;

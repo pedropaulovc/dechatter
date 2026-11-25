@@ -1160,7 +1160,7 @@ def test_the_worker_persists_every_engine_call_that_writes():
 
 
 def test_reset_and_export_go_by_whether_the_setup_loads(engine):
-    assert engine.call("setup_status", NAME) == {"status": "loads", "reason": "", "seeded": False}
+    assert engine.call("setup_status", NAME) == {"status": "loads", "reason": ""}
     # Rounds that do not load leave the setup loading: the session can be exported and reset.
     engine.call("plan", NAME, "same")
     (session.round_dir(engine.root / NAME, 1) / session.SETUP_FILE).unlink()

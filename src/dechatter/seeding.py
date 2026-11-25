@@ -54,6 +54,8 @@ SEED_FILE = "seed.json"
 # holder against a stop or a scale) and the diameter within that (a regrind is another tool).
 STICKOUT_TOLERANCE_MM = 0.6
 DIAMETER_TOLERANCE_MM = 0.05
+# Lengths as typed are not exact in binary: 30.6 - 30.0 is a hair over 0.6.
+ROUNDING_MM = 1e-9
 # A prepared setup may hold a placeholder stickout, marked to confirm on the machine: it is
 # compared once the setup wizard has confirmed it.
 STICKOUT = "tool.stickout_mm"
@@ -193,7 +195,7 @@ def mismatches(source: Setup, new: Setup, unconfirmed: Collection[str] = ()) -> 
         )
     if old_tool.holder and tool.holder and _label(old_tool.holder) != _label(tool.holder):
         found.append(f"the holder was {old_tool.holder!r}, not {tool.holder!r}")
-    if abs(old_tool.diameter_mm - tool.diameter_mm) > DIAMETER_TOLERANCE_MM:
+    if abs(old_tool.diameter_mm - tool.diameter_mm) > DIAMETER_TOLERANCE_MM + ROUNDING_MM:
         found.append(
             f"the cutter diameter was {old_tool.diameter_mm:g} mm, not {tool.diameter_mm:g} mm"
         )
@@ -201,7 +203,7 @@ def mismatches(source: Setup, new: Setup, unconfirmed: Collection[str] = ()) -> 
         found.append(f"the cutter had {old_tool.flutes} flutes, not {tool.flutes}")
     if old_tool.material is not tool.material:
         found.append(f"the cutter was {old_tool.material.value}, not {tool.material.value}")
-    off = abs(old_tool.stickout_mm - tool.stickout_mm) > STICKOUT_TOLERANCE_MM
+    off = abs(old_tool.stickout_mm - tool.stickout_mm) > STICKOUT_TOLERANCE_MM + ROUNDING_MM
     if off and STICKOUT not in unconfirmed:
         found.append(
             f"the stickout was {old_tool.stickout_mm:g} mm, not {tool.stickout_mm:g} mm "
