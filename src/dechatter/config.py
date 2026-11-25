@@ -192,14 +192,40 @@ class SetupFile:
 
     text: str
     setup: Setup
+    # Field path ("stock.height_mm") -> note: values written ahead of time, still to be
+    # confirmed on the machine. Planning waits until they are; saving the wizard confirms them.
+    pending: dict[str, str] = field(default_factory=dict)
 
 
 def read_setup(text: str, origin: str) -> SetupFile:
-    return SetupFile(text, parse_setup(text, origin))
+    setup, pending = _parse(text, origin)
+    return SetupFile(text, setup, pending)
 
 
 def parse_setup(text: str, origin: str) -> Setup:
     """A setup from setup file text; `origin` names it in errors."""
+    return _parse(text, origin)[0]
+
+
+PENDING = "pending"
+
+
+def _pending(entries: object) -> dict[str, str]:
+    """The `[pending]` table: each key a field the wizard shows, each value its note."""
+    if not isinstance(entries, dict):
+        raise ConfigError(f"[{PENDING}] must be a table of field = note")
+    hints = typing.get_type_hints(Setup)
+    for at, note in entries.items():
+        section, _, key = at.partition(".")
+        known = section in hints and key in typing.get_type_hints(hints[section])
+        if not known or (section == "planner" and key in UNLISTED_PLANNER):
+            raise ConfigError(f'[{PENDING}] "{at}" is not a setup field the wizard shows')
+        if not isinstance(note, str):
+            raise ConfigError(f'[{PENDING}] "{at}" needs a note in quotes')
+    return dict(entries)
+
+
+def _parse(text: str, origin: str) -> tuple[Setup, dict[str, str]]:
     try:
         data = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
@@ -211,6 +237,7 @@ def parse_setup(text: str, origin: str) -> Setup:
             "spindle_power_hp: the spindle motor's rated power in horsepower, "
             f"1 hp = {WATTS_PER_HP} W.)"
         )
+    pending = _pending(data.pop(PENDING, {}))
     sections = {f.name: f for f in dataclasses.fields(Setup)}
     unknown = set(data) - set(sections)
     if unknown:
@@ -223,7 +250,7 @@ def parse_setup(text: str, origin: str) -> Setup:
         built[name] = _build(cls, name, data.get(name, {}))
     setup = Setup(**built)
     _validate(setup)
-    return setup
+    return setup, pending
 
 
 def setup_source(text: str) -> SetupSource:
@@ -270,7 +297,8 @@ def setup_values(path: Path) -> dict:
     Everything a form shows is included, so saving pins what the user saw even where it
     equals today's default: a safe height someone confirmed must not move with a later
     release. The unlisted planner settings are included only where the file sets them, so
-    one written by hand survives a save and the rest keep following the defaults.
+    one written by hand survives a save and the rest keep following the defaults. The
+    `[pending]` table is left out: saving what the form showed confirms those fields.
     """
     values = dataclasses.asdict(load_setup(path))
     written = tomllib.loads(path.read_text(encoding="utf-8")).get("planner", {})

@@ -25,6 +25,9 @@ header button { padding: 4px 6px; }
 #setup-form small { color: #777; }
 #setup-form em { grid-column: 1 / -1; color: #777; font-size: 12px; font-style: normal; }
 #setup-form input:invalid { border: 1px solid #c9302c; }
+/* A value prepared ahead of time, to confirm on the machine: the same yellow as an instruction. */
+#setup-form .field.pending { padding: 4px 6px; background: #fcf8e3; border: 1px solid #f0ad4e; border-radius: 3px; }
+#setup-form .field.pending strong { grid-column: 1 / -1; font-size: 12px; }
 #setup-form details.advanced { margin-top: 4px; }
 #setup-form button.info {
   width: 16px; height: 16px; padding: 0; margin-left: 2px; vertical-align: 1px;
@@ -63,7 +66,7 @@ meter { width: 70px; height: 10px; vertical-align: middle; }
 }
 #step p { margin: 0 0 8px; }
 #step p:last-child { margin-bottom: 0; }
-#step ol { margin: 0 0 8px; padding-left: 18px; }
+#step ol, #step ul { margin: 0 0 8px; padding-left: 18px; }
 
 button, select {
   font: inherit;

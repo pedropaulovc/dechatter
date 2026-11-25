@@ -134,12 +134,14 @@ class Sessions:
         return self.names()
 
     def setup_form(self, name: str) -> dict:
-        """What the widget's setup wizard needs: the current values and the material choices."""
-        self._app(name)  # the session must exist and its setup must load
+        """What the widget's setup wizard needs: the current values, the material choices and
+        the fields the setup marks to confirm on the machine, with their notes."""
+        app = self._app(name)  # the session must exist and its setup must load
         return {
             "values": setup_values(self._dir(name) / session.SETUP_FILE),
             "defaults": setup_defaults(),
             "materials": sorted(materials.MATERIALS),
+            "pending": app.source.pending,
         }
 
     def setup_preview(self, values_json: str) -> dict:

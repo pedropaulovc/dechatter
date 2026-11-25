@@ -6,6 +6,15 @@ What changed for people who use the dechatter widget and command line. The forma
 
 ## [Unreleased]
 
+### Added
+
+- Prepared sessions: a `setup.toml` can list fields to confirm on the machine under
+  `[pending]`, each with a note (`"stock.height_mm" = "measure the top above the jaws"`). The
+  session loads with the placeholder values, the widget shows how many values are to confirm,
+  planning is refused naming them, and the setup wizard highlights each with its note; saving
+  the wizard confirms them and writes the setup without `[pending]`. A zip holding only
+  `<session>/setup.toml` imports as a new session.
+
 ## [0.7.0] - 2026-11-24
 
 ### Removed

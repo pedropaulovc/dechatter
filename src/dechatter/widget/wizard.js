@@ -232,9 +232,11 @@ function control(field, value, units, materials, placeholder, optional) {
 
 const has = (object, key) => Object.prototype.hasOwnProperty.call(object ?? {}, key);
 
-// `setup` holds the form's choices besides the values: `materials`, the setup's `defaults`
-// and, where known, the `computed` values the planner uses for entries left empty.
+// `setup` holds the form's choices besides the values: `materials`, the setup's `defaults`,
+// the `pending` fields to confirm on the machine with their notes and, where known, the
+// `computed` values the planner uses for entries left empty.
 const advanced = (field) => (field.section ?? 'basic') === 'advanced';
+const pendingNote = (field, setup) => (has(setup.pending, field.at) ? setup.pending[field.at] : null);
 
 // What an entry left empty becomes: the planner's computed value, or the default.
 function placeholderFor(field, units, setup) {
@@ -274,6 +276,12 @@ function row(field, values, units, setup) {
   name.append(label, ' ', about);
   const row = Object.assign(document.createElement('div'), { className: 'field' });
   row.append(name, input, Object.assign(document.createElement('small'), { textContent: unit }));
+  // A value written ahead of time: saving the wizard confirms it, so the note says what to check.
+  const pending = pendingNote(field, setup);
+  if (pending !== null) {
+    row.classList.add('pending');
+    row.append(Object.assign(document.createElement('strong'), { textContent: `Confirm on the machine: ${pending}` }));
+  }
   if (field.note) {
     row.append(Object.assign(document.createElement('em'), { textContent: field.note }));
   }
@@ -347,7 +355,7 @@ export function applicable(values) {
 }
 
 // Fill `form` with the fields of one step: the ones to answer, then the advanced ones in a
-// section that starts open when any of them differs from its default.
+// section that starts open when any of them differs from its default or is to be confirmed.
 export function draw(form, step, values, units, setup) {
   closeInfo();
   const fields = step.fields.filter((field) => applies(field, values));
@@ -366,7 +374,7 @@ export function draw(form, step, values, units, setup) {
   }
   const details = document.createElement('details');
   details.className = 'advanced';
-  details.open = more.some((field) => changed(field, values, setup.defaults));
+  details.open = more.some((field) => changed(field, values, setup.defaults) || pendingNote(field, setup) !== null);
   details.append(
     Object.assign(document.createElement('summary'), { textContent: 'Advanced' }),
     ...more.map((field) => row(field, values, units, setup)),

@@ -31,6 +31,7 @@ PROGRAM_ID_LENGTH = 6
 
 class Next(StrEnum):
     SETUP = "setup"  # the setup is still the template: fill it in before planning
+    CONFIRM = "confirm"  # the setup marks values to confirm on the machine before planning
     PLAN = "plan"  # plan the first or the next round
     RUN = "run"  # a round is planned: load it, cut it, record it
     SWEEP = "sweep"  # converged; a chip-load sweep of the best cut is on offer
@@ -92,6 +93,8 @@ class App:
         template = setup_source(self.source.text) is SetupSource.TEMPLATE
         if upcoming is Next.PLAN and template:
             upcoming = Next.SETUP
+        if upcoming in (Next.PLAN, Next.SWEEP) and self.source.pending:
+            upcoming = Next.CONFIRM
 
         tool = self.setup.tool
         return {
@@ -108,6 +111,8 @@ class App:
             # What the session steps: "width" at each depth in `levels_mm`, or "depth" at each
             # width in it. `level_mm` is the one the map and the observations are at.
             "vary": self.setup.cut.vary,
+            # Field path -> note, for the values the setup marks to confirm on the machine.
+            "pending": self.source.pending,
             "next": upcoming,
             "next_level_mm": next_level,
             "level_mm": level,

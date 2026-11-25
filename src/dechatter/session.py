@@ -663,6 +663,12 @@ def _rounds_to_plan_after(session: Path, source: SetupFile) -> list[Round]:
             "machine, tool, cut and stock (the widget's setup wizard, or edit the file) "
             "before planning"
         )
+    if source.pending:
+        listed = "; ".join(f"{at} ({note})" for at, note in source.pending.items())
+        raise PlanError(
+            f"{SETUP_FILE} has values to confirm on the machine before planning: {listed}. "
+            "Check each in the setup wizard and save it."
+        )
     rounds = load_rounds(session)
     check_measured(rounds, source.setup)
     return rounds

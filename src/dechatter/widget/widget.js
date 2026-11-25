@@ -762,11 +762,25 @@ function renderSessions() {
   $('reset-session').disabled ||= setupStatus !== 'loads';
 }
 
-// The session's tool and cut in one line, lengths in the machine's units.
-function summary({ summary: s, spindle, vary }) {
+// The session's tool and cut in one line, lengths in the machine's units, and how many
+// values prepared ahead of time are still to be confirmed on the machine.
+function summary({ summary: s, spindle, vary, pending }) {
   const levels = s.levels_mm.map((level) => length(level, units())).join(', ');
   const cut = vary === 'depth' ? `width ${levels}, depth stepped` : `depth ${levels}`;
-  return `Ø ${length(s.diameter_mm, units())}, ${s.flutes} flutes, ${s.material}, ${cut}, ${chipLoad(s.chip_load_mm, units())} per tooth${spindle === 'manual' ? ', manual spindle' : ''}`;
+  const count = Object.keys(pending).length;
+  const confirm = count === 0 ? '' : `. ${count} ${count === 1 ? 'value' : 'values'} to confirm on the machine`;
+  return `Ø ${length(s.diameter_mm, units())}, ${s.flutes} flutes, ${s.material}, ${cut}, ${chipLoad(s.chip_load_mm, units())} per tooth${spindle === 'manual' ? ', manual spindle' : ''}${confirm}`;
+}
+
+// A setup field by its path ("stock.height_mm"), as the wizard names it and the step it is on.
+function wizardField(at) {
+  for (const step of STEPS) {
+    const field = step.fields.find((each) => each.at === at);
+    if (field) {
+      return `${field.label} (${step.title})`;
+    }
+  }
+  return at;
 }
 
 // A round's level, as the dimension its cuts share: "5 mm deep", or where the session steps
@@ -943,6 +957,15 @@ function renderStep() {
   if (state.next === 'setup') {
     step.append(
       el('p', {}, 'This session still holds the example setup, not your machine. Fill it in before planning.'),
+      el('p', {}, button('Open the setup wizard', editSetup, { className: 'primary' })),
+    );
+    return;
+  }
+
+  if (state.next === 'confirm') {
+    step.append(
+      el('p', {}, 'This setup was prepared ahead of time. Measure these on the machine and enter them in the setup wizard; saving it confirms them. Nothing is planned until then.'),
+      el('ul', {}, ...Object.entries(state.pending).map(([at, text]) => el('li', {}, `${wizardField(at)}: ${text}`))),
       el('p', {}, button('Open the setup wizard', editSetup, { className: 'primary' })),
     );
     return;
