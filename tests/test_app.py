@@ -19,7 +19,15 @@ from scipy import signal
 import dechatter
 from dechatter import browser, plan, session
 from dechatter.app import TIMELINE_FILE, App
-from dechatter.config import ONLY_WITH, ConfigError, SpindleControl, Vary, load_setup, read_setup
+from dechatter.config import (
+    ONLY_WITH,
+    ConfigError,
+    Direction,
+    SpindleControl,
+    Vary,
+    load_setup,
+    read_setup,
+)
 from dechatter.detect import Verdict
 from dechatter.plan import Plan, envelope
 
@@ -111,7 +119,7 @@ def converge(engine, setup, machine: synth.Machine = MACHINE, **run) -> dict:
                 continue
             truth = machine.chatters(p["rpm"], p["width_mm"], setup.tool.flutes, p["depth_mm"])
             assert p["verdict"] == ("unstable" if truth else "stable")
-        if state["next"] in ("converged", "sweep"):
+        if state["next"] in ("converged", "sweep", "check"):
             return state
     pytest.fail("did not converge in 16 rounds")
 
@@ -1225,7 +1233,7 @@ def test_a_chip_load_sweep_follows_convergence_and_stays_off_the_map(engine, set
     assert {f"F{p['feed_mm_min']:g}" for p in tests} <= set(program.split())
 
     state = engine.run_round(sweep["round"])
-    assert state["next"] == "converged"
+    assert state["next"] == "check", "the sweep run, the check of the other direction is left"
     assert len(state["observations"]) == cuts and state["best"][0] == best
     found = state["sweep"]
     assert found["chip_load_mm"] == loads[-1], "the simulated machine ignores chip load"
@@ -1269,7 +1277,7 @@ def test_no_sweep_is_offered_when_the_power_cap_leaves_it_no_room(engine, setup)
     # The sweep starts above the session's chip load, and the cap sits at the best cut.
     state = cap_power(engine, best["mrr_cm3_min"] * 1.001, chip_load_sweep_low=1.2)
     assert state["best"][0] == best
-    assert state["next"] == "converged" and state["sweep"] is None
+    assert state["next"] == "check" and state["sweep"] is None
     with pytest.raises(RuntimeError, match="leaves no chip load to sweep"):
         engine.call("plan_sweep", NAME, "fresh")
 
@@ -1282,7 +1290,7 @@ def test_the_sweep_result_stays_within_a_lowered_power_cap(engine, setup):
     # Passes at 0.6, 0.875, 1.15, 1.425 and 1.7 times the chip load, all stable: under a cap
     # at 1.1 times the best cut, the second is the result.
     state = cap_power(engine, 1.1 * best["mrr_cm3_min"])
-    assert state["best"][0] == best and state["next"] == "converged"
+    assert state["best"][0] == best and state["next"] == "check"
     assert state["sweep"]["chip_load_mm"] == loads[1]
     assert state["sweep"]["mrr_cm3_min"] <= 1.1 * best["mrr_cm3_min"]
     recommended = engine.call("report_html", NAME, "mm").split("<h2>Stability map")[0]
@@ -1293,6 +1301,199 @@ def test_the_sweep_result_stays_within_a_lowered_power_cap(engine, setup):
     assert state["sweep"] is None and "Chip-load sweep, round" not in engine.call(
         "report_html", NAME, "mm"
     )
+
+
+def cuts_of(engine, number: int) -> list[tuple[float, float, float]]:
+    """(y, x the feed move starts at, x it ends at) of each pass, as the machine moves."""
+    found = []
+    for block in engine.call("steps", NAME, number, "mm"):
+        if block["step"] == "rapid":
+            x_from, y = block["target"]["x"], block["target"]["y"]
+        if block["step"] == "cut":
+            found.append((y, x_from, block["target"]["x"]))
+    return found
+
+
+def test_a_check_of_the_other_direction_ramps_to_the_best_cut_and_stays_off_the_map(engine, setup):
+    state = converge(engine, setup)
+    best, cuts, shown = state["best"][0], len(state["observations"]), state["map"]
+    offer = state["check"]
+    assert offer["direction"] == "climb"
+    (only,) = offer["offers"]  # the template's one depth
+    assert (only["level_mm"], only["rpm"], only["width_mm"]) == (
+        best["depth_mm"],
+        best["ask_rpm"],
+        best["width_mm"],
+    )
+    sizes = only["cuts_mm"]
+    assert sizes == sorted(sizes) and best["width_mm"] in sizes
+    assert sizes[-1] == pytest.approx(best["width_mm"] + 0.1), "one width step beyond"
+    assert len(sizes) == 4, "a half, three quarters, the cut itself and one step beyond"
+
+    state = engine.call("plan_check", NAME, "fresh", only["level_mm"])
+    check = state["rounds"][-1]
+    assert (check["planner"], check["direction"], state["next"]) == ("check", "climb", "run")
+    tests = [p for p in check["passes"] if p["kind"] == "test"]
+    assert [p["width_mm"] for p in tests] == sizes, "lightest first"
+    assert {p["rpm"] for p in tests} == {best["ask_rpm"]}, "asked again, not as heard"
+    assert {p["chip_load_mm"] for p in check["passes"]} == {state["summary"]["chip_load_mm"]}
+    program = engine.call("program", NAME, check["round"], "mm")
+    assert "(CLIMB CHECK: every pass cuts climb, feeding -X from the right end" in program
+    assert "CLIMB MILLING: needs a machine without backlash" in program
+    assert all(x_to < x_from for _, x_from, x_to in cuts_of(engine, check["round"]))
+
+    state = engine.run_round(check["round"])
+    assert state["next"] == "sweep", "the sweep is still on offer, the check no longer"
+    assert state["check"] is None
+    assert len(state["observations"]) == cuts and state["map"] == shown
+    assert state["best"][0] == best
+    (found,) = state["checks"]
+    assert (found["round"], found["direction"]) == (check["round"], "climb")
+    assert [c["width_mm"] for c in found["cuts"]] == sizes
+    assert found["held_mm"] == sizes[-1], "the simulated machine ignores the direction"
+
+    # Chatter at the step beyond: the check held up to the best cut, and the map is as it was.
+    state = engine.call("set_verdict", NAME, check["round"], tests[-1]["id"], "unstable")
+    assert state["checks"][0]["held_mm"] == best["width_mm"]
+    assert state["map"] == shown and len(state["observations"]) == cuts
+    page = engine.call("report_html", NAME, "mm")
+    recommended = page.split("<h2>Stability map")[0]
+    assert f"Climb check, round {check['round']}" in recommended
+    assert "the cuts held up to" in recommended and "(the best conventional cut)" in recommended
+    assert "<td>chatter</td>" in recommended and "climb check, planned" in page
+    # A session started from this one is seeded from the map's cuts only.
+    seeded = session.seed_passes(session.load_rounds(engine.root / NAME))
+    assert seeded and check["round"] not in {p.round for p in seeded}
+
+    # The sweep after it, and nothing is left on offer.
+    sweep = engine.call("plan_sweep", NAME, "fresh")["rounds"][-1]
+    state = engine.run_round(sweep["round"])
+    assert state["next"] == "converged" and state["check"] is None and state["sweep"]
+
+
+def test_the_check_is_offered_before_convergence_and_at_the_depth_chosen(engine):
+    """A session an older dechatter converged may search on in this one: the check is on
+    offer as soon as a depth has a best cut, at each depth, and plans the one asked for."""
+    form = engine.call("setup_form", NAME)["values"]
+    form["cut"]["other_depths_mm"] = [2.5]
+    form["planner"]["check_fractions"] = [0.8, 0.9, 1.0]
+    form["planner"]["check_steps_beyond"] = 0
+    engine.call("save_setup", NAME, json.dumps(form))
+    with pytest.raises(RuntimeError, match="no round has been cut yet"):
+        engine.call("plan_check", NAME, "same", None)
+    engine.call("plan", NAME, "same")
+    state = engine.run_round(1)
+    assert state["next"] == "plan" and state["check"]["direction"] == "climb"
+    (deepest,) = state["check"]["offers"]  # nothing was cut at 2.5 mm yet
+    best = state["best"][0]
+    assert deepest["cuts_mm"][-1] == best["width_mm"], "nothing beyond the best cut"
+    assert len(deepest["cuts_mm"]) <= 3
+    with pytest.raises(RuntimeError, match="no cut at 2.5 mm is left to check climb"):
+        engine.call("plan_check", NAME, "same", 2.5)
+    state = engine.call("plan_check", NAME, "same", deepest["level_mm"])
+    first, check = state["rounds"]
+    assert check["planner"] == "check" and check["level_mm"] == deepest["level_mm"]
+    # One lane: every pass runs the whole length, so the check goes on along round 1's face.
+    assert check["lanes"] == 1
+    end = first["legs"][-1]["face_y_end_mm"]
+    assert check["legs"][0]["face_y_start_mm"] == pytest.approx(end, abs=0.01)
+
+
+def test_a_check_takes_lanes_from_the_other_end_and_the_session_goes_on_from_its_own(engine):
+    form = engine.call("setup_form", NAME)["values"]
+    form["stock"]["lanes"] = 3
+    engine.call("save_setup", NAME, json.dumps(form))
+    engine.call("plan", NAME, "same")
+    state = engine.run_round(1)
+    first = state["rounds"][0]
+    assert [leg["lane"] for leg in first["legs"]] == [1]
+    length = form["stock"]["length_mm"]
+
+    state = engine.call("plan_check", NAME, "same", None)
+    check = state["rounds"][-1]
+    # Climbing, the first lane is the right-hand one, whole at Y0.
+    assert [leg["lane"] for leg in check["legs"]] == [1]
+    assert check["legs"][0]["lane_x_mm"] == [2 * length / 3, length]
+    assert check["legs"][0]["face_y_start_mm"] == 0
+    for _, x_from, x_to in cuts_of(engine, check["round"]):
+        assert x_from > length and x_to >= 2 * length / 3 - 1e-6, "clear of the other lanes"
+    engine.run_round(check["round"])
+
+    # The next conventional round goes on where round 1 left lane 1, not at Y0.
+    state = engine.call("plan", NAME, "same")
+    third = state["rounds"][-1]
+    assert third["direction"] == "conventional"
+    assert third["legs"][0]["lane"] == 1
+    end = first["legs"][-1]["face_y_end_mm"]
+    assert third["legs"][0]["face_y_start_mm"] == pytest.approx(end, abs=0.01)
+    assert all(leg["lane"] < 3 for leg in third["legs"]), "lane 3 holds the climb check"
+
+
+def test_a_check_holds_only_as_far_as_its_cuts_were_heard(setup):
+    status = session.PassStatus
+
+    def check(*cuts):
+        made = tuple(session.CheckCut(2000, w, 5.0, 300.0, s, v) for w, s, v in cuts)
+        return session.Check(3, Direction.CLIMB, Vary.WIDTH, 5.0, made)
+
+    stable, chatter = Verdict.STABLE, Verdict.UNSTABLE
+    # A ramp feed-held at its first chatter: the cut before it is how far it held.
+    ramp = check(
+        (1.0, status.ANALYSED, stable),
+        (1.5, status.ANALYSED, stable),
+        (2.0, status.ABORTED, chatter),
+        (2.1, status.NOT_RUN, None),
+    )
+    assert ramp.held.width_mm == 1.5
+    # Deepest first and stopped after the heaviest chattered: nothing lighter was heard.
+    stopped = check(
+        (1.0, status.NOT_RUN, None), (1.5, status.NOT_RUN, None), (2.1, status.ABORTED, chatter)
+    )
+    assert stopped.held is None
+    # A cut the run never got to does not hide the heavier ones that held.
+    skipped = check((1.0, status.NOT_RUN, None), (2.0, status.ANALYSED, stable))
+    assert skipped.held.width_mm == 2.0
+    # Heard without a verdict ("no cut heard") stops it: that cut is unknown.
+    quiet = check((1.0, status.ANALYSED, stable), (1.5, status.QUIET, None))
+    assert quiet.held.width_mm == 1.0
+
+    # Whether the check answered for the best cut (2 mm wide): heard, or a lighter one
+    # chattered; stopped after a heavier one chattered, it is offered again. The best cut was
+    # heard at 1985 rpm; the check asks for 2000 again, as it did.
+    env = envelope(setup)
+    heard = session.SpeedSource.HEARD
+    best = session.StableCut(1000.0, 5.0, 1985.0, 2.0, 2000.0, heard)
+    assert session._cut_by(setup, env, ramp, best)
+    early = check(
+        (1.0, status.ANALYSED, stable), (1.5, status.ABORTED, chatter), (2.0, status.NOT_RUN, None)
+    )
+    assert session._cut_by(setup, env, early, best)
+    assert not session._cut_by(setup, env, stopped, best)
+    # Held 3/16 in deep: its passes carry that depth rounded to the micron, the level not.
+    # Every cut held, so only the best cut itself can answer.
+    held = check((1.0, status.ANALYSED, stable), (2.0, status.ANALYSED, stable))
+    inch = dataclasses.replace(
+        held, level_mm=4.7625, cuts=tuple(dataclasses.replace(c, depth_mm=4.763) for c in held.cuts)
+    )
+    best = session.StableCut(1000.0, 4.7625, 1985.0, 2.0, 2000.0, heard)
+    assert session._cut_by(setup, env, inch, best)
+
+
+def test_a_session_planned_by_an_older_dechatter_gets_its_check(engine, setup):
+    """Plans of 0.7.0 and older carry no direction and no start: they cut as their setup
+    said, and a check can follow them without re-planning the map."""
+    state = converge(engine, setup)
+    best = state["best"][0]
+    for path in (engine.root / NAME).glob(f"round-*/{session.PLAN_FILE}"):
+        data = json.loads(path.read_text(encoding="utf-8"))
+        del data["direction"], data["start"]
+        data["schema"] = 3  # as 0.6.0 and 0.7.0 wrote it
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    state = engine.call("state", NAME)
+    assert {r["direction"] for r in state["rounds"]} == {"conventional"}
+    assert state["best"][0] == best and state["check"]["offers"][0]["rpm"] == best["ask_rpm"]
+    state = engine.call("plan_check", NAME, "same", None)
+    assert state["rounds"][-1]["direction"] == "climb"
 
 
 def converged_report(engine, setup, units: str) -> str:

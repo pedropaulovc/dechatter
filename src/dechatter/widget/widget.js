@@ -69,6 +69,7 @@ let importing = 'open';
 // The session the New dialog starts from an earlier one (Start from), keeping its own setup;
 // '' while the dialog makes a new session.
 let startFor = '';
+let checkChoice = ''; // the level picked for the next check of the other direction, in mm
 
 // ---- engine (Python in a worker) -------------------------------------------------------
 
@@ -138,6 +139,9 @@ async function openSession(name) {
   editing = null;
   state = null;
   setupStatus = null;
+  // A stock or level chosen for another session's block says nothing about this one.
+  stockChoice = 'same';
+  checkChoice = '';
   localStorage.setItem(SESSION_KEY, name);
   if (name) {
     await checkSetup(name);
@@ -1024,10 +1028,14 @@ function renderSetup() {
 
 // Planning on the wrong face position cuts air or too deep: the choice survives redraws.
 function stockSelect() {
-  const stock = el('select', {}, el('option', { value: 'same' }, 'same block'), el('option', { value: 'fresh' }, 'fresh block, face at Y0'));
+  const stock = el('select', { className: 'stock-choice' }, el('option', { value: 'same' }, 'same block'), el('option', { value: 'fresh' }, 'fresh block, face at Y0'));
   stock.value = stockChoice;
   stock.onchange = () => {
     stockChoice = stock.value;
+    // Every stock choice on the page shows the one that planning uses.
+    for (const other of document.querySelectorAll('select.stock-choice')) {
+      other.value = stockChoice;
+    }
   };
   return stock;
 }
@@ -1154,9 +1162,20 @@ function renderStep() {
       el('p', {}, 'Converged: no further cut is expected to add removal rate. The best stable cuts are below.'),
       el('p', {}, `One more round can find how hard the best cut (${bestSpeed(best)}, ${length(best.width_mm, units())} wide, ${length(best.depth_mm, units())} deep) can be pushed: the same cut at rising chip loads, asked for at ${best.ask_rpm} rpm, lightest first. Its cuts do not change the map.`),
       el('p', {}, button('Plan the chip-load sweep', async () => {
-        await act('plan_sweep', stockChoice);
-        stockChoice = 'same';
+        if (await act('plan_sweep', stockChoice)) {
+          stockChoice = 'same';
+        }
       }, { className: 'primary' }), ' on the ', stock),
+      ...(state.check ? checkOffer('secondary') : []),
+      el('p', {}, button('Download the report', downloadReport), ' as it stands.'),
+    );
+    return;
+  }
+
+  if (state.next === 'check') {
+    step.append(
+      el('p', {}, 'Converged: no further cut is expected to add removal rate. The best stable cuts are below.'),
+      ...checkOffer('primary'),
       el('p', {}, button('Download the report', downloadReport), ' as it stands.'),
     );
     return;
@@ -1192,15 +1211,25 @@ function renderStep() {
     const moved = !first && state.next_level_mm !== state.level_mm;
     const label = `Plan round ${state.rounds.length + 1}${moved ? ` at ${length(state.next_level_mm, units())} ${deep ? 'width' : 'depth'}` : ''}`;
     const plan = button(label, async () => {
-      await act('plan', first ? 'same' : stockChoice);
-      stockChoice = 'same';
+      if (await act('plan', first ? 'same' : stockChoice)) {
+        stockChoice = 'same';
+      }
     }, { className: 'primary' });
     const settled = deep
       ? `${length(state.level_mm, units(), { mmToo: true })} width is settled. Next come cuts ${held(state.next_level_mm, { mmToo: true })}, starting from the depths that were stable.`
       : `${length(state.level_mm, units(), { mmToo: true })} depth is settled. Next come cuts ${held(state.next_level_mm, { mmToo: true })}, starting from the widths that were stable.`;
-    const next = moved ? settled : 'Plan the next cuts from what was measured.';
+    // A check of the other direction says nothing of whether its level is settled.
+    const afterCheck = state.rounds.at(-1)?.planner === 'check';
+    const next = moved && !afterCheck ? settled : 'Plan the next cuts from what was measured.';
     step.append(el('p', {}, seedPlanText() ?? (first ? 'Plan a coarse grid of test cuts.' : next)));
     step.append(el('p', {}, plan, ...(first ? [] : [' on the ', stock])));
+    // A session an older dechatter converged may search on here: its check is on offer anyway.
+    if (state.check) {
+      step.append(
+        el('p', { className: 'muted' }, `The map is still searching. A ${state.check.direction} check now repeats today's best cuts instead:`),
+        ...checkOffer('secondary'),
+      );
+    }
     return;
   }
 
@@ -1219,14 +1248,17 @@ function renderStep() {
   const unknownUnits = cnc.link === 'ready' && cnc.units === null;
   const [first, ...later] = round.legs;
   const midFacings = later.filter((leg) => leg.reface_mm > 0);
+  const kind = round.planner === 'check' ? ` of the ${round.direction} check` : '';
   step.append(
-    el('p', {}, `Round ${round.round}: ${tests} test cuts ${held(round.level_mm, { mmToo: true })}${round.milling === 'slot' ? ', each a full-width slot' : ''}, about ${minutes(round.run_time_s)} plus rapids. ${legsText(round)}`),
+    el('p', {}, `Round ${round.round}${kind}: ${tests} test cuts ${held(round.level_mm, { mmToo: true })}${round.milling === 'slot' ? ', each a full-width slot' : ''}, about ${minutes(round.run_time_s)} plus rapids. ${legsText(round)}`),
     el('ol', {},
       el('li', {}, first.reface_mm > 0
         ? `First the program faces the top down ${length(first.reface_mm, units(), { mmToo: true })}, to Z ${length(-first.top_mm, units(), { mmToo: true })}, and starts again at the first lane. Keep the zero the block was first cut with (X at the left end, Y on the front face as first mounted, Z on the top as first mounted). The facing is not analysed.`
-        : first.top_mm > 0 || (first.lane > 1 && first.face_y_start_mm === 0)
+        : first.top_mm > 0 || round.start === 'in use'
           ? 'Keep the zero the block was first cut with (X at the left end of the stock, Y on its front face as first mounted, Z on its top as first mounted).'
           : 'Zero X at the left end of the stock, Y on its front face, Z on top.'),
+      ...(round.planner === 'check' ? [el('li', {}, `Every pass cuts ${round.direction}, feeding ${round.direction === 'climb' ? '−X from the right end' : '+X from the left end'} of the stock, the other way to the session's rounds; its lanes start from that end. Its verdicts do not change the map.`)] : []),
+      ...(round.direction === 'climb' ? [el('li', {}, 'Climb milling needs a machine without backlash (ball screws). With backlash the cutter can pull the table into the cut: feed-hold at the first snatch.')] : []),
       el('li', {}, start, ' runs the round from here, one move at a time, and records it. Keep this tab open.', ...(unknownUnits ? [' cncjs has not reported G20 or G21 yet; the machine is in ', declare] : [])),
       ...midFacings.map((leg) => el('li', {}, `Before pass ${leg.first_pass}, as ${round.lanes > 1 ? 'the lanes left have' : round.milling === 'slot' ? 'the top has' : 'the face has'} no room for the next cut, the program faces the top down ${length(leg.reface_mm, units(), { mmToo: true })}, to Z ${length(-leg.top_mm, units(), { mmToo: true })}, and goes on at the first lane with the same zero${state.spindle === 'manual' ? '' : ', without stopping'}. The recording runs on; the facing is not analysed.`)),
       ...(round.order === 'deepest-first' ? [el('li', {}, 'The deepest cuts come first: stock is only clear down to the shallowest cut made in front of it. The first pass is the heaviest, so be ready to stop it.')] : []),
@@ -1239,6 +1271,36 @@ function renderStep() {
   if (round.has_recording) {
     step.append(el('p', {}, 'The last run could not be analysed. Run the round again, or ', button('Analyse the last recording again', () => act('analyze', round.round))));
   }
+}
+
+// The checks of the other direction on offer: a level to pick, each with its best cut and
+// the sizes the check cuts, and the button that plans it on the block chosen.
+// `emphasis` is 'primary' where the check is what comes next, else 'secondary'.
+function checkOffer(emphasis) {
+  const { direction, offers } = state.check;
+  const u = units();
+  const deep = state.vary === 'depth';
+  const unit = u === 'in' ? 'in' : 'mm';
+  const sizes = (offer) => offer.cuts_mm.map((mm) => length(mm, u).split(' ')[0]).join(', ');
+  const pick = el('select', {}, ...offers.map((offer) => el('option', { value: String(offer.level_mm) }, `${held(offer.level_mm)}: ${offer.rpm} rpm, ${sizes(offer)} ${unit} ${deep ? 'deep' : 'wide'}`)));
+  if (offers.some((offer) => String(offer.level_mm) === checkChoice)) {
+    pick.value = checkChoice;
+  }
+  pick.onchange = () => {
+    checkChoice = pick.value;
+  };
+  const stock = stockSelect();
+  const plan = button(`Plan the ${direction} check`, async () => {
+    if (await act('plan_check', stockChoice, Number(pick.value))) {
+      stockChoice = 'same';
+    }
+  }, emphasis === 'primary' ? { className: 'primary' } : {});
+  const order = deep ? 'deepest first, as the stock demands' : 'lightest first';
+  return [
+    el('p', {}, `A ${direction} check cuts a level's best cut ${direction} at its speed: lighter ${deep ? 'depths' : 'widths'} up to it, the cut itself and a step beyond (Advanced planner settings), ${order}. It answers whether that cut also holds ${direction}, as on the passes of a zigzag face that go the other way. Its verdicts do not change the map. One level per round; pick it here.`),
+    el('p', {}, plan, ' at ', pick, ' on the ', stock),
+    ...(direction === 'climb' ? [el('p', { className: 'muted' }, 'Climb milling needs a machine without backlash (ball screws).')] : []),
+  ];
 }
 
 // Where on the stock a leg of a round cuts: its lane, when the stock is in lanes.
@@ -1311,7 +1373,7 @@ function renderRound() {
   if (!round) {
     return;
   }
-  const kind = { sweep: ' (chip-load sweep)', confirm: ' (confirmation)' }[round.planner] ?? '';
+  const kind = { sweep: ' (chip-load sweep)', confirm: ' (confirmation)', check: ` (${round.direction} check)` }[round.planner] ?? '';
   const lanes = round.legs.map((leg) => leg.lane);
   const where = round.lanes > 1 ? `, ${lanes.length > 1 ? 'lanes' : 'lane'} ${lanes.join(', ')} of ${round.lanes}` : '';
   const faced = round.legs.slice(1).some((leg) => leg.reface_mm > 0) ? ', top faced midway' : '';
@@ -1420,7 +1482,7 @@ function renderMap() {
 // the one asked for. A chip-load sweep's cuts stay off the map.
 function speedCell(round, pass) {
   const heard = pass.heard_rpm === null ? null : Math.round(pass.heard_rpm);
-  const mapped = pass.kind === 'test' && pass.verdict !== null && round.planner !== 'sweep';
+  const mapped = pass.kind === 'test' && pass.verdict !== null && !['sweep', 'check'].includes(round.planner);
   if (heard !== null && heard !== pass.rpm) {
     const use = mapped ? ': the map and the results use the speed heard' : '';
     return el('td', { title: `Asked for ${pass.rpm} rpm, heard ${heard} rpm in the cut${use}.` }, `${pass.rpm} → ${heard}`);
@@ -1459,6 +1521,7 @@ function renderBest() {
   );
   const sweep = state?.sweep;
   $('sweep-result').hidden = !sweep || best.length === 0;
+  renderChecks(best.length === 0 ? [] : state?.checks ?? []);
   if (!sweep) {
     return;
   }
@@ -1468,6 +1531,40 @@ function renderBest() {
   $('sweep-result').textContent = sweep.chip_load_mm === null
     ? `Chip-load sweep: ${where}, even its lightest pass chattered. Keep the session's ${chipLoad(sweep.session_chip_load_mm, u, { mmToo: true })} per tooth.`
     : `Chip-load sweep: ${where}, the cut stayed stable ${sweep.untopped ? 'at every chip load tried, up to' : 'up to'} ${chipLoad(sweep.chip_load_mm, u, { mmToo: true })} per tooth (the session used ${chipLoad(sweep.session_chip_load_mm, u)}): feed ${feed(sweep.feed_mm_min, u, { mmToo: true })}, ${rate(sweep.mrr_cm3_min, u, { mmToo: true })}.${sweep.untopped ? ' None chattered, so its limit lies higher.' : ''}`;
+}
+
+const HEARD = { stable: 'held', unstable: 'chatter' };
+// The statuses of a pass the run never cut, as the engine's session.UNHEARD lists them.
+const UNHEARD = ['missing', 'likely not run', 'not run'];
+
+// One table per check of the other direction: which of its cuts held, apart from the map.
+function renderChecks(checks) {
+  const u = units();
+  const deep = state?.vary === 'depth';
+  $('check-results').hidden = checks.length === 0;
+  $('check-results').replaceChildren(
+    ...checks.flatMap((check) => {
+      const size = (cut) => length(deep ? cut.depth_mm : cut.width_mm, u);
+      const reach = check.held_mm === null
+        ? check.cuts.some((cut) => cut.verdict === 'stable')
+          ? `the lightest cut run did not hold ${check.direction} or was not heard, so none counts as held`
+          : `no cut was heard to hold ${check.direction}`
+        : `held ${check.direction} up to ${length(check.held_mm, u, { mmToo: true })} ${deep ? 'deep' : 'wide'}`;
+      return [
+        el('h3', {}, `${check.direction[0].toUpperCase()}${check.direction.slice(1)} check, round ${check.round}, ${held(check.level_mm)}: ${reach}`),
+        el('table', {},
+          el('thead', {}, el('tr', {}, ...['rpm', deep ? 'depth' : 'width', 'feed', 'removal', check.direction].map((h) => el('th', {}, h)))),
+          el('tbody', {}, ...check.cuts.map((cut) => el('tr', {},
+            el('td', {}, String(cut.rpm)),
+            el('td', {}, size(cut)),
+            el('td', {}, feed(cut.feed_mm_min, u)),
+            el('td', {}, rate(cut.mrr_cm3_min, u)),
+            el('td', { className: cut.verdict ?? '' }, cut.verdict ? HEARD[cut.verdict] : UNHEARD.includes(cut.status) ? 'not run' : 'not heard'),
+          ))),
+        ),
+      ];
+    }),
+  );
 }
 
 function render() {

@@ -20,7 +20,9 @@ from .detect import Verdict
 # 2: dechatter 0.2.0 (planned_on, per-pass chip loads); 3: 0.6.0 (a round in legs, across
 # lanes and faced tops; what the session varies, and each pass's own depth). A schema-2
 # plan still loads, as one leg (see _one_leg), stepping the width (see _stepping_width).
-SCHEMA = 3
+# 4: 0.8.0 (the direction a round cuts in, what its first leg starts on). A schema-3 plan
+# still loads, cut in its setup's direction (see Plan.load and session.load_rounds).
+SCHEMA = 4
 SPINDLE_EFFICIENCY = 0.8
 SPEED_TOLERANCE_RPM = 0.5
 ENGAGEMENT_TOLERANCE_MM = 1e-6
@@ -52,6 +54,21 @@ class PlannerKind(StrEnum):
     # A session started from an earlier one: a few cuts where that one predicts the best
     # cut, and one in its chatter band as a control, instead of the grid (see seeding).
     CONFIRM = "confirm"
+    # The best cut of one level, in a ramp up to it and beyond, cut in the other direction
+    # than the session's; not part of the stability map.
+    CHECK = "check"
+
+
+# Rounds that follow convergence: their cuts stay off the stability map, and they are
+# planned only where all their cuts fit (cut short, their heaviest cuts would go untried).
+FOLLOW_UP = frozenset({PlannerKind.SWEEP, PlannerKind.CHECK})
+
+
+class Start(StrEnum):
+    """What a round's first leg is cut into."""
+
+    FRESH = "fresh"  # a top no round cut into yet: fresh stock, a faced top
+    IN_USE = "in use"  # a top earlier rounds cut into, even where this leg's lane is whole
 
 
 class Milling(StrEnum):
@@ -86,6 +103,26 @@ def order(vary: Vary, kind: Milling, lanes: int) -> Order:
     if kind is Milling.SLOT and lanes == 1:
         return Order.RAMP
     return Order.DEEPEST_FIRST
+
+
+def other_direction(direction: Direction) -> Direction:
+    if direction is Direction.CLIMB:
+        return Direction.CONVENTIONAL
+    return Direction.CLIMB
+
+
+def cut_direction(setup: Setup, planner: PlannerKind) -> Direction:
+    """The direction a round cuts in: the session's, or for a check the other one."""
+    if planner is PlannerKind.CHECK:
+        return other_direction(setup.cut.direction)
+    return setup.cut.direction
+
+
+def cutting(setup: Setup, direction: Direction) -> Setup:
+    """The setup, cutting in `direction`: lanes, travel and the program follow it."""
+    if setup.cut.direction is direction:
+        return setup
+    return replace(setup, cut=replace(setup.cut, direction=direction))
 
 
 @dataclass(frozen=True)
@@ -142,9 +179,15 @@ class Plan:
     dwell_s: float
     # The passes in the order they run, in legs of one lane each: the round fills what is
     # left of its lane, goes on into the lanes after it, and once every lane is used may face
-    # the top down and start again at the first lane (1 is the one the cutter meets first).
+    # the top down and start again at the first lane (1 is the one the cutter meets first,
+    # cutting in `direction`).
     legs: tuple[Leg, ...]
     planned_on: str  # ISO date
+    # The direction the round cuts in: the session's, or the other for a check. None only
+    # in a plan of dechatter 0.7.0 or older, read alone: it cut in the direction of the setup
+    # beside it, which session.load_rounds fills in.
+    direction: Direction | None
+    start: Start
     lanes: int = 1
     schema: int = SCHEMA
 
@@ -199,6 +242,8 @@ class Plan:
     @staticmethod
     def load(path: Path) -> Plan:
         data = json.loads(path.read_text(encoding="utf-8"))
+        if data.get("schema") == 3:
+            data = {**data, "schema": SCHEMA}
         if data.get("schema") == 2:
             data = _one_leg(data)
         if data.get("schema") != SCHEMA:
@@ -214,6 +259,7 @@ class Plan:
             )
             for leg in data.pop("legs")
         )
+        direction = data.pop("direction", None)
         return Plan(
             **{
                 **data,
@@ -221,6 +267,8 @@ class Plan:
                 "vary": Vary(data["vary"]),
                 "milling": Milling(data["milling"]),
                 "legs": legs,
+                "direction": None if direction is None else Direction(direction),
+                "start": Start(data["start"]) if "start" in data else _start_of(legs[0]),
             }
         )
 
@@ -228,6 +276,13 @@ class Plan:
 def _pass(p: dict) -> Pass:
     expected = Verdict(p["expected"]) if p.get("expected") else None
     return Pass(**{**p, "kind": PassKind(p["kind"]), "expected": expected})
+
+
+def _start_of(first: Leg) -> Start:
+    """What the first leg of a plan of dechatter 0.7.0 or older started on. Every round then
+    cut one way, and one that started at Y0 of its first lane had nothing cut before it on
+    that top: earlier rounds' cuts would have left it further on."""
+    return Start.FRESH if first.lane == 1 and first.face_y_start_mm == 0 else Start.IN_USE
 
 
 def _stepping_width(data: dict) -> dict:
@@ -761,13 +816,16 @@ def _lay_out(
     face: Face,
     made: tuple[Made, ...],
     lanes: int,
+    lanes_open: int | None = None,
 ) -> tuple[list[Leg], list[tuple]]:
     """The legs the tests fill in cut order from `face` on, and the tests left over.
 
     A leg takes the tests that fit on its lane, up to the first that does not, or that cuts
     deeper than the stock in front of it is clear (see _face_floor and _lane_floor; `made`:
     the passes cut into the top as it stands). The next leg is the next lane: fresh at Y0,
-    cut back no further than this one was. Once no lane of this top takes the next test, or
+    cut back no further than this one was, and on this top no further than lane
+    `lanes_open` (None: the last; the lanes after it hold cuts made in the other direction,
+    which started from the other end). Once no lane of this top takes the next test, or
     the top was cut the other way (slots under a face to mill, or the reverse), or the top
     is faced only in part (a facing stopped part-way), the top comes down below the deepest
     of those cuts, given stock.height_mm and while the deepest cut left would stay the
@@ -779,11 +837,17 @@ def _lay_out(
     cut = list(made)
     # Nothing is cut on a top that holds the other kind of cut, or is faced only in part.
     unfit = any(m.milling is not kind for m in cut) or face.top is not Top.FLAT
-    left = cut_order(setup, tests, lanes, _face_floor(setup, face.lane, cut))
+    open_here = lanes if lanes_open is None else lanes_open
+    # Cut order follows the face the round starts on, if it can cut there at all.
+    usable = not unfit and face.lane <= open_here
+    left = cut_order(
+        setup, tests, lanes, _face_floor(setup, face.lane, cut) if usable else math.inf
+    )
     legs: list[Leg] = []
     here, reface = face, 0.0
     while left:
-        prep, kept = ([], []) if unfit else _fill(setup, env, here, left, cut)
+        usable = not unfit and here.lane <= open_here
+        prep, kept = _fill(setup, env, here, left, cut) if usable else ([], [])
         if kept:
             first_id = sum(len(leg.passes) for leg in legs)
             legs.append(_leg(setup, env, lanes, here, reface, prep, kept, first_id))
@@ -797,9 +861,12 @@ def _lay_out(
         if not left:
             break
         beyond = Face(here.lane + 1, 0.0, 0.0, here.y_mm, here.top_mm)
-        further = here.y_mm > 0 and here.lane < lanes and not unfit
-        if further and _fill(setup, env, beyond, left, cut)[1]:
-            here = beyond
+        further = here.y_mm > 0 and here.lane < open_here and not unfit
+        # A fresh lane is clear as deep as the lane before was cut at its start: the cuts no
+        # deeper than that first, deepest first, whatever this lane's face allowed.
+        ahead = cut_order(setup, left, lanes, _lane_floor(kind, beyond.lane, 0.0, cut))
+        if further and _fill(setup, env, beyond, ahead, cut)[1]:
+            here, left = beyond, ahead
             continue
         # Every lane of this top is used, or none would hold the next test (a lane after this
         # one may go no further back, nor deeper): only a fresh top can, once a round.
@@ -811,19 +878,23 @@ def _lay_out(
         deepest = max(cut_size(setup, test[1])[1] for test in left)
         if lower.top_mm + deepest + setup.program.clearance_mm > height:
             break
-        if not _fill(setup, env, lower, left, [])[1]:
+        # A fresh top: deepest first again, whatever the face before allowed.
+        fresh = cut_order(setup, left, lanes)
+        if not _fill(setup, env, lower, fresh, [])[1]:
             break
-        here, cut, unfit, reface = lower, [], False, down
+        here, cut, unfit, reface, open_here, left = lower, [], False, down, lanes, fresh
     return legs, left
 
 
 def _no_room(
     setup: Setup,
     round_no: int,
+    planner: PlannerKind,
     tests: list[tuple],
     face: Face,
     made: tuple[Made, ...],
     lanes: int,
+    lanes_open: int | None,
     legs: list[Leg],
 ) -> str:
     if setup.stock.height_mm is None:
@@ -839,9 +910,18 @@ def _no_room(
             f"must face it again first, and it has no room to. {hint}."
         )
     if legs:
+        name = "chip-load sweep"
+        if planner is PlannerKind.CHECK:
+            name = f"{setup.cut.direction} check"
         return (
-            f"the chip-load sweep needs room for all its {len(tests)} cuts: no face left has "
+            f"the {name} needs room for all its {len(tests)} cuts: no face left has "
             f"room for them. {hint}."
+        )
+    if lanes_open is not None and face.lane > lanes_open:
+        return (
+            f"round {round_no} cuts {setup.cut.direction}, using the lanes from the end of the "
+            "stock that direction meets first, and every lane from there up to those cut the "
+            f"other way is used. {hint}."
         )
     slots = milling(setup) is Milling.SLOT
     if any(m.milling is not milling(setup) for m in made):
@@ -887,37 +967,46 @@ def assemble(
     face: Face = FRESH,
     made: tuple[Made, ...] = (),
     lanes: int | None = None,
+    lanes_open: int | None = None,
 ) -> Plan:
     """Lay the tests out on the stock from `face` on, in legs that each prepare their face
-    first (see _lay_out), on the setup's lanes unless `lanes` says otherwise.
+    first (see _lay_out), on the setup's lanes unless `lanes` says otherwise, cutting in the
+    setup's direction.
 
     A test is (rpm, engagement, P(stable)), in a chip-load sweep (rpm, engagement, None,
     chip load), already lightest first, or in a confirmation round (rpm, engagement,
     P(stable), None, the verdict expected); the engagement is the width, or the depth when the
     setup steps that. `made` are the passes cut into the top as it stands (none: it is
-    untouched). Tests left over once the stock runs out are dropped, the heaviest ones: a
-    ramp leaves them for last, and a round that runs deepest first is laid out again without
-    them, since the lighter cuts are what the heavier ones were chosen on; so too when its
-    deepest cut fits nowhere (deeper than any face left is clear, or too near what the stock
-    stands on) and lighter ones do. But a chip-load sweep must fit whole: cut short, its
-    heaviest chip loads would go untried and the lightest read as a limit.
+    untouched), and of its lanes only the first `lanes_open` may be cut (None: all; the rest
+    hold cuts made in the other direction). Tests left over once the stock runs out are
+    dropped, the heaviest ones: a ramp leaves them for last, and a round that runs deepest
+    first is laid out again without them, since the lighter cuts are what the heavier ones
+    were chosen on; so too when its deepest cut fits nowhere (deeper than any face left is
+    clear, or too near what the stock stands on) and lighter ones do. But a round that
+    follows convergence (a chip-load sweep, a check of the other direction) must fit whole:
+    cut short, its heaviest cuts would go untried and the lightest read as a limit.
     """
     lanes = lanes or auto_lanes(setup, env)
     asked = tests
-    legs, left = _lay_out(setup, env, tests, face, made, lanes)
-    if left and planner is PlannerKind.SWEEP:
-        raise PlanError(_no_room(setup, round_no, asked, face, made, lanes, legs))
+    legs, left = _lay_out(setup, env, tests, face, made, lanes, lanes_open)
+    if left and planner in FOLLOW_UP:
+        raise PlanError(
+            _no_room(setup, round_no, planner, asked, face, made, lanes, lanes_open, legs)
+        )
     deepest_first = order(setup.cut.vary, milling(setup), lanes) is Order.DEEPEST_FIRST
     while left and deepest_first and len(tests) > 1:
         # With nothing laid out the heaviest test is in the way: try without it.
         keep = len(tests) - len(left) if legs else len(tests) - 1
         lighter = sorted(tests, key=lambda t: (t[1], t[0]))[:keep]
-        again, rest = _lay_out(setup, env, lighter, face, made, lanes)
+        again, rest = _lay_out(setup, env, lighter, face, made, lanes, lanes_open)
         if legs and not again:
             break
         tests, legs, left = lighter, again, rest
     if not legs:
-        raise PlanError(_no_room(setup, round_no, asked, face, made, lanes, legs))
+        raise PlanError(
+            _no_room(setup, round_no, planner, asked, face, made, lanes, lanes_open, legs)
+        )
+    whole = not made and face.lane == 1 and face.y_mm == 0 and face.remnant_mm == 0
     return Plan(
         round=round_no,
         planner=planner,
@@ -930,6 +1019,8 @@ def assemble(
         dwell_s=setup.program.dwell_s,
         legs=tuple(legs),
         planned_on=date.today().isoformat(),
+        direction=setup.cut.direction,
+        start=Start.FRESH if whole else Start.IN_USE,
         lanes=lanes,
     )
 
@@ -976,6 +1067,29 @@ def _round1_speeds(cfg: Planner, env: Envelope) -> np.ndarray:
         return np.array([stops[i] for i in np.unique(picks.round().astype(int))], dtype=float)
     speeds = np.linspace(env.speed_min_rpm, env.speed_max_rpm, cfg.round1_speeds)
     return np.unique(np.round(speeds / cfg.speed_step_rpm) * cfg.speed_step_rpm)
+
+
+def check_tests(setup: Setup, env: Envelope, rpm: float, engagement_mm: float) -> list[tuple]:
+    """(rpm, engagement, None) for a check of one cut in the other direction, lightest
+    first: the planner's fractions of it (check_fractions, on the engagement step), the cut
+    itself, then check_steps_beyond steps heavier while they stay inside the search. The
+    power cap trims the heaviest."""
+    cfg = setup.planner
+    step = engagement_step_mm(setup)
+    sizes = {engagement_mm}
+    for fraction in cfg.check_fractions:
+        lighter = round(max(step, round(fraction * engagement_mm / step) * step), 6)
+        if lighter < engagement_mm - ENGAGEMENT_TOLERANCE_MM:
+            sizes.add(lighter)
+    for steps in range(1, cfg.check_steps_beyond + 1):
+        heavier = round(engagement_mm + steps * step, 6)
+        if heavier > env.engagement_top_mm + ENGAGEMENT_TOLERANCE_MM:
+            break
+        sizes.add(heavier)
+    limit = env.mrr_limit_mm3_min * (1 + 1e-9)
+    return [
+        (rpm, size, None) for size in sorted(sizes) if mrr_mm3_min(setup, env, rpm, size) <= limit
+    ]
 
 
 def grid_tests(setup: Setup, env: Envelope) -> list[tuple[float, float, None]]:

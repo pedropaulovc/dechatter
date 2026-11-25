@@ -179,11 +179,30 @@ a page the microphone on those. Then, in the widget:
    chip loads, from 0.6 to 1.7 times the session's (both Advanced planner settings), lightest
    first and inside the power cap. The result is the highest chip load that stayed stable,
    with its feed. Its cuts do not change the map, which stays at the session's chip load.
-8. Download the report: one HTML page to print (Letter or A4, black and white) and keep with
+8. Optionally, check the other direction. A zigzag face climbs on every other pass, so a cut
+   measured conventional is only half known. Once a depth has a best cut (a width, in a
+   session that steps the depth), the widget offers a climb check, or a conventional one in a
+   climb session: that cut at the speed it was asked at (like the chip-load sweep, not the
+   speed heard in it) and the session's chip load, at `check_fractions` of
+   its width (0.5, 0.75 and 1 by default), then `check_steps_beyond` steps wider (1; 0 for
+   none), lightest first and inside the power cap, every pass cut the other way. Both are
+   Advanced planner settings. Pick the depth to check: each is a round of its own, and every
+   depth's best cut is offered until it has been checked. The check is offered after
+   convergence and, beside the next round, before it too, so a session an older dechatter
+   converged gets its check here without more rounds of the map, even where this version's
+   planner would search on. Feed-hold when a cut chatters, as in any round. Its verdicts
+   never change the map: the widget and the report show each check in a table of its own,
+   which cuts held in the other direction and up to where. In a session that steps the depth,
+   cuts on the front face run deepest first, as the stock demands, and full-width slots get no
+   check: a slot cuts climb on one side and conventional on the other at once. Its `plan.json`
+   records the direction it cut in; sessions saved by older versions open as before. Climb
+   milling, in a check or a session, needs a machine without backlash (ball screws): with
+   backlash the cutter pulls the table into the cut.
+9. Download the report: one HTML page to print (Letter or A4, black and white) and keep with
    the tool. It holds the recommended cuts per depth with feed, removal rate and spindle
-   power, the stability map, every round's passes (marking verdicts set by hand) and the
-   setup. Lengths follow the machine's G20/G21, with mm beside. It is offered on convergence
-   and any time beside the best cuts.
+   power, any chip-load sweep and check of the other direction, the stability map, every
+   round's passes (marking verdicts set by hand) and the setup. Lengths follow the machine's
+   G20/G21, with mm beside. It is offered on convergence and any time beside the best cuts.
 
 Everything runs in the browser tab. Pyodide runs `dechatter`'s Python engine in a worker,
 which `dechatter widget` downloads once and copies into
@@ -486,6 +505,14 @@ The program says in a comment where it changes lane; the widget's round
 and the report list the lanes a round cuts and the pass each starts at. The next round
 starts where the last pass heard left the stock, in whichever lane that was.
 
+A check of the other direction uses the lanes from the other end: climbing, the right-hand
+lane is its first. Each direction goes on from where its own last round on the top left the
+stock, so the two work towards each other and neither cuts a lane the other has cut. Where
+they meet, the top is faced down (given `height_mm`) or fresh stock is asked for. A block of
+one lane is the exception: every pass runs its whole length, from the air beyond one end to
+the air beyond the other, so a check goes on along the same face. The program says which way
+its passes feed.
+
 ### Facing the top down
 
 Given how far the top of the stock (where Z0 is set) stands above anything the cutter must
@@ -509,10 +536,10 @@ A run that gets to facing partway leaves the stock as the facing left it: the ne
 finished, the old one if it never started, and if it stopped part-way, a top faced only in
 part, which the next round faces down again from the old top before any cut.
 
-A chip-load sweep is planned only where all its cuts fit, in what the lanes have left, on
-the lanes after them or on a faced top: cut short by the stock, its heaviest chip loads
-would go untried and the last one tried would read as a limit. A sweep whose every chip
-load stayed stable says so: its limit lies above them.
+A chip-load sweep, like a check of the other direction, is planned only where all its cuts
+fit, in what the lanes have left, on the lanes after them or on a faced top: cut short by the
+stock, its heaviest cuts would go untried and the last one tried would read as a limit. A
+sweep whose every chip load stayed stable says so: its limit lies above them.
 
 ## Development
 

@@ -150,6 +150,11 @@ class Planner:
     # The chip-load sweep after convergence, as multiples of the session's chip load.
     chip_load_sweep_low: float = 0.6
     chip_load_sweep_high: float = 1.7
+    # The check of the other direction offered once a level has a best cut: that cut at the
+    # session's chip load, at these fractions of its width (or depth) and itself, lightest
+    # first, then this many steps of the width (or depth) beyond it; 0: none beyond.
+    check_fractions: tuple[float, ...] = (0.5, 0.75, 1.0)
+    check_steps_beyond: int = 1
     # The shortest cut worth listening to, at the fastest test speed: bounds the automatic
     # number of lanes.
     min_cut_s: float = 6.0
@@ -516,7 +521,7 @@ def _validate(setup: Setup) -> None:
     if machine.min_rpm >= machine.max_rpm:
         raise ConfigError("[machine] min_rpm must be below max_rpm")
     _validate_speed_stops(machine)
-    for name in ("round1_width_fractions", "round1_depth_fractions"):
+    for name in ("round1_width_fractions", "round1_depth_fractions", "check_fractions"):
         fractions = getattr(setup.planner, name)
         if (
             not isinstance(fractions, tuple)
@@ -524,6 +529,9 @@ def _validate(setup: Setup) -> None:
             or not all(type(f) in (int, float) and 0 < f <= 1 for f in fractions)
         ):
             raise ConfigError(f"[planner] {name} must list numbers in (0, 1]")
+    steps_beyond = setup.planner.check_steps_beyond
+    if type(steps_beyond) is not int or steps_beyond < 0:
+        raise ConfigError("[planner] check_steps_beyond must be a whole number, 0 or more")
     depth_step = setup.planner.depth_step_mm
     if setup.planner.width_step_mm <= 0 or (depth_step is not None and depth_step <= 0):
         raise ConfigError("[planner] width_step_mm and depth_step_mm must be positive")
