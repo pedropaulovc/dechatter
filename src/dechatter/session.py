@@ -1068,8 +1068,10 @@ def _no_check(setup: Setup, level_mm: float | None) -> str:
 
 
 def check_of(setup: Setup, env: Envelope, best: StableCut) -> list:
+    """The cuts a check of `best` makes, at the speed to ask for to cut it again (ask_rpm),
+    not the one heard in it: the dial goes back where it was."""
     at = at_level(setup, level_of(setup, best))
-    return check_tests(at, env, best.rpm, engagement_of(setup, best))
+    return check_tests(at, env, ask_rpm(env, best), engagement_of(setup, best))
 
 
 @dataclass(frozen=True)
@@ -1229,14 +1231,14 @@ def to_check(
         if full_width(at_level(setup, level)):
             continue
         at = [c for c in found if abs(level_of(setup, c) - level) <= DEPTH_TOLERANCE_MM]
-        if not at or any(_cut_by(setup, check, at[0]) for check in done):
+        if not at or any(_cut_by(setup, env, check, at[0]) for check in done):
             continue
         if check_of(setup, env, at[0]):
             offers.append(at[0])
     return offers
 
 
-def _cut_by(setup: Setup, check: Check, best: StableCut) -> bool:
+def _cut_by(setup: Setup, env: Envelope, check: Check, best: StableCut) -> bool:
     """Whether a check answered for `best` in the other direction: it heard that cut, or a
     lighter one (or the cut itself) chatter at its speed, which settles it without cutting
     it. A check stopped before telling either way is offered again."""
@@ -1245,8 +1247,10 @@ def _cut_by(setup: Setup, check: Check, best: StableCut) -> bool:
     # The level matched: only the stepped size tells cuts apart. A pass's held size is
     # rounded to the micron (make_pass), the level's (4.7625 mm for 3/16 in) is not.
     size = engagement_of(setup, best)
+    # A check asks for the speed the best cut was asked at (see check_of), as a sweep does.
+    speeds = (round(best.asked_rpm), round(ask_rpm(env, best)))
     for cut in check.cuts:
-        if cut.rpm != round(best.rpm):
+        if cut.rpm not in speeds:
             continue
         same = abs(check.engagement_mm(cut) - size) <= ENGAGEMENT_TOLERANCE_MM
         if same and cut.verdict is not None:

@@ -1322,7 +1322,7 @@ def test_a_check_of_the_other_direction_ramps_to_the_best_cut_and_stays_off_the_
     (only,) = offer["offers"]  # the template's one depth
     assert (only["level_mm"], only["rpm"], only["width_mm"]) == (
         best["depth_mm"],
-        best["rpm"],
+        best["ask_rpm"],
         best["width_mm"],
     )
     sizes = only["cuts_mm"]
@@ -1335,7 +1335,7 @@ def test_a_check_of_the_other_direction_ramps_to_the_best_cut_and_stays_off_the_
     assert (check["planner"], check["direction"], state["next"]) == ("check", "climb", "run")
     tests = [p for p in check["passes"] if p["kind"] == "test"]
     assert [p["width_mm"] for p in tests] == sizes, "lightest first"
-    assert {p["rpm"] for p in tests} == {best["rpm"]}
+    assert {p["rpm"] for p in tests} == {best["ask_rpm"]}, "asked again, not as heard"
     assert {p["chip_load_mm"] for p in check["passes"]} == {state["summary"]["chip_load_mm"]}
     program = engine.call("program", NAME, check["round"], "mm")
     assert "(CLIMB CHECK: every pass cuts climb, feeding -X from the right end" in program
@@ -1458,21 +1458,25 @@ def test_a_check_holds_only_as_far_as_its_cuts_were_heard(setup):
     assert quiet.held.width_mm == 1.0
 
     # Whether the check answered for the best cut (2 mm wide): heard, or a lighter one
-    # chattered; stopped after a heavier one chattered, it is offered again.
-    best = session.StableCut(1000.0, 5.0, 2000.0, 2.0)
-    assert session._cut_by(setup, ramp, best)
+    # chattered; stopped after a heavier one chattered, it is offered again. The best cut was
+    # heard at 1985 rpm; the check asks for 2000 again, as it did.
+    env = envelope(setup)
+    heard = session.SpeedSource.HEARD
+    best = session.StableCut(1000.0, 5.0, 1985.0, 2.0, 2000.0, heard)
+    assert session._cut_by(setup, env, ramp, best)
     early = check(
         (1.0, status.ANALYSED, stable), (1.5, status.ABORTED, chatter), (2.0, status.NOT_RUN, None)
     )
-    assert session._cut_by(setup, early, best)
-    assert not session._cut_by(setup, stopped, best)
+    assert session._cut_by(setup, env, early, best)
+    assert not session._cut_by(setup, env, stopped, best)
     # Held 3/16 in deep: its passes carry that depth rounded to the micron, the level not.
     # Every cut held, so only the best cut itself can answer.
     held = check((1.0, status.ANALYSED, stable), (2.0, status.ANALYSED, stable))
     inch = dataclasses.replace(
         held, level_mm=4.7625, cuts=tuple(dataclasses.replace(c, depth_mm=4.763) for c in held.cuts)
     )
-    assert session._cut_by(setup, inch, session.StableCut(1000.0, 4.7625, 2000.0, 2.0))
+    best = session.StableCut(1000.0, 4.7625, 1985.0, 2.0, 2000.0, heard)
+    assert session._cut_by(setup, env, inch, best)
 
 
 def test_a_session_planned_by_an_older_dechatter_gets_its_check(engine, setup):
@@ -1487,7 +1491,7 @@ def test_a_session_planned_by_an_older_dechatter_gets_its_check(engine, setup):
         path.write_text(json.dumps(data, indent=2), encoding="utf-8")
     state = engine.call("state", NAME)
     assert {r["direction"] for r in state["rounds"]} == {"conventional"}
-    assert state["best"][0] == best and state["check"]["offers"][0]["rpm"] == best["rpm"]
+    assert state["best"][0] == best and state["check"]["offers"][0]["rpm"] == best["ask_rpm"]
     state = engine.call("plan_check", NAME, "same", None)
     assert state["rounds"][-1]["direction"] == "climb"
 

@@ -308,7 +308,8 @@ class App:
         tests = session.check_of(self.setup, self.env, best)
         return {
             "level_mm": session.level_of(self.setup, best),
-            "rpm": best.rpm,
+            # The speed the check asks for: the best cut's own again (see session.check_of).
+            "rpm": session.ask_rpm(self.env, best),
             "width_mm": best.width_mm,
             "depth_mm": best.depth_mm,
             "cuts_mm": [round(test[1], 3) for test in tests],

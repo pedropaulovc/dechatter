@@ -182,7 +182,8 @@ a page the microphone on those. Then, in the widget:
 8. Optionally, check the other direction. A zigzag face climbs on every other pass, so a cut
    measured conventional is only half known. Once a depth has a best cut (a width, in a
    session that steps the depth), the widget offers a climb check, or a conventional one in a
-   climb session: that cut at its speed and the session's chip load, at `check_fractions` of
+   climb session: that cut at the speed it was asked at (like the chip-load sweep, not the
+   speed heard in it) and the session's chip load, at `check_fractions` of
    its width (0.5, 0.75 and 1 by default), then `check_steps_beyond` steps wider (1; 0 for
    none), lightest first and inside the power cap, every pass cut the other way. Both are
    Advanced planner settings. Pick the depth to check: each is a round of its own, and every

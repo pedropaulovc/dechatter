@@ -628,7 +628,7 @@ def test_full_width_slots_get_no_check_but_a_narrower_width_does():
     setup = slots(o=("radial_width_mm = 12.7", "radial_width_mm = 12.7\nother_widths_mm = [3.0]"))
     env = envelope(setup)
     found = [
-        session.StableCut(1000.0, 0.5, 1500.0, 12.7),
-        session.StableCut(300.0, 0.5, 1500.0, 3.0),
+        session.StableCut(1000.0, 0.5, 1500.0, 12.7, 1500.0, session.SpeedSource.ASKED),
+        session.StableCut(300.0, 0.5, 1500.0, 3.0, 1500.0, session.SpeedSource.ASKED),
     ]
     assert [best.width_mm for best in session.to_check(setup, env, found, [])] == [3.0]

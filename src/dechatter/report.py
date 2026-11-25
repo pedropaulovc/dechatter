@@ -315,7 +315,7 @@ The seed is {_e(SEED_STATUS[status])}.</p>
 </section>"""
 
 
-def _check_section(setup, check: session.Check, found, units: Units, power) -> str:
+def _check_section(setup, env, check: session.Check, found, units: Units, power) -> str:
     """A check of the other direction: which of its cuts held, the session's best marked."""
     deep = check.vary
     best = next(
@@ -326,7 +326,7 @@ def _check_section(setup, check: session.Check, found, units: Units, power) -> s
         size = _length(check.engagement_mm(cut), units)
         same = (
             best is not None
-            and cut.rpm == round(best.rpm)
+            and cut.rpm in (round(best.asked_rpm), round(session.ask_rpm(env, best)))
             and abs(check.engagement_mm(cut) - session.engagement_of(setup, best)) <= 1e-6
         )
         mrr = cut.width_mm * cut.depth_mm * cut.feed_mm_min
@@ -507,7 +507,7 @@ def render(session_dir: Path, units: Units) -> str:
             )
         )
     for check in session.checks(rounds):
-        recommended.append(_check_section(setup, check, found, units, power))
+        recommended.append(_check_section(setup, env, check, found, units, power))
 
     maps = []
     shown_levels = {r.plan.fixed_mm for r in rounds}
