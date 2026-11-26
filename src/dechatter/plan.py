@@ -14,7 +14,19 @@ from pathlib import Path
 import numpy as np
 
 from . import materials
-from .config import Direction, Planner, Setup, SpindleControl, Vary, full_width, slot_wall_mm
+from .config import (
+    Direction,
+    Planner,
+    Setup,
+    SpindleControl,
+    Vary,
+    face_step_mm,
+    full_width,
+    relief_room_mm,
+    relief_wall_mm,
+    side_milled,
+    slot_wall_mm,
+)
 from .detect import Verdict
 
 # 2: dechatter 0.2.0 (planned_on, per-pass chip loads); 3: 0.6.0 (a round in legs, across
@@ -22,7 +34,10 @@ from .detect import Verdict
 # plan still loads, as one leg (see _one_leg), stepping the width (see _stepping_width).
 # 4: 0.8.0 (the direction a round cuts in, what its first leg starts on). A schema-3 plan
 # still loads, cut in its setup's direction (see Plan.load and session.load_rounds).
-SCHEMA = 4
+# 5: 0.8.1 (how a pass meets the lane after its own, the reliefs milled between lanes, each
+# pass's lead-out, and the stock each lane had left when the round chose where to start). A
+# schema-4 plan still loads, its passes stopping in the stock as 0.8.0 cut them.
+SCHEMA = 5
 SPINDLE_EFFICIENCY = 0.8
 SPEED_TOLERANCE_RPM = 0.5
 ENGAGEMENT_TOLERANCE_MM = 1e-6
@@ -92,6 +107,18 @@ class Reach(StrEnum):
     PART = "part"  # stopped part-way: beyond where it stopped the stock stands uncut
 
 
+class LaneEnd(StrEnum):
+    """How a side-milling pass in a lane before the last meets the lane after its own."""
+
+    # dechatter 0.8.0: it stops in the stock, just short of the next lane. Its cutter then
+    # sweeps the thin crescent the pass before left at its own stop: near the stop the
+    # cutter engages its whole front quarter, as if cutting up to the face's depth wide.
+    STOP = "stop"
+    # 0.8.1: a pocket is milled where two lanes meet (see Relief). The pass ends in it and
+    # the next lane's passes start in it: both ends of every pass are in the air.
+    RELIEF = "relief"
+
+
 def order(vary: Vary, kind: Milling, lanes: int) -> Order:
     """A round that steps the depth cuts deepest first: stock is only clear down to the
     shallowest cut made in front of it, on a face and from one lane to the next, so a
@@ -140,15 +167,78 @@ class Pass:
     chip_load_mm: float | None = None  # a chip-load sweep's own; else the plan's
     # A confirmation cut: what the session this one was started from predicts for it.
     expected: Verdict | None = None
+    # The feed move after the cutter leaves the stock. None in a plan of dechatter 0.8.0 or
+    # older, whose analysis took the lead-in off both ends of the cut.
+    lead_out_s: float | None = None
+
+    @property
+    def lead_off_s(self) -> float:
+        """How long the cut move goes on once the cutter has left the stock."""
+        return self.lead_in_s if self.lead_out_s is None else self.lead_out_s
+
+
+@dataclass(frozen=True)
+class Milled:
+    """How far back from Y0 and how deep below the top a relief was milled."""
+
+    y_mm: float
+    depth_mm: float
+
+
+@dataclass(frozen=True)
+class Relief:
+    """A pocket where two lanes meet, at `boundary` k: between lanes k and k+1, counted as
+    the lanes are. The passes of lane k end in it and those of lane k+1 start in it, so
+    both ends of every pass are in the air and no pass ever crosses another lane.
+
+    It is milled the way the top is faced (see relief_rows): a cutter diameter and two row
+    steps (`step_mm`, see face_step_mm) long along X, from the front face back to `y_mm`
+    from Y0 and down to `depth_mm` below the leg's top, in rows and levels no larger than
+    facing's. It reaches as far back and as deep as the passes that use it in the round;
+    `done` are what earlier reliefs at the boundary milled on this top, left out."""
+
+    boundary: int
+    y_mm: float
+    depth_mm: float
+    step_mm: float
+    done: tuple[Milled, ...] = ()
+
+    @staticmethod
+    def load(data: dict) -> Relief:
+        return Relief(**{**data, "done": tuple(Milled(**m) for m in data.get("done", ()))})
+
+
+class Fit(StrEnum):
+    """Whether a lane takes the cut a round would make next in it."""
+
+    FITS = "fits"
+    NO_ROOM = "no room"  # too little stock left, or too shallow a face, for the cut
+    USED = "used"  # the round has cut it already on this top
+
+
+@dataclass(frozen=True)
+class LaneStock:
+    """A lane as a round found it when it chose a lane: the stock left behind its face (the
+    width to use, less how far back it was cut) and whether the cut to make fits on it."""
+
+    lane: int
+    left_mm: float
+    fit: Fit
+
+    @staticmethod
+    def load(data: dict) -> LaneStock:
+        return LaneStock(data["lane"], data["left_mm"], Fit(data["fit"]))
 
 
 @dataclass(frozen=True)
 class Leg:
     """Part of a round cut on one lane. With `reface_mm`, the program first takes the top
-    down that much, to `top_mm` below Z0, its feed moves taking `face_s`. Then the passes use
-    the lane's Y from `face_y_start_mm` on, no further than `lane_cap_mm`: what the lane
-    before it used (None: all the stock has). Side milling cuts the front face back by each
-    pass's width; a slot takes its width with `wall_mm` of stock left standing before it."""
+    down that much, to `top_mm` below Z0, its feed moves taking `face_s`; then it mills the
+    `reliefs` the leg's passes start or end in, taking `relief_s`. Then the passes use the
+    lane's Y from `face_y_start_mm` on, no further than `lane_cap_mm`: what the lane before
+    it used (None: all the stock has; only slots are bound by it now). Side milling cuts the
+    front face back by each pass's width; a slot takes its width with `wall_mm` of stock
+    left standing before it."""
 
     lane: int
     face_y_start_mm: float
@@ -158,6 +248,12 @@ class Leg:
     reface_mm: float = 0.0
     face_s: float = 0.0
     wall_mm: float = 0.0
+    reliefs: tuple[Relief, ...] = ()
+    relief_s: float = 0.0
+    # Side milling in lanes: the lanes as the round found them when it chose this leg's,
+    # the one with the most stock left that takes the leg's first cut. Empty where it had no
+    # choice to make: a block or top nothing was cut into yet, slots, a single lane.
+    lane_stock: tuple[LaneStock, ...] = ()
 
     @property
     def face_y_end_mm(self) -> float:
@@ -190,6 +286,9 @@ class Plan:
     start: Start
     lanes: int = 1
     schema: int = SCHEMA
+    # How passes meet the lane after their own. A plan of 0.8.0 or older, which has no such
+    # field, stopped them in the stock.
+    lane_end: LaneEnd = LaneEnd.STOP
 
     @cached_property
     def passes(self) -> tuple[Pass, ...]:
@@ -230,9 +329,13 @@ class Plan:
 
     @property
     def run_time_s(self) -> float:
-        """Feed moves and dwells, facing included. Rapids come on top and depend on the machine."""
-        cuts = sum(self.dwell_s + p.plunge_s + p.lead_in_s + p.expected_cut_s for p in self.passes)
-        return sum(leg.face_s for leg in self.legs) + cuts
+        """Feed moves and dwells, facing and reliefs included. Rapids come on top and depend
+        on the machine."""
+        cuts = sum(
+            self.dwell_s + p.plunge_s + p.lead_in_s + p.expected_cut_s + (p.lead_out_s or 0.0)
+            for p in self.passes
+        )
+        return sum(leg.face_s + leg.relief_s for leg in self.legs) + cuts
 
     def save(self, path: Path) -> None:
         # NaN and infinity are not JSON (the widget cannot read them back): refuse them here.
@@ -242,7 +345,7 @@ class Plan:
     @staticmethod
     def load(path: Path) -> Plan:
         data = json.loads(path.read_text(encoding="utf-8"))
-        if data.get("schema") == 3:
+        if data.get("schema") in (3, 4):
             data = {**data, "schema": SCHEMA}
         if data.get("schema") == 2:
             data = _one_leg(data)
@@ -255,6 +358,8 @@ class Plan:
                 **{
                     **leg,
                     "passes": tuple(_pass(p) for p in leg["passes"]),
+                    "reliefs": tuple(Relief.load(r) for r in leg.get("reliefs", ())),
+                    "lane_stock": tuple(LaneStock.load(s) for s in leg.get("lane_stock", ())),
                 }
             )
             for leg in data.pop("legs")
@@ -269,6 +374,7 @@ class Plan:
                 "legs": legs,
                 "direction": None if direction is None else Direction(direction),
                 "start": Start(data["start"]) if "start" in data else _start_of(legs[0]),
+                "lane_end": LaneEnd(data.get("lane_end", LaneEnd.STOP)),
             }
         )
 
@@ -485,40 +591,75 @@ class Travel:
     end: float  # where the feed move ends
 
 
-def travel(setup: Setup, lane: int, lanes: int, face_mm: float, width_mm: float) -> Travel:
+def travel(
+    setup: Setup,
+    lane: int,
+    lanes: int,
+    face_mm: float,
+    width_mm: float,
+    lane_end: LaneEnd = LaneEnd.RELIEF,
+) -> Travel:
     """The feed move of a pass `width_mm` wide whose far side along Y is `face_mm` from Y0:
     the face a side-milling pass leaves, or a slot's far wall.
 
-    A lane starts where the one before it was cut, so the cutter starts in the air: in front
-    of the stock in the first lane, and a diameter clear of what the lane before left at its
-    far end in the others. A pass in the last lane runs out past the stock's end. One in an
-    earlier lane stops in the stock, its cutter just short of the next lane, still uncut at
-    Y0: nowhere does it reach past that lane's start.
+    The first lane's passes start in the air in front of the stock's end, and the last
+    lane's run out past its other end. Where lanes meet, with `lane_end` RELIEF, a pocket is
+    milled at the boundary first (see Relief): a pass ends with its cutter centred on the
+    boundary, inside the pocket, and the next lane's passes start there, so both ends of
+    every pass are in the air and no pass crosses another lane. The cutter stops cutting at
+    the pocket's near wall and starts at its far one.
+
+    With STOP (dechatter 0.8.0, and slots, each in a row of its own), a lane starts where the
+    one before it was cut: the cutter starts a diameter clear of what that lane left at its
+    far end, and a pass in a lane before the last stops in the stock, its cutter just short
+    of the next lane, still uncut at Y0.
     """
     diameter, clearance = setup.tool.diameter_mm, setup.program.clearance_mm
     radius = diameter / 2
+    reach = _reach(diameter, width_mm)
     length = setup.stock.length_mm / lanes
     first, last = (lane - 1) * length, lane * length
-    start = first - radius - clearance - (radius if lane > 1 else 0.0)
-    contact = first - _reach(diameter, width_mm)
-    if lane == lanes:
-        leave = setup.stock.length_mm + _reach(diameter, width_mm)
-        return Travel(start, contact, leave, setup.stock.length_mm + radius + clearance)
-    stop = last - _reach(diameter, min(face_mm, radius))
-    return Travel(start, contact, stop, stop)
+    if lane_end is LaneEnd.STOP:
+        start = first - radius - clearance - (radius if lane > 1 else 0.0)
+        contact = first - reach
+        if lane == lanes:
+            leave = setup.stock.length_mm + reach
+            return Travel(start, contact, leave, setup.stock.length_mm + radius + clearance)
+        stop = last - _reach(diameter, min(face_mm, radius))
+        return Travel(start, contact, stop, stop)
+    wall = relief_wall_mm(setup)
+    start, contact = -radius - clearance, -reach
+    if lane > 1:
+        start, contact = first, first + wall - reach
+    leave, end = setup.stock.length_mm + reach, setup.stock.length_mm + radius + clearance
+    if lane < lanes:
+        leave, end = last - wall + reach, last
+    return Travel(start, contact, leave, end)
 
 
 def auto_lanes(setup: Setup, env: Envelope) -> int:
     """The setup's lanes, or when it leaves them empty, as many as the stock length holds
-    with every cut at least `planner.min_cut_s` long at the fastest test speed (where cuts
-    are shortest; with speed stops, the fastest stop) and every lane at least twice the
-    cutter diameter long."""
+    with every lane at least twice the cutter diameter long and every cut at least
+    `planner.min_cut_s` long at the fastest test speed (where cuts are shortest; with speed
+    stops, the fastest stop); where any level side-mills, those cuts and a cutter radius
+    must fit between the reliefs at a lane's inner ends (see Relief, assemble)."""
     if setup.stock.lanes is not None:
         return setup.stock.lanes
     fastest = env.speed_stops_rpm[-1] if env.speed_stops_rpm else env.speed_max_rpm
     feed_mm_s = env.chip_load_mm * setup.tool.flutes * fastest / 60
-    shortest = max(2 * setup.tool.diameter_mm, feed_mm_s * setup.planner.min_cut_s)
-    return max(1, int(setup.stock.length_mm / shortest + 1e-9))
+    cut = feed_mm_s * setup.planner.min_cut_s
+    shortest = 2 * setup.tool.diameter_mm
+    side = side_milled(setup)
+    lanes = max(1, int(setup.stock.length_mm / max(shortest, cut) + 1e-9))
+    while lanes > 1:
+        length = setup.stock.length_mm / lanes
+        room, need = length, cut
+        if side:
+            room, need = relief_room_mm(setup, lanes), max(cut, setup.tool.diameter_mm / 2)
+        if length >= shortest - 1e-9 and room >= need - 1e-9:
+            break
+        lanes -= 1
+    return lanes
 
 
 def lane_x_mm(setup: Setup, lane: int, lanes: int) -> tuple[float, float]:
@@ -528,6 +669,15 @@ def lane_x_mm(setup: Setup, lane: int, lanes: int) -> tuple[float, float]:
     if setup.cut.direction is Direction.CLIMB:
         first, last = setup.stock.length_mm - last, setup.stock.length_mm - first
     return round(first, 3), round(last, 3)
+
+
+def boundary_x_mm(setup: Setup, boundary: int, lanes: int) -> float:
+    """Where the boundary between lanes `boundary` and `boundary` + 1 lies along X, the
+    lanes counted in the setup's direction."""
+    at = boundary * setup.stock.length_mm / lanes
+    if setup.cut.direction is Direction.CLIMB:
+        at = setup.stock.length_mm - at
+    return round(at, 3)
 
 
 def make_pass(
@@ -558,6 +708,7 @@ def make_pass(
         p_stable=None if p_stable is None else round(p_stable, 3),
         chip_load_mm=chip_load_mm,
         expected=expected,
+        lead_out_s=round((path.end - path.leave) / feed * 60, 2),
     )
 
 
@@ -593,7 +744,7 @@ def facing_rows(setup: Setup, top_mm: float, reface_mm: float) -> list[FacingRow
     if reface_mm <= 0:
         return []
     radius, clearance = setup.tool.diameter_mm / 2, setup.program.clearance_mm
-    step = setup.program.face_width_mm or setup.tool.diameter_mm / 4
+    step = face_step_mm(setup)
     depth = setup.stock.thickness_mm or setup.stock.width_mm
     rows = max(1, math.ceil(depth / step - 1e-9))
     levels = max(1, math.ceil(reface_mm / setup.program.face_depth_mm - 1e-9))
@@ -616,6 +767,85 @@ def facing_s(setup: Setup, rows: list[FacingRow], feed_mm_min: float) -> float:
     return sum(plunge + (r.end - r.start) / feed_mm_min * 60 for r in rows)
 
 
+@dataclass(frozen=True)
+class ReliefRow:
+    z_mm: float  # the level, from Z0
+    above_mm: float  # the floor already milled above it here, from Z0 (the top for the first)
+    y_mm: float  # the cutter's centre
+    start: float  # along the feed, as Travel
+    end: float
+
+
+def relief_rows(setup: Setup, lanes: int, top_mm: float, relief: Relief) -> list[ReliefRow]:
+    """The rows that mill `relief` into a top `top_mm` below Z0: levels no deeper than
+    program.face_depth_mm down to `relief.depth_mm`, each in rows along the feed from a step
+    (`relief.step_mm`) before the boundary to a step after it, as facing does: each row cuts
+    on its +Y side only, at most a step wide and a level deep. The rows reach back from the
+    front face a whole step at a time, the last one to `relief.y_mm`, so a relief extended
+    later keeps the rows an earlier one milled (`relief.done`, left out where one reached as
+    far back and as deep) where they were: the walls they left at the pocket's ends, scalloped
+    by their end caps, are never met by a row elsewhere, nor by a rapid move down to a level.
+
+    The pocket's ends are in the stock, where a row fed into its end would cut away the
+    crescents the end caps of the rows before it left, as wide as the pocket is deep so far,
+    as a pass stopped in the stock did (see Relief). So a row first plunges, at the plunge
+    feed, at its end and then at its start, into what the rows before left of its level
+    there (at most a step wide at the middle, and those crescents), and is then fed from one
+    to the other: never a full-width slot."""
+    radius, step = setup.tool.diameter_mm / 2, relief.step_mm
+    backs = [
+        min(step * (row + 1), relief.y_mm) for row in range(math.ceil(relief.y_mm / step - 1e-9))
+    ]
+    levels = max(1, math.ceil(relief.depth_mm / setup.program.face_depth_mm - 1e-9))
+    at = relief.boundary * setup.stock.length_mm / lanes
+    found = []
+    for level in range(levels):
+        down = relief.depth_mm * (level + 1) / levels
+        above = relief.depth_mm * level / levels
+        for back in backs:
+            if _row_milled(relief.done, back, down, step):
+                continue
+            found.append(
+                ReliefRow(
+                    round(top_mm + down, 3),
+                    round(top_mm + above, 3),
+                    round(back - radius, 3),
+                    round(at - step, 3),
+                    round(at + step, 3),
+                )
+            )
+    return found
+
+
+def _milled(done: tuple[Milled, ...], y_mm: float, depth_mm: float) -> bool:
+    """Whether reliefs milled at a boundary reach `y_mm` back and `depth_mm` deep: one of
+    them does, as each is milled from the front face and the top."""
+    return any(y_mm <= m.y_mm + 1e-6 and depth_mm <= m.depth_mm + DEPTH_TOLERANCE_MM for m in done)
+
+
+def _row_milled(done: tuple[Milled, ...], back_mm: float, depth_mm: float, step: float) -> bool:
+    """Whether an earlier relief at the boundary milled the row reaching `back_mm` from Y0,
+    in that very place, as deep as `depth_mm`: its rows reach a whole row step at a time and
+    its last one as far back as it goes (see relief_rows). A row anywhere else, such as the
+    last of a relief reaching less far back than an earlier one, is milled from the top: its
+    end caps would meet the scalloped walls the earlier rows left between them."""
+    whole = abs(back_mm / step - round(back_mm / step)) * step <= 1e-6
+    return any(
+        depth_mm <= m.depth_mm + DEPTH_TOLERANCE_MM
+        and (back_mm <= m.y_mm + 1e-6 and whole or abs(back_mm - m.y_mm) <= 1e-6)
+        for m in done
+    )
+
+
+def relief_s(setup: Setup, rows: list[ReliefRow], feed_mm_min: float) -> float:
+    """The feed moves of milling reliefs: each row's two plunges and its cut."""
+    clearance, plunge = setup.program.clearance_mm, setup.program.plunge_feed_mm_min
+    return sum(
+        2 * (clearance + r.z_mm - r.above_mm) / plunge * 60 + (r.end - r.start) / feed_mm_min * 60
+        for r in rows
+    )
+
+
 def wall_mm(setup: Setup) -> float:
     """The stock left standing before each pass along Y: a slot's wall; none in side milling."""
     return slot_wall_mm(setup) if milling(setup) is Milling.SLOT else 0.0
@@ -623,8 +853,8 @@ def wall_mm(setup: Setup) -> float:
 
 def lane_budget_mm(setup: Setup, lane_cap_mm: float | None) -> float:
     """How far from Y0 a lane's passes may go. Side milling: the stock width to use. Slots:
-    the stock's thickness, less the wall behind the last one. In a lane after the first, no
-    further than the lane before it was cut (the cutter crosses it)."""
+    the stock's thickness, less the wall behind the last one, and in a lane after the first
+    no further than the lane before it was cut (the cutter comes in through its slots)."""
     room = setup.stock.width_mm
     if milling(setup) is Milling.SLOT:
         room = (setup.stock.thickness_mm or setup.stock.width_mm) - slot_wall_mm(setup)
@@ -702,31 +932,112 @@ def _face_floor(setup: Setup, lane: int, made: list[Made]) -> float:
 ROW_TOLERANCE_MM = 0.01
 
 
-def _lane_floor(kind: Milling, lane: int, y_mm: float, made: list[Made]) -> float:
-    """How deep a cut reaching `y_mm` from Y0 may go in a lane after the first: the cutter
-    comes to it through the lane before, which is clear only as deep as it was cut there.
-    With no pass of that lane on record, only the face's cap bounds the cut.
-
-    A slot comes in through the slot of its own row and no other: beside it stand the walls.
-    That slot must have run the lane's length, since the cutter plunges inside its far end:
-    one stopped part-way clears nothing for the lane after it.
+def _lane_floor(lane: int, y_mm: float, made: list[Made]) -> float:
+    """How deep a slot reaching `y_mm` from Y0 may go in a lane after the first: it comes in
+    through the slot of its own row in the lane before, and no other (beside it stand the
+    walls), which is clear only as deep as it was cut. That slot must have run the lane's
+    length, since the cutter plunges inside its far end: one stopped part-way clears nothing
+    for the lane after it. With no pass of that lane on record, only the face's cap bounds
+    the cut. (Side-milling lanes do not bound each other: see Relief.)
     """
     before = [m for m in made if m.lane == lane - 1]
     if not before:
         return math.inf
-    if kind is Milling.SLOT:
-        row = [
-            m
-            for m in before
-            if m.milling is Milling.SLOT and abs(m.y_mm - y_mm) <= ROW_TOLERANCE_MM
-        ]
-        if not row or any(m.reach is Reach.PART for m in row):
-            return -math.inf
-        return min(m.depth_mm for m in row)
-    reached = [m for m in before if m.y_mm >= y_mm - 1e-6]
-    if not reached:
+    row = [
+        m for m in before if m.milling is Milling.SLOT and abs(m.y_mm - y_mm) <= ROW_TOLERANCE_MM
+    ]
+    if not row or any(m.reach is Reach.PART for m in row):
         return -math.inf
-    return min(reached, key=lambda m: m.y_mm).depth_mm
+    return min(m.depth_mm for m in row)
+
+
+def lane_end_of(setup: Setup) -> LaneEnd:
+    """How the setup's passes meet the lane after their own: side milling ends them in a
+    relief; a slot, in a row of its own, stops in the stock."""
+    return LaneEnd.RELIEF if milling(setup) is Milling.SIDE else LaneEnd.STOP
+
+
+def lane_face(lane: int, made: list[Made], top: Face) -> Face:
+    """Where a side-milling lane stands on the top `top` describes: its face as far back as
+    the passes that ran its length cut it, whichever way they cut, and the step beyond that
+    a pass stopped part-way left, to clear first. What 0.8.0 left where it stopped passes in
+    the stock, at the lane's ends, a relief clears. Lanes do not bound each other: no pass
+    crosses another lane (see Relief)."""
+    here = [m for m in made if m.lane == lane]
+    whole = max((m.y_mm for m in here if m.reach is Reach.END), default=0.0)
+    reached = max((m.y_mm for m in here), default=0.0)
+    return Face(lane, whole, max(reached - whole, 0.0), None, top.top_mm, top.top)
+
+
+def _choose(
+    setup: Setup,
+    env: Envelope,
+    tests: list[tuple],
+    made: list[Made],
+    lanes: int,
+    top: Face,
+    used: frozenset[int] = frozenset(),
+    open_lanes: int | None = None,
+) -> tuple[Face | None, list[tuple], tuple[LaneStock, ...]]:
+    """The lane a side-milling leg goes to on the top `top` describes: of the lanes the round
+    has not used on it yet (`used`), up to lane `open_lanes` (None: all), the one with the
+    most stock left behind its face (the thickest wall behind the cut) that takes the first
+    of `tests` in that lane's cut order, the first of equals in the order the direction
+    meets them; None when no lane does. Any lane is in reach: no pass crosses another lane,
+    and the leg mills the reliefs its passes start and end in as deep and as far back as
+    they go (see _reliefs). With the tests in the chosen lane's cut order, and each lane's
+    stock as the round found it."""
+    width = setup.stock.width_mm
+    fitting, stock = [], []
+    for lane in range(1, lanes + 1):
+        face = lane_face(lane, made, top)
+        left = round(max(width - face.y_mm - face.remnant_mm, 0.0), 3)
+        if lane in used:
+            stock.append(LaneStock(lane, left, Fit.USED))
+            continue
+        ordered = cut_order(setup, tests, lanes, _face_floor(setup, lane, made))
+        fits = (open_lanes is None or lane <= open_lanes) and bool(
+            _fill(setup, env, face, ordered, made)[1]
+        )
+        stock.append(LaneStock(lane, left, Fit.FITS if fits else Fit.NO_ROOM))
+        if fits:
+            fitting.append((left, -lane, face, ordered))
+    if not fitting:
+        return None, [], tuple(stock)
+    _, _, face, ordered = max(fitting, key=lambda found: found[:2])
+    return face, ordered, tuple(stock)
+
+
+def _reliefs(
+    lane: int,
+    lanes: int,
+    y_mm: float,
+    depth_mm: float,
+    step_mm: float,
+    relieved: dict[int, list[Milled]],
+) -> tuple[Relief, ...]:
+    """The reliefs a leg on `lane` mills before its passes, which reach `y_mm` from Y0 and
+    `depth_mm` deep: at the boundary its passes start at and the one they end at, wherever
+    none milled there on this top (`relieved`: boundary -> what was milled; updated) reaches
+    that far back and that deep. Each reaches only as far as the leg's passes (rounded up to
+    the micron), leaving out what was milled before, so the pocket keeps within what the
+    setup lets the passes cut."""
+    need = Milled(_micron_up(y_mm), _micron_up(depth_mm))
+    found = []
+    for boundary in (lane - 1, lane):
+        if not 0 < boundary < lanes:
+            continue
+        done = relieved.setdefault(boundary, [])
+        if _milled(tuple(done), need.y_mm, need.depth_mm):
+            continue
+        found.append(Relief(boundary, need.y_mm, need.depth_mm, step_mm, tuple(done)))
+        # What the new relief reaches past on both counts says nothing more.
+        done[:] = [m for m in done if not _milled((need,), m.y_mm, m.depth_mm)] + [need]
+    return tuple(found)
+
+
+def _micron_up(mm: float) -> float:
+    return math.ceil(round(mm * 1000, 6)) / 1000
 
 
 def _too_low(setup: Setup, top_mm: float, depth_mm: float) -> bool:
@@ -750,16 +1061,17 @@ def _fill(
     budget = lane_budget_mm(setup, face.cap_mm)
     wall = wall_mm(setup)
     floor = _face_floor(setup, face.lane, made)
+    slots = milling(setup) is Milling.SLOT
     kept = []
     for test in tests:
         width, depth = cut_size(setup, test[1])
         y += width + wall
-        clear = min(floor, _lane_floor(milling(setup), face.lane, y, made))
+        clear = min(floor, _lane_floor(face.lane, y, made)) if slots else floor
         if depth > clear + DEPTH_TOLERANCE_MM or y > budget + 1e-9:
             break
         if _too_low(setup, face.top_mm, depth):
             break
-        if milling(setup) is Milling.SIDE:
+        if not slots:
             floor = min(floor, depth)
         kept.append(test)
     return prep, kept
@@ -774,9 +1086,12 @@ def _leg(
     prep: list[tuple[float, float]],
     tests: list[tuple],
     first_id: int,
+    relieved: dict[int, list[Milled]],
+    lane_stock: tuple[LaneStock, ...] = (),
 ) -> Leg:
-    """The leg that prepares `face`, after taking the top down `reface_mm` to it, and cuts
-    `tests` on it; its passes are numbered from `first_id`."""
+    """The leg that prepares `face`, after taking the top down `reface_mm` to it and milling
+    the reliefs its passes need (see _reliefs; `relieved` is updated), and cuts `tests` on
+    it; its passes are numbered from `first_id`. `lane_stock`: the lanes it was chosen from."""
     if setup.machine.spindle is SpindleControl.MANUAL:
         # Every speed change is a stop at the machine: prepare the face at the leg's first speed.
         prep = [(tests[0][0], width) for _, width in prep]
@@ -788,14 +1103,21 @@ def _leg(
         *[(PassKind.TEST, rpm, *cut_size(setup, size), *rest) for rpm, size, *rest in tests],
     ]
     wall = wall_mm(setup)
+    ends = lane_end_of(setup)
     passes = []
     y = face.y_mm
     for kind, rpm, width, depth, *rest in planned:
         y += width + wall
-        path = travel(setup, face.lane, lanes, y, width)
+        path = travel(setup, face.lane, lanes, y, width, ends)
         pass_id = first_id + len(passes)
         passes.append(make_pass(setup, env, pass_id, kind, rpm, width, depth, path, *rest))
-    # The top comes down at the leg's first speed: no extra spindle stop.
+    reliefs = ()
+    if ends is LaneEnd.RELIEF:
+        deepest_cut = max(p.depth_mm for p in passes)
+        reliefs = _reliefs(face.lane, lanes, y, deepest_cut, face_step_mm(setup), relieved)
+    rows = [row for r in reliefs for row in relief_rows(setup, lanes, face.top_mm, r)]
+    # The top comes down, and the reliefs are milled, at the leg's first speed: no extra
+    # spindle stop.
     feed = env.chip_load_mm * setup.tool.flutes * passes[0].rpm
     return Leg(
         lane=face.lane,
@@ -806,7 +1128,18 @@ def _leg(
         reface_mm=round(reface_mm, 3),
         face_s=round(facing_s(setup, facing_rows(setup, face.top_mm, reface_mm), feed), 2),
         wall_mm=round(wall, 3),
+        reliefs=reliefs,
+        relief_s=round(relief_s(setup, rows, feed), 2),
+        lane_stock=lane_stock,
     )
+
+
+@dataclass(frozen=True)
+class Layout:
+    legs: list[Leg]
+    left: list[tuple]  # the tests left over
+    start: Face  # where the round started, or would have
+    stock: tuple[LaneStock, ...]  # the lanes it chose that from; empty without a choice
 
 
 def _lay_out(
@@ -817,27 +1150,54 @@ def _lay_out(
     made: tuple[Made, ...],
     lanes: int,
     lanes_open: int | None = None,
-) -> tuple[list[Leg], list[tuple]]:
+    reliefs: tuple[Relief, ...] = (),
+    pick: bool = False,
+) -> Layout:
     """The legs the tests fill in cut order from `face` on, and the tests left over.
 
     A leg takes the tests that fit on its lane, up to the first that does not, or that cuts
-    deeper than the stock in front of it is clear (see _face_floor and _lane_floor; `made`:
-    the passes cut into the top as it stands). The next leg is the next lane: fresh at Y0,
-    cut back no further than this one was, and on this top no further than lane
-    `lanes_open` (None: the last; the lanes after it hold cuts made in the other direction,
-    which started from the other end). Once no lane of this top takes the next test, or
-    the top was cut the other way (slots under a face to mill, or the reverse), or the top
-    is faced only in part (a facing stopped part-way), the top comes down below the deepest
-    of those cuts, given stock.height_mm and while the deepest cut left would stay the
-    clearance above it, and the round goes on at the first lane. A round faces the top at
-    most once: facing is slow, so the tests the lanes of the new top cannot hold are left
-    over (assemble drops them).
+    deeper than the stock in front of it is clear (see _face_floor; for slots _lane_floor).
+
+    With `pick` (side milling in lanes), `face` gives only the top, and each leg goes to the
+    lane the round has not used yet on this top with the most stock left that takes its
+    first cut (see _choose): the round starts there and goes on likewise. `made` are the
+    passes cut into the top as it stands, lanes counted in this round's direction; `reliefs`
+    those milled into it (see Relief). A relief milled with another row step than the
+    setup's (face_width_mm changed since) counts as not milled: its pocket is milled again
+    from the front, so every pocket a leg's passes meet is the one they are planned for.
+
+    Otherwise the next leg is the next lane, where it stands (side milling, see lane_face)
+    or fresh at Y0 and cut back no further than this one was (slots), and on this top no
+    further than lane `lanes_open` (None: the last; for slots, the lanes after it hold cuts
+    made in the other direction).
+
+    Once no lane of this top takes the next test, or the top was cut the other way (slots
+    under a face to mill, or the reverse), or the top is faced only in part (a facing
+    stopped part-way), the top comes down below the deepest of those cuts, given
+    stock.height_mm and while the deepest cut left would stay the clearance above it, and
+    the round goes on at the first lane. A round faces the top at most once: facing is
+    slow, so the tests the lanes of the new top cannot hold are left over (assemble drops
+    them).
     """
     kind = milling(setup)
+    side = kind is Milling.SIDE
     cut = list(made)
+    step = face_step_mm(setup)
+    relieved: dict[int, list[Milled]] = {}
+    for r in reliefs:
+        if abs(r.step_mm - step) <= 1e-6:
+            relieved.setdefault(r.boundary, []).append(Milled(r.y_mm, r.depth_mm))
     # Nothing is cut on a top that holds the other kind of cut, or is faced only in part.
     unfit = any(m.milling is not kind for m in cut) or face.top is not Top.FLAT
     open_here = lanes if lanes_open is None else lanes_open
+    choosing = pick and side and lanes > 1
+    stock: tuple[LaneStock, ...] = ()
+    if choosing and not unfit:
+        chosen, _, stock = _choose(setup, env, tests, cut, lanes, face, open_lanes=open_here)
+        # With no lane taking the first cut, the one with the most stock left, for the reason.
+        most = max(stock, key=lambda s: (s.left_mm, -s.lane)).lane
+        face = chosen or lane_face(most, cut, face)
+    start = face
     # Cut order follows the face the round starts on, if it can cut there at all.
     usable = not unfit and face.lane <= open_here
     left = cut_order(
@@ -845,31 +1205,50 @@ def _lay_out(
     )
     legs: list[Leg] = []
     here, reface = face, 0.0
+    # The lanes this leg was chosen from: none where nothing was cut into the top yet.
+    chosen_from, used = (stock if cut else ()), frozenset()
     while left:
         usable = not unfit and here.lane <= open_here
         prep, kept = _fill(setup, env, here, left, cut) if usable else ([], [])
         if kept:
             first_id = sum(len(leg.passes) for leg in legs)
-            legs.append(_leg(setup, env, lanes, here, reface, prep, kept, first_id))
+            legs.append(
+                _leg(setup, env, lanes, here, reface, prep, kept, first_id, relieved, chosen_from)
+            )
             left = left[len(kept) :]
             y = here.y_mm
             for p in legs[-1].passes:
                 y += p.width_mm + legs[-1].wall_mm
                 cut.append(Made(here.lane, y, p.depth_mm, kind))
-            reface = 0.0
+            reface, used = 0.0, used | {here.lane}
             here = Face(here.lane, legs[-1].face_y_end_mm, 0.0, here.cap_mm, here.top_mm)
         if not left:
             break
-        beyond = Face(here.lane + 1, 0.0, 0.0, here.y_mm, here.top_mm)
-        further = here.y_mm > 0 and here.lane < open_here and not unfit
-        # A fresh lane is clear as deep as the lane before was cut at its start: the cuts no
-        # deeper than that first, deepest first, whatever this lane's face allowed.
-        ahead = cut_order(setup, left, lanes, _lane_floor(kind, beyond.lane, 0.0, cut))
-        if further and _fill(setup, env, beyond, ahead, cut)[1]:
-            here, left = beyond, ahead
-            continue
-        # Every lane of this top is used, or none would hold the next test (a lane after this
-        # one may go no further back, nor deeper): only a fresh top can, once a round.
+        if choosing and not unfit:
+            beyond, ahead, chosen_from = _choose(
+                setup, env, left, cut, lanes, here, used, open_lanes=open_here
+            )
+            if beyond is not None:
+                here, left = beyond, ahead
+                continue
+        elif side:
+            beyond = lane_face(here.lane + 1, cut, here)
+            ahead = cut_order(setup, left, lanes, _face_floor(setup, beyond.lane, cut))
+            if here.lane < open_here and not unfit and _fill(setup, env, beyond, ahead, cut)[1]:
+                here, left = beyond, ahead
+                continue
+        else:
+            beyond = Face(here.lane + 1, 0.0, 0.0, here.y_mm, here.top_mm)
+            further = here.y_mm > 0 and here.lane < open_here and not unfit
+            # A fresh lane is clear as deep as the lane before was cut at its start: the
+            # slots no deeper than that first, deepest first, whatever this lane allowed.
+            ahead = cut_order(setup, left, lanes, _lane_floor(beyond.lane, 0.0, cut))
+            if further and _fill(setup, env, beyond, ahead, cut)[1]:
+                here, left = beyond, ahead
+                continue
+        # Every lane of this top is used, or none would hold the next test (deeper than its
+        # face is flat; for slots, a lane after this one may go no further back, nor deeper):
+        # only a fresh top can, once a round.
         height = setup.stock.height_mm
         if height is None or not cut or here.top_mm > face.top_mm:
             break
@@ -883,7 +1262,9 @@ def _lay_out(
         if not _fill(setup, env, lower, fresh, [])[1]:
             break
         here, cut, unfit, reface, open_here, left = lower, [], False, down, lanes, fresh
-    return legs, left
+        # Facing takes the reliefs off with the top; on it, the first lane has no rival.
+        relieved, used, chosen_from = {}, frozenset(), ()
+    return Layout(legs, left, start, stock)
 
 
 def _no_room(
@@ -895,7 +1276,7 @@ def _no_room(
     made: tuple[Made, ...],
     lanes: int,
     lanes_open: int | None,
-    legs: list[Leg],
+    laid: Layout,
 ) -> str:
     if setup.stock.height_mm is None:
         hint = (
@@ -904,12 +1285,12 @@ def _no_room(
         )
     else:
         hint = "The top cannot come down further: mount fresh stock and plan with new stock"
-    if face.top is Top.PART_FACED and not legs:
+    if face.top is Top.PART_FACED and not laid.legs:
         return (
             f"the last round stopped part-way through facing the top down, so round {round_no} "
             f"must face it again first, and it has no room to. {hint}."
         )
-    if legs:
+    if laid.legs:
         name = "chip-load sweep"
         if planner is PlannerKind.CHECK:
             name = f"{setup.cut.direction} check"
@@ -930,29 +1311,38 @@ def _no_room(
             f"but this block's top holds {'side cuts' if slots else 'slots'} from earlier "
             f"rounds. {hint}."
         )
-    floor = _face_floor(setup, face.lane, list(made))
+    start = laid.start
+    floor = _face_floor(setup, start.lane, list(made))
     first = cut_order(setup, tests, lanes, floor)[0]
     depth = cut_size(setup, first[1])[1]
-    if _too_low(setup, face.top_mm, depth):
+    if _too_low(setup, start.top_mm, depth):
         return (
             f"round {round_no} would cut {depth:g} mm deep below a top already faced down "
-            f"{face.top_mm:g} mm, less than the clearance ({setup.program.clearance_mm:g} mm) "
+            f"{start.top_mm:g} mm, less than the clearance ({setup.program.clearance_mm:g} mm) "
             f"above [stock] height_mm ({setup.stock.height_mm:g} mm). {hint}."
         )
+    where = f" in lane {start.lane} of {lanes}" if lanes > 1 else ""
     if depth > floor + DEPTH_TOLERANCE_MM:
         return (
-            f"round {round_no} would cut {depth:g} mm deep, but this block's face is only flat "
-            f"down to {floor:g} mm. {hint}."
+            f"round {round_no} would cut {depth:g} mm deep, but this block's face{where} is "
+            f"only flat down to {floor:g} mm. {hint}."
         )
-    room = lane_budget_mm(setup, face.cap_mm)
-    where = f" in lane {face.lane} of {lanes}" if lanes > 1 else ""
+    room = lane_budget_mm(setup, start.cap_mm)
     if slots:
         return (
-            f"stock exhausted: no room left for a slot{where} ({max(room - face.y_mm, 0.0):.1f} "
-            f"mm of {room:.1f} mm), and none after it has room. {hint}."
+            f"stock exhausted: no room left for a slot{where} "
+            f"({max(room - start.y_mm, 0.0):.1f} mm of {room:.1f} mm), and none after it has "
+            f"room. {hint}."
         )
+    if laid.stock:
+        each = "; ".join(f"lane {s.lane}: {s.left_mm:.1f} mm" for s in laid.stock)
+        return (
+            f"stock exhausted: no lane has room for the first cut, of {room:.1f} mm each "
+            f"({each} left). {hint}."
+        )
+    used = start.y_mm + start.remnant_mm
     return (
-        f"stock exhausted: {max(room - face.y_mm, 0.0):.1f} mm left of {room:.1f} mm{where}, "
+        f"stock exhausted: {max(room - used, 0.0):.1f} mm left of {room:.1f} mm{where}, "
         f"and no face after it has room. {hint}."
     )
 
@@ -968,6 +1358,8 @@ def assemble(
     made: tuple[Made, ...] = (),
     lanes: int | None = None,
     lanes_open: int | None = None,
+    reliefs: tuple[Relief, ...] = (),
+    pick: bool = False,
 ) -> Plan:
     """Lay the tests out on the stock from `face` on, in legs that each prepare their face
     first (see _lay_out), on the setup's lanes unless `lanes` says otherwise, cutting in the
@@ -977,34 +1369,47 @@ def assemble(
     chip load), already lightest first, or in a confirmation round (rpm, engagement,
     P(stable), None, the verdict expected); the engagement is the width, or the depth when the
     setup steps that. `made` are the passes cut into the top as it stands (none: it is
-    untouched), and of its lanes only the first `lanes_open` may be cut (None: all; the rest
-    hold cuts made in the other direction). Tests left over once the stock runs out are
-    dropped, the heaviest ones: a ramp leaves them for last, and a round that runs deepest
-    first is laid out again without them, since the lighter cuts are what the heavier ones
-    were chosen on; so too when its deepest cut fits nowhere (deeper than any face left is
-    clear, or too near what the stock stands on) and lighter ones do. But a round that
-    follows convergence (a chip-load sweep, a check of the other direction) must fit whole:
-    cut short, its heaviest cuts would go untried and the lightest read as a limit.
+    untouched) and `reliefs` the reliefs milled into it, lanes and boundaries counted in the
+    setup's direction; of its lanes only the first `lanes_open` may be cut (None: all; for
+    slots, the rest hold cuts made in the other direction). With `pick`, each side-milling
+    leg goes to the lane with the most stock left (see _choose). Tests left over once the
+    stock runs out are dropped, the heaviest ones: a ramp leaves them for last, and a round
+    that runs deepest first is laid out again without them, since the lighter cuts are what
+    the heavier ones were chosen on; so too when its deepest cut fits nowhere (deeper than
+    any face left is clear, or too near what the stock stands on) and lighter ones do. But a
+    round that follows convergence (a chip-load sweep, a check of the other direction) must
+    fit whole: cut short, its heaviest cuts would go untried and the lightest read as a
+    limit. Side milling in lanes needs each lane to keep a cutter radius of stock between
+    its reliefs (see config.relief_room_mm), whatever the setup or the session laid out.
     """
     lanes = lanes or auto_lanes(setup, env)
+    if lanes > 1 and milling(setup) is Milling.SIDE:
+        between = relief_room_mm(setup, lanes)
+        if between < setup.tool.diameter_mm / 2 - 1e-9:
+            raise PlanError(
+                f"each of the {lanes} lanes keeps {between:.1f} mm of stock between the "
+                "reliefs milled where it meets the lanes beside it, less than a cutter radius: "
+                "lower [program] face_width_mm, or start a new session with fewer lanes"
+            )
     asked = tests
-    legs, left = _lay_out(setup, env, tests, face, made, lanes, lanes_open)
-    if left and planner in FOLLOW_UP:
+    place = (face, made, lanes, lanes_open, reliefs, pick)
+    laid = _lay_out(setup, env, tests, *place)
+    if laid.left and planner in FOLLOW_UP:
         raise PlanError(
-            _no_room(setup, round_no, planner, asked, face, made, lanes, lanes_open, legs)
+            _no_room(setup, round_no, planner, asked, face, made, lanes, lanes_open, laid)
         )
     deepest_first = order(setup.cut.vary, milling(setup), lanes) is Order.DEEPEST_FIRST
-    while left and deepest_first and len(tests) > 1:
+    while laid.left and deepest_first and len(tests) > 1:
         # With nothing laid out the heaviest test is in the way: try without it.
-        keep = len(tests) - len(left) if legs else len(tests) - 1
+        keep = len(tests) - len(laid.left) if laid.legs else len(tests) - 1
         lighter = sorted(tests, key=lambda t: (t[1], t[0]))[:keep]
-        again, rest = _lay_out(setup, env, lighter, face, made, lanes, lanes_open)
-        if legs and not again:
+        again = _lay_out(setup, env, lighter, *place)
+        if laid.legs and not again.legs:
             break
-        tests, legs, left = lighter, again, rest
-    if not legs:
+        tests, laid = lighter, again
+    if not laid.legs:
         raise PlanError(
-            _no_room(setup, round_no, planner, asked, face, made, lanes, lanes_open, legs)
+            _no_room(setup, round_no, planner, asked, face, made, lanes, lanes_open, laid)
         )
     whole = not made and face.lane == 1 and face.y_mm == 0 and face.remnant_mm == 0
     return Plan(
@@ -1017,11 +1422,12 @@ def assemble(
         milling=milling(setup),
         chip_load_mm=env.chip_load_mm,
         dwell_s=setup.program.dwell_s,
-        legs=tuple(legs),
+        legs=tuple(laid.legs),
         planned_on=date.today().isoformat(),
         direction=setup.cut.direction,
         start=Start.FRESH if whole else Start.IN_USE,
         lanes=lanes,
+        lane_end=lane_end_of(setup),
     )
 
 

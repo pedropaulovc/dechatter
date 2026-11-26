@@ -411,6 +411,35 @@ def slot_wall_mm(setup: Setup) -> float:
     return setup.program.slot_wall_mm
 
 
+def face_step_mm(setup: Setup) -> float:
+    """How far apart the rows of facing, and of a relief between lanes, are:
+    program.face_width_mm, else a quarter of the cutter."""
+    return setup.program.face_width_mm or setup.tool.diameter_mm / 4
+
+
+def relief_wall_mm(setup: Setup) -> float:
+    """How far a relief's walls stand along the feed from the lane boundary it is milled at
+    (see plan.Relief): a cutter radius and a row step, so the pocket is a cutter diameter and
+    two steps long."""
+    return setup.tool.diameter_mm / 2 + face_step_mm(setup)
+
+
+def relief_room_mm(setup: Setup, lanes: int) -> float:
+    """The stock the most hemmed-in of `lanes` side-milling lanes keeps between the reliefs
+    at its inner ends (none for one lane, one for two, two for more)."""
+    inner = min(max(lanes - 1, 0), 2)
+    return setup.stock.length_mm / lanes - inner * relief_wall_mm(setup)
+
+
+def side_milled(setup: Setup) -> bool:
+    """Whether any level of the setup side-mills: its width, or one of other_widths_mm,
+    narrower than the cutter."""
+    narrower = any(
+        w < setup.tool.diameter_mm - FULL_WIDTH_TOLERANCE_MM for w in setup.cut.other_widths_mm
+    )
+    return not full_width(setup) or narrower
+
+
 def _number(value: object) -> bool:
     return type(value) in (int, float)
 
@@ -518,6 +547,18 @@ def _validate(setup: Setup) -> None:
             f"{stock.length_mm:g} mm in {stock.lanes} lanes is "
             f"{stock.length_mm / stock.lanes:.1f} mm each"
         )
+    if stock.lanes is not None and stock.lanes > 1 and side_milled(setup):
+        # Side milling, at the setup's width or another: the reliefs where lanes meet take
+        # relief_wall_mm of each lane at each inner end, and the most hemmed-in lane must
+        # keep a cutter radius of stock between them. Planning checks lanes it settles.
+        between = relief_room_mm(setup, stock.lanes)
+        if between < tool.diameter_mm / 2 - 1e-9:
+            raise ConfigError(
+                "[stock] each lane must keep at least a cutter radius of stock between the "
+                "reliefs milled where it meets the lanes beside it (each reaching a cutter "
+                "radius and [program] face_width_mm, or a quarter of the cutter, into it): "
+                f"{stock.length_mm:g} mm in {stock.lanes} lanes leaves {between:.1f} mm"
+            )
     if machine.min_rpm >= machine.max_rpm:
         raise ConfigError("[machine] min_rpm must be below max_rpm")
     _validate_speed_stops(machine)

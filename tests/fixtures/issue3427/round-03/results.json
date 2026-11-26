@@ -1,0 +1,92 @@
+{
+  "round": 3,
+  "recording": "recording.wav",
+  "thresholds": {
+    "prominence_db": 27.0,
+    "excess_db": 10.0
+  },
+  "passes": [
+    {
+      "id": 0,
+      "kind": "truing",
+      "rpm": 2483,
+      "width_mm": 0.2,
+      "status": "analysed",
+      "verdict": "stable",
+      "chatter_hz": 2068.4,
+      "spindle_hz": 41.483,
+      "prominence_db": 22.6,
+      "excess_db": 24.7,
+      "start_s": 25.69,
+      "end_s": 32.4,
+      "detected": "stable",
+      "over_air_db": 4.0
+    },
+    {
+      "id": 1,
+      "kind": "test",
+      "rpm": 2483,
+      "width_mm": 0.4,
+      "status": "analysed",
+      "verdict": "stable",
+      "chatter_hz": 225.6,
+      "spindle_hz": 41.375,
+      "prominence_db": 25.7,
+      "excess_db": 22.5,
+      "start_s": 50.41,
+      "end_s": 57.59,
+      "detected": "stable",
+      "over_air_db": 6.2
+    },
+    {
+      "id": 2,
+      "kind": "test",
+      "rpm": 2483,
+      "width_mm": 0.6,
+      "status": "analysed",
+      "verdict": "stable",
+      "chatter_hz": 473.1,
+      "spindle_hz": 41.367,
+      "prominence_db": 26.0,
+      "excess_db": 30.6,
+      "start_s": 75.79,
+      "end_s": 82.8,
+      "detected": "stable",
+      "over_air_db": 8.3
+    },
+    {
+      "id": 3,
+      "kind": "test",
+      "rpm": 2483,
+      "width_mm": 0.8,
+      "status": "analysed",
+      "verdict": "unstable",
+      "chatter_hz": 397.0,
+      "spindle_hz": 40.076,
+      "prominence_db": 28.5,
+      "excess_db": 31.0,
+      "start_s": 101.16,
+      "end_s": 108.52,
+      "detected": "unstable",
+      "over_air_db": 10.2
+    },
+    {
+      "id": 4,
+      "kind": "test",
+      "rpm": 2483,
+      "width_mm": 0.9,
+      "status": "analysed",
+      "verdict": "unstable",
+      "chatter_hz": 2052.2,
+      "spindle_hz": 39.314,
+      "prominence_db": 31.3,
+      "excess_db": 37.6,
+      "start_s": 126.22,
+      "end_s": 133.65,
+      "detected": "unstable",
+      "over_air_db": 11.4
+    }
+  ],
+  "facing": null,
+  "schema": 2
+}

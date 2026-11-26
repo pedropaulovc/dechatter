@@ -1,0 +1,99 @@
+{
+  "round": 3,
+  "planner": "check",
+  "flutes": 3,
+  "diameter_mm": 12.7,
+  "vary": "width",
+  "fixed_mm": 13.5,
+  "milling": "side",
+  "chip_load_mm": 0.071,
+  "dwell_s": 4,
+  "legs": [
+    {
+      "lane": 1,
+      "face_y_start_mm": 0.0,
+      "passes": [
+        {
+          "id": 0,
+          "kind": "truing",
+          "rpm": 2483,
+          "width_mm": 0.2,
+          "depth_mm": 13.5,
+          "feed_mm_min": 528.9,
+          "expected_cut_s": 7.15,
+          "lead_in_s": 0.88,
+          "plunge_s": 6.6,
+          "p_stable": null,
+          "chip_load_mm": null,
+          "expected": null
+        },
+        {
+          "id": 1,
+          "kind": "test",
+          "rpm": 2483,
+          "width_mm": 0.4,
+          "depth_mm": 13.5,
+          "feed_mm_min": 528.9,
+          "expected_cut_s": 7.09,
+          "lead_in_s": 0.81,
+          "plunge_s": 6.6,
+          "p_stable": null,
+          "chip_load_mm": null,
+          "expected": null
+        },
+        {
+          "id": 2,
+          "kind": "test",
+          "rpm": 2483,
+          "width_mm": 0.6,
+          "depth_mm": 13.5,
+          "feed_mm_min": 528.9,
+          "expected_cut_s": 7.03,
+          "lead_in_s": 0.76,
+          "plunge_s": 6.6,
+          "p_stable": null,
+          "chip_load_mm": null,
+          "expected": null
+        },
+        {
+          "id": 3,
+          "kind": "test",
+          "rpm": 2483,
+          "width_mm": 0.8,
+          "depth_mm": 13.5,
+          "feed_mm_min": 528.9,
+          "expected_cut_s": 6.97,
+          "lead_in_s": 0.71,
+          "plunge_s": 6.6,
+          "p_stable": null,
+          "chip_load_mm": null,
+          "expected": null
+        },
+        {
+          "id": 4,
+          "kind": "test",
+          "rpm": 2483,
+          "width_mm": 0.9,
+          "depth_mm": 13.5,
+          "feed_mm_min": 528.9,
+          "expected_cut_s": 6.91,
+          "lead_in_s": 0.69,
+          "plunge_s": 6.6,
+          "p_stable": null,
+          "chip_load_mm": null,
+          "expected": null
+        }
+      ],
+      "lane_cap_mm": null,
+      "top_mm": 0.0,
+      "reface_mm": 0.0,
+      "face_s": 0,
+      "wall_mm": 0.0
+    }
+  ],
+  "planned_on": "2026-11-25",
+  "direction": "climb",
+  "start": "in use",
+  "lanes": 2,
+  "schema": 4
+}

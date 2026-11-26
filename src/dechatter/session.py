@@ -24,7 +24,9 @@ from .config import (
     Vary,
     full_width,
     load_setup,
+    relief_room_mm,
     setup_source,
+    side_milled,
 )
 from .detect import Thresholds, Verdict
 from .plan import (
@@ -34,6 +36,7 @@ from .plan import (
     FRESH,
     Envelope,
     Face,
+    LaneEnd,
     Leg,
     Made,
     Milling,
@@ -42,6 +45,7 @@ from .plan import (
     PlanError,
     PlannerKind,
     Reach,
+    Relief,
     SchemaError,
     Start,
     Top,
@@ -53,6 +57,7 @@ from .plan import (
     cutting,
     fixed_mm,
     grid_tests,
+    milling,
     mrr_mm3_min,
     other_direction,
     sweep_tests,
@@ -658,7 +663,7 @@ def placements_from_timeline(plan: Plan, timeline: list) -> dict[int, Placement]
         start = _after_motion(cut["start"] - t0, p.lead_in_s, holds)
         end = cut["end"] - t0
         if not aborted:
-            end = -_after_motion(-end, p.lead_in_s, [(-b, -a) for a, b in holds])
+            end = -_after_motion(-end, p.lead_off_s, [(-b, -a) for a, b in holds])
         stretch = _longest_free(start, end, holds)
         if stretch is None:
             if aborted:
@@ -861,9 +866,9 @@ def _faced_at_stop(r: Round) -> bool:
 def _cut_since_top(rounds: list[Round]) -> list[tuple[Round, Made]]:
     """The passes cut into the top as it stands: since the block was mounted or last faced,
     every pass a run got to (every pass of a leg none was heard in, or of a round never
-    analysed), latest first, with how far from Y0 it reached, how deep it went, and whether
-    it was stopped part-way; each with its round, its lane counted from the end the round's
-    direction meets first."""
+    analysed, as stopped part-way: it may or may not have cut), latest first, with how far
+    from Y0 it reached, how deep it went, and whether it was stopped part-way; each with its
+    round, its lane counted from the end the round's direction meets first."""
     made = []
     for r in reversed(rounds):
         if _faced_at_stop(r):
@@ -879,7 +884,7 @@ def _cut_since_top(rounds: list[Round]) -> list[tuple[Round, Made]]:
             y = leg.face_y_start_mm
             for p in passes:
                 y += p.width_mm + leg.wall_mm
-                reach = Reach.PART if p.id in stopped else Reach.END
+                reach = Reach.PART if final is None or p.id in stopped else Reach.END
                 made.append((r, Made(leg.lane, y, p.depth_mm, r.plan.milling, reach)))
             # The top began here: faced down, or nothing was cut into it before this round.
             if leg.reface_mm > 0 or (number == 0 and r.plan.start is Start.FRESH):
@@ -887,19 +892,53 @@ def _cut_since_top(rounds: list[Round]) -> list[tuple[Round, Made]]:
     return made
 
 
-def _stock_left(
-    rounds: list[Round], direction: Direction
-) -> tuple[Face, tuple[Made, ...], int | None]:
-    """Where a round cutting in `direction` goes on, on the stock the last round left: the
-    face, the passes cut into the top as it stands (lanes counted from the end `direction`
-    meets first), and how many lanes from that end it may use (None: all).
+def _reliefs_since_top(rounds: list[Round]) -> list[tuple[Round, Relief]]:
+    """The reliefs milled into the top as it stands, latest first, each with its round, its
+    boundary counted from the end the round's direction meets first. A leg's reliefs count
+    once one of its passes was heard: the program mills them first."""
+    found = []
+    for r in reversed(rounds):
+        if _faced_at_stop(r):
+            return found
+        final = None if r.results is None else _last_heard(r)
+        reached = () if final is None else r.plan.legs[: r.plan.leg_of(final)[0] + 1]
+        for leg in reversed(reached):
+            found += [(r, relief) for relief in leg.reliefs]
+            if leg.reface_mm > 0:
+                return found
+        if r.plan.legs[0].reface_mm > 0 or r.plan.start is Start.FRESH:
+            return found
+    return found
 
-    Each direction uses the lanes from the end it meets first, so the two work towards each
-    other: a round goes on from where the last round in its direction on this top left the
-    stock (the first lane at Y0 if none did), up to the lane before the first that holds a
-    cut made the other way. With no lane left, it faces the top down or needs fresh stock.
-    A single lane is the exception: every pass runs the stock's whole length, from the air
-    beyond one end to the air beyond the other, so either direction goes on along its face.
+
+@dataclass(frozen=True)
+class StockLeft:
+    """Where a round goes on, on the stock the last round left (see _stock_left)."""
+
+    face: Face
+    made: tuple[Made, ...]
+    lanes_open: int | None
+    reliefs: tuple[Relief, ...] = ()
+
+
+def _stock_left(rounds: list[Round], direction: Direction, kind: Milling) -> StockLeft:
+    """Where a round cutting in `direction` and milling `kind` goes on, on the stock the last
+    round left: the face, the passes cut into the top as it stands and the reliefs milled
+    into it (lanes and boundaries counted from the end `direction` meets first), and how
+    many lanes from that end it may use (None: all).
+
+    Side milling in lanes: every lane, whichever way it was cut; the face gives only the
+    top, and each leg goes to the lane with the most stock left (see plan._choose). Its
+    passes start and end in reliefs, so none crosses another lane.
+
+    Slots in lanes: each direction uses the lanes from the end it meets first, so the two
+    work towards each other: a round goes on from where the last round in its direction on
+    this top left the stock (the first lane at Y0 if none did), up to the lane before the
+    first that holds a cut made the other way. With no lane left, it faces the top down or
+    needs fresh stock.
+
+    A single lane: every pass runs the stock's whole length, from the air beyond one end to
+    the air beyond the other, so either direction goes on along its face.
     """
     last = rounds[-1]
     face = face_after(last)
@@ -911,7 +950,15 @@ def _stock_left(
     )
     if lanes == 1:
         whole = face.y_mm == 0 and face.remnant_mm == 0
-        return face, () if whole else made, None
+        return StockLeft(face, () if whole else made, None)
+    if kind is Milling.SIDE:
+        reliefs = tuple(
+            relief
+            if r.plan.direction is direction
+            else dataclasses.replace(relief, boundary=lanes - relief.boundary)
+            for r, relief in _reliefs_since_top(rounds)
+        )
+        return StockLeft(Face(top_mm=face.top_mm, top=face.top), made, None, reliefs)
     others = [
         m.lane for (r, _), m in zip(cuts, made, strict=True) if r.plan.direction is not direction
     ]
@@ -923,7 +970,7 @@ def _stock_left(
     if lanes_open is None and face.y_mm == 0 and face.lane == 1 and face.remnant_mm == 0:
         # A top whose first lane is still whole at Y0 was not cut into.
         made = ()
-    return face, made, lanes_open
+    return StockLeft(face, made, lanes_open)
 
 
 def _place(
@@ -938,10 +985,13 @@ def _place(
 ) -> Plan:
     """Lay the tests out on the stock from where the last round left it, and write the round.
 
-    The round fills what is left of the lane it is on, then the lanes after it, and with
-    stock.height_mm given, faces the top down and starts again at the first lane, for as long
-    as it has tests left and the top can come down (see plan.assemble). A round in the other
-    direction than the last starts its lanes from the other end (see _stock_left).
+    Side milling in lanes starts in the lane with the most stock left that its first cut
+    fits on, whichever way earlier rounds cut it; slots and a single lane go on where the
+    last round in the round's direction left the stock (see _stock_left). The round fills
+    that lane, then the lanes after it, and with stock.height_mm given, faces the top down
+    and starts again at the first lane, for as long as it has tests left and the top can
+    come down (see plan.assemble). A round in the other direction than the last counts its
+    lanes from the other end.
     """
     setup = source.setup
     number = rounds[-1].plan.round + 1 if rounds else 1
@@ -949,12 +999,23 @@ def _place(
     # with a speed limit changed since.
     lanes = rounds[-1].plan.lanes if rounds else auto_lanes(setup, env)
     direction = cut_direction(setup, planner)
-    face, made, lanes_open = FRESH, (), None
-    if rounds and stock is Stock.SAME:
-        face, made, lanes_open = _stock_left(rounds, direction)
+    face, made, lanes_open, reliefs = FRESH, (), None, ()
     at = cutting(at_level(setup, level_mm), direction)
+    if rounds and stock is Stock.SAME:
+        left = _stock_left(rounds, direction, milling(at))
+        face, made, lanes_open, reliefs = left.face, left.made, left.lanes_open, left.reliefs
     plan = assemble(
-        at, env, number, planner, tests, face=face, made=made, lanes=lanes, lanes_open=lanes_open
+        at,
+        env,
+        number,
+        planner,
+        tests,
+        face=face,
+        made=made,
+        lanes=lanes,
+        lanes_open=lanes_open,
+        reliefs=reliefs,
+        pick=milling(at) is Milling.SIDE and lanes > 1,
     )
     _write_round(session, source.text, at, plan)
     return plan
@@ -1331,7 +1392,8 @@ def _unrun(r: Round) -> bool:
 
 
 def check_measured(rounds: list[Round], setup: Setup) -> None:
-    """Refuse a setup that differs from a cut round's in what was measured."""
+    """Refuse a setup that differs from a cut round's in what was measured, or that would
+    leave the lanes the rounds settled too short to side-mill between their reliefs."""
     for r in reversed(rounds):
         if _unrun(r):
             continue
@@ -1343,6 +1405,15 @@ def check_measured(rounds: list[Round], setup: Setup) -> None:
             "stability map belongs to the setup it was measured with. Put the setup back, or "
             "start a new session for this one"
         )
+    lanes = rounds[-1].plan.lanes if rounds else 1
+    if lanes > 1 and side_milled(setup):
+        between = relief_room_mm(setup, lanes)
+        if between < setup.tool.diameter_mm / 2 - 1e-9:
+            raise SessionError(
+                f"each of the session's {lanes} lanes would keep {between:.1f} mm of stock "
+                "between the reliefs milled where it meets the lanes beside it, less than a "
+                "cutter radius: lower [program] face_width_mm, or start a new session"
+            )
 
 
 def stale_round(session: Path, setup: Setup) -> Round | None:
@@ -1357,6 +1428,19 @@ def stale_round(session: Path, setup: Setup) -> Round | None:
     if set(_changes(planned_with(rounds[-1]), setup)) <= OUTSIDE_PROGRAM:
         return None
     return rounds[-1]
+
+
+def outdated_round(session: Path) -> Round | None:
+    """The unrun round dechatter 0.8.0 planned with side-milling passes that stop in the
+    stock where lanes meet (see plan.LaneEnd), to be planned again: run, every pass of it
+    would end engaging up to its face's depth, and it never chose the lane with the most
+    stock left."""
+    rounds = load_rounds(session)
+    if not rounds or not _unrun(rounds[-1]):
+        return None
+    plan = rounds[-1].plan
+    stopping = plan.milling is Milling.SIDE and plan.lanes > 1 and plan.lane_end is LaneEnd.STOP
+    return rounds[-1] if stopping else None
 
 
 DISCARDED = ".discarded-"

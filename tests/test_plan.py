@@ -9,18 +9,22 @@ import pytest
 
 from dechatter import bayes, gcode
 from dechatter.bayes import Observation
-from dechatter.config import ConfigError, Direction, load_setup, parse_setup
+from dechatter.config import ConfigError, Direction, load_setup, parse_setup, relief_wall_mm
 from dechatter.detect import Verdict
 from dechatter.plan import (
     REFACE_EXTRA_MM,
     SCHEMA,
     SWEEP_PASSES,
     Face,
+    Fit,
+    LaneEnd,
     Made,
+    Milled,
     PassKind,
     Plan,
     PlanError,
     PlannerKind,
+    Reach,
     Start,
     Top,
     assemble,
@@ -31,8 +35,10 @@ from dechatter.plan import (
     envelope,
     facing_rows,
     grid_tests,
+    lane_face,
     lane_x_mm,
     mrr_mm3_min,
+    relief_rows,
     sweep_tests,
 )
 
@@ -223,7 +229,7 @@ def test_speed_stops_are_the_only_speeds_planned_and_each_stop_is_named(write_se
         envelope(load_setup(with_stops(write_setup, (600, 1000))))
 
     # The automatic lanes leave every cut long enough at the fastest stop, not at the top
-    # speed of the search, which no cut is planned at.
+    # speed of the search, which no cut is planned at, besides the reliefs at a lane's ends.
     long = {"l": ("length_mm = 60.0", "length_mm = 600.0")}
     free = load_setup(write_setup(**MANUAL, **long))
     slow = dataclasses.replace(
@@ -231,9 +237,11 @@ def test_speed_stops_are_the_only_speeds_planned_and_each_stop_is_named(write_se
         stock=free.stock,
         machine=dataclasses.replace(setup.machine, speed_stops_rpm=(1513, 1839)),
     )
-    feed_mm_s = envelope(slow).chip_load_mm * slow.tool.flutes * 1839 / 60
-    assert auto_lanes(slow, envelope(slow)) == int(600.0 / (feed_mm_s * 6.0))
-    assert auto_lanes(slow, envelope(slow)) > auto_lanes(free, envelope(free))
+    cut = envelope(slow).chip_load_mm * slow.tool.flutes * 1839 / 60 * 6.0
+    lanes = auto_lanes(slow, envelope(slow))
+    assert 600.0 / lanes - 2 * relief_wall_mm(slow) >= cut
+    assert 600.0 / (lanes + 1) - 2 * relief_wall_mm(slow) < cut
+    assert lanes > auto_lanes(free, envelope(free))
 
 
 @pytest.mark.parametrize(
@@ -335,27 +343,27 @@ def test_a_check_cuts_the_other_way_on_the_lanes_from_the_other_end(write_setup)
         climb.cut.direction is Direction.CLIMB and cutting(setup, Direction.CONVENTIONAL) is setup
     )
     tests = check_tests(setup, env, 4000.0, 2.0)
-    # Conventional rounds used lane 1 (the left): climbing, it is lane 3, and only two are open.
+    # Conventional rounds used lane 1 (the left): climbing, it is lane 3. Lanes 1 and 2 have
+    # the most stock left: the check starts in lane 1, the right-hand one.
     made = (Made(3, 6.0, setup.cut.axial_depth_mm),)
-    plan = assemble(climb, env, 5, PlannerKind.CHECK, tests, made=made, lanes=3, lanes_open=2)
+    plan = assemble(climb, env, 5, PlannerKind.CHECK, tests, made=made, lanes=3, pick=True)
     assert plan.direction is Direction.CLIMB and plan.start is Start.IN_USE
     assert [leg.lane for leg in plan.legs] == [1]
+    assert [s.left_mm for s in plan.legs[0].lane_stock] == [30.0, 30.0, 24.0]
     assert lane_x_mm(climb, 1, 3) == (40.0, 60.0)
-    assert all(
-        x_end < 0 or x_end >= 40.0 - 1e-6
-        for _, x_end, _ in cutting_moves(gcode.render(plan, climb, MM))
-    )
+    # Its passes run in from the right end and end in the relief at X40, climbing.
+    assert {x_end for _, _, x_end in sweeps(plan, climb)} == {40.0}
+    assert [r.boundary for r in plan.legs[0].reliefs] == [1]
     assert "CLIMB CHECK" in gcode.render(plan, climb, MM)
 
-    # No lane left from that end, and no height to face the top down: fresh stock.
+    # The lanes it may use all cut: with no height to face the top down, fresh stock.
     with pytest.raises(PlanError, match="cuts climb, using the lanes from the end"):
         assemble(climb, env, 5, PlannerKind.CHECK, tests, made=made, lanes=3, lanes_open=0)
-    # The check must fit whole, as the chip-load sweep must.
-    narrow = Face(y_mm=setup.stock.width_mm - 3.0)
+    # The check must fit whole, as the chip-load sweep must: it may span lanes, but with
+    # 1.5 mm left in each, its 1.5 mm cut fits on none.
+    narrow = tuple(Made(lane, setup.stock.width_mm - 1.5, 5.0) for lane in (1, 2, 3))
     with pytest.raises(PlanError, match="climb check needs room for all its 4 cuts"):
-        assemble(
-            climb, env, 5, PlannerKind.CHECK, tests, face=narrow, made=made, lanes=3, lanes_open=1
-        )
+        assemble(climb, env, 5, PlannerKind.CHECK, tests, made=narrow, lanes=3, pick=True)
 
 
 def test_a_setup_from_dechatter_0_1_is_refused_with_what_to_do():
@@ -440,12 +448,27 @@ def grid(length, width, step=0.25, y_step=0.1):
     }
 
 
+def relief_sweeps(plan, setup):
+    """(y of the cutter centre, x where the row's feed starts, x where it ends) per relief
+    row; each row plunges at its end, then at its start, then feeds from one to the other,
+    and goes up to the safe height in a block of its own."""
+    found = []
+    for block in gcode.blocks(plan, setup, MM):
+        if block.step is gcode.Step.RELIEF and block.lines != (f"G0 Z{setup.program.safe_z_mm:g}",):
+            ends = [line for line in block.lines if line.startswith("G0 X")]
+            assert len(ends) == 2 and ends[0].endswith(f"Y{block.target['y']:g}")
+            start = float(ends[1].split()[1][1:])
+            found.append((block.target["y"], start, block.target["x"]))
+    return found
+
+
 @pytest.mark.parametrize("direction", ["conventional", "climb"])
 def test_a_lane_is_cut_without_touching_the_lanes_on_either_side(write_setup, direction):
     turn = {"d": ('direction = "conventional"', f'direction = "{direction}"')}
     setup = lane_setup(write_setup, **turn)
     env = envelope(setup)
     radius = setup.tool.diameter_mm / 2
+    wall = relief_wall_mm(setup)
     length = setup.stock.length_mm
     half = length / 2
     stock = grid(length, setup.stock.width_mm)
@@ -453,25 +476,57 @@ def test_a_lane_is_cut_without_touching_the_lanes_on_either_side(write_setup, di
     def first_lane(x):  # the lane the cutter meets first: left in conventional milling
         return x < half if direction == "conventional" else x > half
 
+    def relief(x):  # the pocket milled where the lanes meet
+        return abs(x - half) <= wall
+
     one = round1(setup)
     assert [leg.lane for leg in one.legs] == [1] and one.lanes == 2
+    # The relief first, within its pocket; then the passes, which end in it.
+    (pocket,) = one.legs[0].reliefs
+    assert (pocket.boundary, pocket.y_mm) == (1, one.legs[0].face_y_end_mm)
+    for cut, _ in removed(stock, relief_sweeps(one, setup), radius):
+        assert all(relief(x) for x, _ in cut)
     for cut, plunge_clear in removed(stock, sweeps(one, setup), radius):
         assert plunge_clear
-        assert cut and all(first_lane(x) or x == half for x, _ in cut)
-    face = one.legs[-1].face_y_end_mm
+        assert cut and all(first_lane(x) for x, _ in cut)
+    # The second lane may go further back than the first: its passes start in the relief,
+    # which is milled further back first, and never cross the first lane.
+    made = tuple(Made(1, y, p.depth_mm) for y, p in faces(one))
+    tests = grid_tests(setup, env)
     two = assemble(
-        setup, env, 2, PlannerKind.GRID, grid_tests(setup, env), face=Face(lane=2, cap_mm=face)
+        setup,
+        env,
+        2,
+        PlannerKind.GRID,
+        tests + tests[-4:],
+        face=Face(lane=2),
+        made=made,
+        reliefs=(pocket,),
     )
-    assert two.legs[-1].face_y_end_mm <= face + 1e-9
+    assert two.legs[-1].face_y_end_mm > pocket.y_mm
+    (extended,) = two.legs[0].reliefs
+    assert (extended.done, extended.y_mm) == (
+        (Milled(pocket.y_mm, pocket.depth_mm),),
+        two.legs[-1].face_y_end_mm,
+    )
+    for cut, _ in removed(stock, relief_sweeps(two, setup), radius):
+        assert all(relief(x) for x, _ in cut)
     for cut, plunge_clear in removed(stock, sweeps(two, setup), radius):
         assert plunge_clear
-        # The second lane's cuts may only clear the corner the first lane's passes left
-        # where they stopped, within a cutter radius of the lane boundary.
-        assert all(not first_lane(x) or abs(x - half) <= radius for x, _ in cut)
+        assert cut and all(not first_lane(x) for x, _ in cut)
     # The last lane runs out past the end of the stock.
     end = sweeps(two, setup)[-1][2]
     assert (end > length) if direction == "conventional" else (end < 0)
     assert "lane 2 of 2" in gcode.render(two, setup, MM)
+
+
+def faces(plan):
+    """(the face each pass leaves, the pass)."""
+    found, y = [], plan.legs[0].face_y_start_mm
+    for p in plan.passes:
+        y += p.width_mm
+        found.append((y, p))
+    return found
 
 
 def test_lanes_count_the_cut_and_lead_in_of_the_lane_alone(write_setup, setup):
@@ -481,17 +536,53 @@ def test_lanes_count_the_cut_and_lead_in_of_the_lane_alone(write_setup, setup):
     assert first.lead_in_s == whole.lead_in_s
 
 
-def test_a_later_lane_is_cut_back_no_further_than_the_one_before_it(write_setup):
+def test_a_side_milling_round_starts_in_the_lane_with_the_most_stock_left(write_setup):
     setup = lane_setup(write_setup)
     env = envelope(setup)
-    plan = assemble(
-        setup, env, 2, PlannerKind.GRID, grid_tests(setup, env), face=Face(lane=2, cap_mm=3.0)
+    depth = setup.cut.axial_depth_mm
+    tests = grid_tests(setup, env)
+    # Lane 1 cut back 3 mm, lane 2 untouched: lane 2, which may go further back than lane 1.
+    plan = assemble(setup, env, 2, PlannerKind.GRID, tests, made=(Made(1, 3.0, depth),), pick=True)
+    assert plan.legs[0].lane == 2 and plan.legs[0].face_y_start_mm == 0.0
+    assert plan.legs[0].face_y_end_mm > 3.0 and plan.legs[0].lane_cap_mm is None
+    assert [(s.lane, s.left_mm, s.fit) for s in plan.legs[0].lane_stock] == [
+        (1, 27.0, Fit.FITS),
+        (2, 30.0, Fit.FITS),
+    ]
+    # Lane 2 cut back further than lane 1, and a pass stopped part-way there: lane 1, and
+    # where lane 2 is the choice, the step the stopped pass left is cleared first.
+    made = (Made(1, 3.0, depth), Made(2, 5.0, depth), Made(2, 6.0, depth, reach=Reach.PART))
+    plan = assemble(setup, env, 3, PlannerKind.GRID, tests, made=made, pick=True)
+    assert plan.legs[0].lane == 1 and plan.legs[0].face_y_start_mm == 3.0
+    assert lane_face(2, list(made), Face()) == Face(2, 5.0, 1.0)
+    # No lane with room for the first cut: every lane's stock in the reason.
+    full = (Made(1, 29.9, depth), Made(2, 29.95, depth))
+    with pytest.raises(PlanError, match=r"no lane has room .*lane 1: 0\.1 mm; lane 2: 0\.1 mm"):
+        assemble(setup, env, 3, PlannerKind.GRID, tests, made=full, pick=True)
+
+
+def test_a_round_that_fills_its_lane_goes_on_in_the_lane_with_the_most_stock_left(write_setup):
+    """Started in lane 2 of 2, with more tests than it holds: the round goes on in lane 1,
+    which still has room, before it would face the top down."""
+    setup = load_setup(
+        write_setup(l=("width_mm = 30.0", "width_mm = 30.0\nlanes = 2\nheight_mm = 40.0"))
     )
-    assert plan.legs[-1].face_y_end_mm <= 3.0 and plan.legs[0].lane_cap_mm == 3.0
-    with pytest.raises(PlanError, match="in lane 2 of 2"):
-        assemble(
-            setup, env, 2, PlannerKind.GRID, grid_tests(setup, env), face=Face(lane=2, cap_mm=0.1)
-        )
+    env = envelope(setup)
+    depth = setup.cut.axial_depth_mm
+    tests = grid_tests(setup, env)
+    made = (Made(1, 20.0, depth), Made(2, 18.0, depth))
+    plan = assemble(setup, env, 2, PlannerKind.GRID, tests, made=made, pick=True)
+    assert [(leg.lane, leg.reface_mm) for leg in plan.legs] == [(2, 0.0), (1, 0.0)]
+    assert [leg.face_y_start_mm for leg in plan.legs] == [18.0, 20.0]
+    assert [(s.lane, s.left_mm, s.fit) for s in plan.legs[1].lane_stock] == [
+        (1, 10.0, Fit.FITS),
+        (2, pytest.approx(30.0 - plan.legs[0].face_y_end_mm), Fit.USED),
+    ]
+    program = gcode.render(plan, setup, MM)
+    assert "(STARTS IN lane 2 of 2, X30 to X60: of the lanes not cut yet this round" in program
+    assert "(lane 1: of the lanes not cut yet this round that its first cut fits on, the one " in (
+        program
+    )
 
 
 SPILL = {"l": ("width_mm = 30.0", "width_mm = 5.0\nlanes = 3\nheight_mm = 40.0")}
@@ -518,15 +609,21 @@ def test_a_round_uses_what_every_lane_has_left_before_it_faces_the_top_down(writ
     faced = depth + REFACE_EXTRA_MM
     assert [leg.reface_mm for leg in legs] == pytest.approx([0, 0, 0, faced, 0])
     assert [leg.top_mm for leg in legs] == pytest.approx([0, 0, 0, faced, faced])
-    assert legs[0].face_y_start_mm == 1.0 and legs[0].lane_cap_mm is None
-    # A later lane starts at Y0 and goes back no further than the lane before it went.
-    for before, leg in zip(legs, legs[1:], strict=False):
-        assert leg.face_y_start_mm == 0.0
-        if leg.reface_mm:
-            assert leg.lane_cap_mm is None
-            continue
-        assert leg.lane_cap_mm == pytest.approx(before.face_y_end_mm)
-        assert leg.face_y_end_mm <= leg.lane_cap_mm + 1e-9
+    assert legs[0].face_y_start_mm == 1.0
+    # A later lane starts at Y0, as far back as its stock allows: no lane caps another, as
+    # each lane's passes start and end in the reliefs where it meets the lanes beside it.
+    # A leg mills each relief its passes need, as deep and as far back as they go, unless
+    # one milled since the top was last faced already reaches there; facing starts afresh.
+    assert all(leg.lane_cap_mm is None for leg in legs)
+    assert all(leg.face_y_start_mm == 0.0 for leg in legs[1:])
+    assert [[(r.boundary, r.y_mm) for r in leg.reliefs] for leg in legs] == [
+        [(1, legs[0].face_y_end_mm)],
+        [(2, legs[1].face_y_end_mm)],
+        [],
+        [(1, legs[3].face_y_end_mm)],
+        [(2, legs[4].face_y_end_mm)],
+    ]
+    assert all(r.depth_mm == depth for leg in legs for r in leg.reliefs)
     assert all(leg.face_y_end_mm <= setup.stock.width_mm + 1e-9 for leg in legs)
     # Every test, narrowest first across the legs, each leg truing its face first.
     widths = [p.width_mm for p in plan.passes if p.kind is PassKind.TEST]
@@ -541,10 +638,19 @@ def test_a_round_uses_what_every_lane_has_left_before_it_faces_the_top_down(writ
             assert block.target["z"] == pytest.approx(-(legs[block.leg].top_mm + depth))
         if block.step is not gcode.Step.CUT:
             continue
-        # Each pass cuts its leg's lane: it stops short of the next, the last runs out.
+        # Each pass cuts its leg's lane: it ends on the boundary, in the relief there; the
+        # last lane's run out past the end.
         lane = legs[block.leg].lane
         last = lane_x_mm(setup, lane, 3)[1]
-        assert block.target["x"] <= last if lane < 3 else block.target["x"] > last
+        assert block.target["x"] == pytest.approx(last) if lane < 3 else block.target["x"] > last
+    reliefs = [b for b in found if b.step is gcode.Step.RELIEF]
+    assert [b.leg for b in reliefs] == [
+        number
+        for number, leg in enumerate(legs)
+        for relief in leg.reliefs
+        for _ in relief_rows(setup, 3, leg.top_mm, relief)
+        for _block in ("row", "up")
+    ]
     rows = facing_rows(setup, legs[3].top_mm, legs[3].reface_mm)
     faces = [i for i, b in enumerate(found) if b.step is gcode.Step.FACE]
     assert len(faces) == len(rows) and {found[i].leg for i in faces} == {3}
@@ -562,15 +668,24 @@ def test_a_round_uses_what_every_lane_has_left_before_it_faces_the_top_down(writ
     assert at("(LANE CHANGE: lane 2 of 3") < at(f"(pass {legs[1].passes[0].id} ")
     facing_comment = at("(FACING THE TOP DOWN")
     after_facing = at(f"(pass {legs[3].passes[0].id} ")
-    assert at(f"(pass {legs[2].passes[-1].id} ") < facing_comment < after_facing
-    assert sum(line.startswith("G1 X") for line in program[facing_comment:after_facing]) == len(
-        rows
+    relief = next(
+        i for i in range(facing_comment, after_facing) if program[i].startswith("(RELIEF")
+    )
+    assert at(f"(pass {legs[2].passes[-1].id} ") < facing_comment < relief < after_facing
+    assert sum(line.startswith("G1 X") for line in program[facing_comment:relief]) == len(rows)
+    assert sum(line.startswith("G1 X") for line in program[relief:after_facing]) == len(
+        relief_rows(setup, 3, legs[3].top_mm, legs[3].reliefs[0])
     )
     assert not [line for line in program if line.startswith("M0")]
 
-    # The facing's feed moves count in the run time.
-    cuts = sum(plan.dwell_s + p.plunge_s + p.lead_in_s + p.expected_cut_s for p in plan.passes)
-    assert legs[3].face_s > 0 and plan.run_time_s == pytest.approx(cuts + legs[3].face_s)
+    # The facing's and the reliefs' feed moves count in the run time.
+    cuts = sum(
+        plan.dwell_s + p.plunge_s + p.lead_in_s + p.expected_cut_s + (p.lead_out_s or 0)
+        for p in plan.passes
+    )
+    relief_s = sum(leg.relief_s for leg in legs)
+    assert legs[3].face_s > 0 and relief_s > 0
+    assert plan.run_time_s == pytest.approx(cuts + legs[3].face_s + relief_s)
 
 
 def test_a_round_faces_the_top_down_once_then_drops_what_its_lanes_cannot_hold(write_setup):
@@ -628,12 +743,17 @@ def test_automatic_lanes_keep_every_cut_long_enough_to_hear(write_setup):
             d=("diameter_mm = 9.525", "diameter_mm = 12.7"),
             c=("# chip_load_mm = 0.05", "chip_load_mm = 0.071"),
             s=("# speed_max_rpm = 5000", "speed_max_rpm = 2800"),
-            l=("length_mm = 60.0", "length_mm = 126.0"),
+            l=("length_mm = 60.0", "length_mm = 150.0"),
         )
     )
     env = envelope(plate)
-    # 0.071 mm x 3 flutes x 2800 rpm is about 10 mm/s: 6 s of cut is about 60 mm a lane.
+    # 0.071 mm x 3 flutes x 2800 rpm is about 10 mm/s: 6 s of cut is about 60 mm a lane,
+    # besides the relief at the lane's inner end, 9.5 mm.
     assert auto_lanes(plate, env) == 2
+    shorter_plate = dataclasses.replace(
+        plate, stock=dataclasses.replace(plate.stock, length_mm=126.0)
+    )
+    assert auto_lanes(shorter_plate, env) == 1, "63 mm lanes leave 53.5 mm cuts"
     plan = round1(plate)
     assert plan.lanes == 2
     fastest = min(p.expected_cut_s for p in plan.passes)
@@ -749,10 +869,23 @@ def test_a_plan_of_0_5_0_or_before_loads_as_one_leg(write_setup, tmp_path):
     assert data.pop("fixed_mm") == depth == setup.cut.axial_depth_mm
     # 0.7.0 and older recorded neither the direction a round cut in nor what it started on.
     assert (data.pop("direction"), data.pop("start")) == ("conventional", "in use")
+    # 0.8.0 and older stopped every pass short of the next lane, with no reliefs.
+    assert data.pop("lane_end") == "relief" and single.pop("lane_stock") == []
+    assert [r["boundary"] for r in single.pop("reliefs")] == [1, 2] and single.pop("relief_s")
+    assert all(p.pop("lead_out_s") is not None for p in single["passes"])
     schema_2 = {**data, **single, "axial_depth_mm": depth, "plunge_s": plunge_s, "schema": 2}
     (tmp_path / "old.json").write_text(json.dumps(schema_2))
     loaded = Plan.load(tmp_path / "old.json")
     assert loaded.direction is None, "session.load_rounds fills it in from the setup"
     assert loaded.start is Start.IN_USE, "lane 2 of 3: earlier rounds cut lane 1"
-    assert dataclasses.replace(loaded, direction=Direction.CONVENTIONAL) == plan
+    stopped = dataclasses.replace(
+        plan.legs[0],
+        passes=tuple(dataclasses.replace(p, lead_out_s=None) for p in plan.passes),
+        reliefs=(),
+        relief_s=0.0,
+    )
+    assert loaded.lane_end is LaneEnd.STOP
+    assert dataclasses.replace(loaded, direction=Direction.CONVENTIONAL) == dataclasses.replace(
+        plan, lane_end=LaneEnd.STOP, legs=(stopped,)
+    )
     assert old.start is Start.IN_USE, "20.7 mm in: cut into before"

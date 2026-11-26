@@ -1419,14 +1419,19 @@ def test_a_check_takes_lanes_from_the_other_end_and_the_session_goes_on_from_its
         assert x_from > length and x_to >= 2 * length / 3 - 1e-6, "clear of the other lanes"
     engine.run_round(check["round"])
 
-    # The next conventional round goes on where round 1 left lane 1, not at Y0.
+    # The next conventional round starts in the lane with the most stock left: lane 2,
+    # untouched; lane 1 is cut back as far as round 1 went, lane 3 as far as the check did.
     state = engine.call("plan", NAME, "same")
     third = state["rounds"][-1]
     assert third["direction"] == "conventional"
-    assert third["legs"][0]["lane"] == 1
-    end = first["legs"][-1]["face_y_end_mm"]
-    assert third["legs"][0]["face_y_start_mm"] == pytest.approx(end, abs=0.01)
-    assert all(leg["lane"] < 3 for leg in third["legs"]), "lane 3 holds the climb check"
+    assert (third["legs"][0]["lane"], third["legs"][0]["face_y_start_mm"]) == (2, 0.0)
+    width = form["stock"]["width_mm"]
+    stock = [(s["lane"], s["left_mm"]) for s in third["legs"][0]["lane_stock"]]
+    assert stock == [
+        (1, pytest.approx(width - first["legs"][-1]["face_y_end_mm"], abs=0.01)),
+        (2, width),
+        (3, pytest.approx(width - check["legs"][-1]["face_y_end_mm"], abs=0.01)),
+    ]
 
 
 def test_a_check_holds_only_as_far_as_its_cuts_were_heard(setup):
@@ -1572,7 +1577,7 @@ def test_import_refuses_archives_that_are_not_a_session(engine):
     assert not (engine.root.parent / "outside").exists()
 
 
-def test_a_round_goes_on_into_the_next_lane_when_its_face_runs_out(engine):
+def test_a_round_starts_in_the_lane_with_the_most_stock_left(engine):
     form = engine.call("setup_form", NAME)["values"]
     form["stock"]["lanes"] = 2
     form["stock"]["width_mm"] = 20.0
@@ -1586,17 +1591,23 @@ def test_a_round_goes_on_into_the_next_lane_when_its_face_runs_out(engine):
 
     state = engine.call("plan", NAME, "same")
     second = state["rounds"][-1]
-    # What the first lane's face has left is used first; then the round goes on in a fresh
-    # lane, which the first one bounds, under the same zero.
+    # Lane 2, untouched, has more stock left than lane 1: the round starts there, at Y0 and
+    # free to go further back than lane 1 went, its passes starting in the relief between.
     legs = second["legs"]
-    assert [leg["lane"] for leg in legs] == [1, 2]
-    assert legs[0]["face_y_start_mm"] == pytest.approx(first["legs"][0]["face_y_end_mm"])
-    assert legs[1]["face_y_start_mm"] == 0.0
-    assert legs[1]["face_y_end_mm"] <= legs[0]["face_y_end_mm"] + 1e-9
+    assert [(leg["lane"], leg["face_y_start_mm"]) for leg in legs[:1]] == [(2, 0.0)]
+    end = first["legs"][0]["face_y_end_mm"]
+    assert [(s["lane"], s["left_mm"]) for s in legs[0]["lane_stock"]] == [
+        (1, pytest.approx(20.0 - end)),
+        (2, 20.0),
+    ]
+    assert legs[0]["reliefs"][0]["boundary"] == 1
+    assert legs[0]["reliefs"][0]["y_mm"] >= legs[0]["face_y_end_mm"]
     plan = Plan.load(session.round_dir(engine.root / NAME, second["round"]) / session.PLAN_FILE)
-    assert plan.legs[1].lane_cap_mm == pytest.approx(legs[0]["face_y_end_mm"])
-    program = session.round_dir(engine.root / NAME, second["round"]) / session.PROGRAM_FILE
-    assert "(LANE CHANGE: lane 2 of 2" in program.read_text(encoding="utf-8")
+    assert plan.legs[0].lane_cap_mm is None
+    program = engine.call("program", NAME, second["round"], "mm")
+    assert (
+        "(STARTS IN lane 2 of 2" in program and "(RELIEF: a pocket between lanes 1 and 2" in program
+    )
 
     # Changing the lanes once a round was cut would change what was measured.
     form["stock"]["lanes"] = 3
@@ -1641,10 +1652,10 @@ def test_once_every_lane_is_used_the_round_faces_the_top_midway_and_goes_on(engi
     legs = first["legs"]
     # Every lane in turn; only then the top comes down below the cuts, and the round goes
     # on at the first lane under the same zero.
-    assert [leg["lane"] for leg in legs] == [1, 2, 3, 1, 2]
+    assert [leg["lane"] for leg in legs] == [1, 2, 3, 1]
     step = depth + plan.REFACE_EXTRA_MM
-    assert [leg["reface_mm"] for leg in legs] == pytest.approx([0, 0, 0, step, 0])
-    assert [leg["top_mm"] for leg in legs] == pytest.approx([0, 0, 0, step, step])
+    assert [leg["reface_mm"] for leg in legs] == pytest.approx([0, 0, 0, step])
+    assert [leg["top_mm"] for leg in legs] == pytest.approx([0, 0, 0, step])
     program = engine.call("program", NAME, first["round"], "mm")
     lines = program.splitlines()
     facing_comment = next(i for i, line in enumerate(lines) if line.startswith("(FACING THE TOP"))
@@ -1665,22 +1676,17 @@ def test_once_every_lane_is_used_the_round_faces_the_top_midway_and_goes_on(engi
         assert p["status"] == "analysed"
         assert p["kind"] != "test" or p["verdict"] == ("unstable" if truth else "stable")
 
-    # The next round starts where this one ended: on the new top, in the lane it ended in,
-    # or the fresh lane after it, cut back no further.
+    # The next round starts on the new top, in the lane with the most stock left there: the
+    # round ended in lane 1, so lane 2, fresh.
     ended = session.face_after(session.load_rounds(engine.root / NAME)[-1])
-    assert (ended.lane, ended.top_mm) == (2, pytest.approx(step))
+    assert (ended.lane, ended.top_mm) == (1, pytest.approx(step))
     second = engine.call("plan", NAME, "same")["rounds"][-1]
     start = second["legs"][0]
     assert start["top_mm"] == pytest.approx(step) and start["reface_mm"] == 0
-    plan_2 = Plan.load(session.round_dir(engine.root / NAME, second["round"]) / session.PLAN_FILE)
-    if start["lane"] == ended.lane:
-        assert start["face_y_start_mm"] == pytest.approx(ended.y_mm)
-    else:
-        assert (start["lane"], start["face_y_start_mm"]) == (ended.lane + 1, 0.0)
-        assert plan_2.legs[0].lane_cap_mm == pytest.approx(ended.y_mm)
+    assert (start["lane"], start["face_y_start_mm"]) == (2, 0.0)
 
 
-def test_a_round_stopped_before_its_facing_goes_on_where_it_stopped(engine):
+def test_a_round_stopped_before_its_facing_plans_on_the_top_as_it_was(engine):
     form = engine.call("setup_form", NAME)["values"]
     form["stock"].update(SPILL)
     engine.call("save_setup", NAME, json.dumps(form))
@@ -1694,14 +1700,16 @@ def test_a_round_stopped_before_its_facing_goes_on_where_it_stopped(engine):
     statuses = [p["status"] for p in state["rounds"][-1]["passes"]]
     assert statuses[cut.id] == "aborted" and set(statuses[cut.id + 1 :]) == {"not run"}
 
-    # The next round clears the step there, on the top as it was (the facing never came),
-    # and moves on from that lane.
+    # The next round starts in lane 3, untouched, on the top as it was (the facing never
+    # came). Lane 2's stock left ends where the stopped pass reached: the step it left is
+    # cleared first, by the cleanup pass a round there starts with.
     second = engine.call("plan", NAME, "same")["rounds"][-1]
     start = second["legs"][0]
-    widths = [p.width_mm for p in leg.passes if p.id < cut.id]
-    assert (start["lane"], start["top_mm"], start["reface_mm"]) == (leg.lane, 0.0, 0.0)
-    assert start["face_y_start_mm"] == pytest.approx(sum(widths))
-    assert second["passes"][0]["kind"] == "cleanup"
+    widths = [p.width_mm for p in leg.passes if p.id <= cut.id]
+    assert (start["lane"], start["top_mm"], start["reface_mm"]) == (3, 0.0, 0.0)
+    assert start["face_y_start_mm"] == 0.0
+    stock = {s["lane"]: s["left_mm"] for s in start["lane_stock"]}
+    assert stock[2] == pytest.approx(form["stock"]["width_mm"] - sum(widths))
 
 
 def test_a_run_stopped_during_or_after_mid_facing_plans_from_what_the_timeline_recorded(engine):

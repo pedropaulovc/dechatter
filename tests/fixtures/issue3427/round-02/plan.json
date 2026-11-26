@@ -1,0 +1,152 @@
+{
+  "round": 2,
+  "planner": "bayes",
+  "flutes": 3,
+  "diameter_mm": 12.7,
+  "vary": "width",
+  "fixed_mm": 13.5,
+  "milling": "side",
+  "chip_load_mm": 0.071,
+  "dwell_s": 4,
+  "legs": [
+    {
+      "lane": 1,
+      "face_y_start_mm": 7.2,
+      "passes": [
+        {
+          "id": 0,
+          "kind": "truing",
+          "rpm": 2276,
+          "width_mm": 0.2,
+          "depth_mm": 13.5,
+          "feed_mm_min": 484.8,
+          "expected_cut_s": 7.21,
+          "lead_in_s": 0.96,
+          "plunge_s": 6.6,
+          "p_stable": null,
+          "chip_load_mm": null,
+          "expected": null
+        },
+        {
+          "id": 1,
+          "kind": "test",
+          "rpm": 2276,
+          "width_mm": 1.4,
+          "depth_mm": 13.5,
+          "feed_mm_min": 484.8,
+          "expected_cut_s": 7.5,
+          "lead_in_s": 0.66,
+          "plunge_s": 6.6,
+          "p_stable": 0.803,
+          "chip_load_mm": null,
+          "expected": null
+        },
+        {
+          "id": 2,
+          "kind": "test",
+          "rpm": 2380,
+          "width_mm": 1.9,
+          "depth_mm": 13.5,
+          "feed_mm_min": 506.9,
+          "expected_cut_s": 7.24,
+          "lead_in_s": 0.57,
+          "plunge_s": 6.6,
+          "p_stable": 0.8,
+          "chip_load_mm": null,
+          "expected": null
+        }
+      ],
+      "lane_cap_mm": null,
+      "top_mm": 0.0,
+      "reface_mm": 0.0,
+      "face_s": 0,
+      "wall_mm": 0.0
+    },
+    {
+      "lane": 2,
+      "face_y_start_mm": 0.0,
+      "passes": [
+        {
+          "id": 3,
+          "kind": "truing",
+          "rpm": 2380,
+          "width_mm": 0.2,
+          "depth_mm": 13.5,
+          "feed_mm_min": 506.9,
+          "expected_cut_s": 7.83,
+          "lead_in_s": 1.67,
+          "plunge_s": 6.6,
+          "p_stable": null,
+          "chip_load_mm": null,
+          "expected": null
+        },
+        {
+          "id": 4,
+          "kind": "test",
+          "rpm": 2380,
+          "width_mm": 2.8,
+          "depth_mm": 13.5,
+          "feed_mm_min": 506.9,
+          "expected_cut_s": 8.7,
+          "lead_in_s": 1.24,
+          "plunge_s": 6.6,
+          "p_stable": 0.651,
+          "chip_load_mm": null,
+          "expected": null
+        },
+        {
+          "id": 5,
+          "kind": "test",
+          "rpm": 2592,
+          "width_mm": 1.8,
+          "depth_mm": 13.5,
+          "feed_mm_min": 552.1,
+          "expected_cut_s": 7.81,
+          "lead_in_s": 1.22,
+          "plunge_s": 6.6,
+          "p_stable": 0.743,
+          "chip_load_mm": null,
+          "expected": null
+        },
+        {
+          "id": 6,
+          "kind": "test",
+          "rpm": 2592,
+          "width_mm": 2.6,
+          "depth_mm": 13.5,
+          "feed_mm_min": 552.1,
+          "expected_cut_s": 7.96,
+          "lead_in_s": 1.15,
+          "plunge_s": 6.6,
+          "p_stable": 0.622,
+          "chip_load_mm": null,
+          "expected": null
+        },
+        {
+          "id": 7,
+          "kind": "test",
+          "rpm": 2692,
+          "width_mm": 1.5,
+          "depth_mm": 13.5,
+          "feed_mm_min": 573.4,
+          "expected_cut_s": 7.45,
+          "lead_in_s": 1.21,
+          "plunge_s": 6.6,
+          "p_stable": 0.803,
+          "chip_load_mm": null,
+          "expected": null
+        }
+      ],
+      "lane_cap_mm": 10.7,
+      "top_mm": 0.0,
+      "reface_mm": 0.0,
+      "face_s": 0,
+      "wall_mm": 0.0
+    }
+  ],
+  "planned_on": "2026-11-25",
+  "direction": "conventional",
+  "start": "in use",
+  "lanes": 2,
+  "schema": 4
+}

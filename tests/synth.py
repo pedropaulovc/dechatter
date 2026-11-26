@@ -287,7 +287,7 @@ def timeline(
                 "event": "cut",
                 "pass": p.id,
                 "start": t0 + dwell_end,
-                "end": t0 + contact_start + seconds + p.lead_in_s,
+                "end": t0 + contact_start + seconds + p.lead_off_s,
                 "holds": [],
             }
         )
