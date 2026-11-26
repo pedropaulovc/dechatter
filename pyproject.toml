@@ -33,5 +33,6 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # The tests share nothing but read-only fixtures, each writing under its own tmp_path, so they
-# run on every core; `-n 0` runs them in one process, for a debugger.
+# run on every core; `-n 0` runs them in one process, for a debugger, `-s` or a quick
+# single test.
 addopts = "-n auto --dist worksteal"

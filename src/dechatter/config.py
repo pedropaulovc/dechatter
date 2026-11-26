@@ -7,9 +7,11 @@ import functools
 import json
 import tomllib
 import typing
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
+from types import MappingProxyType
 
 
 class ConfigError(ValueError):
@@ -172,10 +174,10 @@ class Setup:
 
 
 @functools.cache
-def _hints(cls: type) -> dict[str, object]:
+def _hints(cls: type) -> Mapping[str, typing.Any]:
     """A dataclass's field types, resolved once: resolving them takes long, and a setup is
-    parsed on every call into the session."""
-    return typing.get_type_hints(cls)
+    parsed on every call into the session. Read-only, as every caller shares it."""
+    return MappingProxyType(typing.get_type_hints(cls))
 
 
 def _coerce(hint: object, value: object) -> object:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -78,6 +79,11 @@ def _tone(hz: float, amplitude: float, rng: np.random.Generator) -> tuple[float,
     return hz, amplitude, rng.uniform(0, 2 * np.pi)
 
 
+def _samples(seconds: float) -> int:
+    """How many samples `seconds` last; none for a stretch that ends before it starts."""
+    return max(0, int(seconds * RATE))
+
+
 def _sound(samples: int, tones: list[tuple[float, float, float]]) -> np.ndarray:
     """The sum of `tones`, `samples` long.
 
@@ -89,11 +95,11 @@ def _sound(samples: int, tones: list[tuple[float, float, float]]) -> np.ndarray:
         return np.zeros(0)
     hz, amplitude, phase = np.array(tones).T
     step = 2 * np.pi * hz / RATE
-    block = min(samples, 4096)
+    block = math.isqrt(samples - 1) + 1
     rows = -(-samples // block)
     column = np.exp(1j * np.outer(np.arange(block), step))
     row = amplitude * np.exp(1j * (np.outer(np.arange(rows) * block, step) + phase))
-    out = row.imag @ column.real.T + row.real @ column.imag.T
+    out = np.hstack((row.imag, row.real)) @ np.hstack((column.real, column.imag)).T
     return out.ravel()[:samples]
 
 
@@ -109,7 +115,7 @@ def _air_noise_and_tones(
 def _air(
     seconds: float, spindle_hz: float, machine: Machine, rng: np.random.Generator
 ) -> np.ndarray:
-    samples = int(seconds * RATE)
+    samples = _samples(seconds)
     noise, tones = _air_noise_and_tones(samples, spindle_hz, machine, rng)
     return noise + _sound(samples, tones)
 
@@ -123,7 +129,7 @@ def _cut(
     machine: Machine,
     rng: np.random.Generator,
 ) -> np.ndarray:
-    samples = int(seconds * RATE)
+    samples = _samples(seconds)
     noise, tones = _air_noise_and_tones(samples, spindle_hz, machine, rng)
     noise += 0.02 * rng.standard_normal(samples)
     tooth_hz = spindle_hz * flutes

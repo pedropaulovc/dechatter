@@ -426,31 +426,30 @@ def removed(stock, sweeps, radius):
     cuts = []
     for y_c, x_from, x_to in sweeps:
         lo, hi = sorted((x_from, x_to))
-        x, y = stock.x[stock.left], stock.y[stock.left]
+        x, y = stock.x, stock.y
         plunge_clear = not np.any((x - x_from) ** 2 + (y - y_c) ** 2 < radius**2)
         near = np.abs(y - y_c) < radius
         reach = np.sqrt(np.where(near, radius**2 - (y - y_c) ** 2, 0.0))
         taken = near & (lo - reach < x) & (x < hi + reach)
-        stock.left[np.flatnonzero(stock.left)[taken]] = False
+        stock.x, stock.y = x[~taken], y[~taken]
         cuts.append((set(zip(x[taken].tolist(), y[taken].tolist(), strict=True)), plunge_clear))
     return cuts
 
 
 @dataclasses.dataclass
 class Stock:
-    """Points of material; `left` marks those no pass has cut yet."""
+    """The points of material no pass has cut yet."""
 
     x: np.ndarray
     y: np.ndarray
-    left: np.ndarray
 
 
 def grid(length, width, step=0.25, y_step=0.1):
     """Points of material, at the middle of each cell so a narrow pass still finds some."""
     x = (np.arange(int(length / step)) + 0.5) * step
     y = (np.arange(int(width / y_step)) + 0.5) * y_step
-    x, y = (a.ravel() for a in np.meshgrid(x, y, indexing="ij"))
-    return Stock(x, y, np.ones(x.size, bool))
+    x, y = np.meshgrid(x, y, indexing="ij")
+    return Stock(x.ravel(), y.ravel())
 
 
 def relief_sweeps(plan, setup):

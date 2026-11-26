@@ -4,11 +4,18 @@ import os
 import sys
 from pathlib import Path
 
-# One BLAS thread, set before numpy loads: synth's matrix products are small, and on a busy
-# machine OpenBLAS's worker threads spin waiting on each other, several times slower.
-os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+import pytest
 
-import pytest  # noqa: E402
+# One BLAS thread per process, set before numpy loads: synth's matrix products are small, the
+# tests already run one process per core, and on a busy machine BLAS threads spin waiting on
+# each other, several times slower.
+for threads in (
+    "OPENBLAS_NUM_THREADS",
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+):
+    os.environ.setdefault(threads, "1")
 
 sys.path.insert(0, str(Path(__file__).parent))
 
