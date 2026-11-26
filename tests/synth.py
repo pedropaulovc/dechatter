@@ -73,18 +73,45 @@ DEFAULT_MACHINE = Machine()
 DEPTH_MACHINE = Machine(reference_depth_mm=1.2)
 
 
-def _tone(t: np.ndarray, hz: float, amplitude: float, rng: np.random.Generator) -> np.ndarray:
-    return amplitude * np.sin(2 * np.pi * hz * t + rng.uniform(0, 2 * np.pi))
+def _tone(hz: float, amplitude: float, rng: np.random.Generator) -> tuple[float, float, float]:
+    """A tone to sound: its frequency, amplitude and a random phase."""
+    return hz, amplitude, rng.uniform(0, 2 * np.pi)
+
+
+def _sound(samples: int, tones: list[tuple[float, float, float]]) -> np.ndarray:
+    """The sum of `tones`, `samples` long.
+
+    Each tone at sample `r * block + m` is the imaginary part of a per-row turn times a
+    per-column one, so the whole sum is one matrix product rather than a sine per sample per
+    tone: minutes of audio with dozens of tones take milliseconds, as exactly as `np.sin`.
+    """
+    if samples == 0:
+        return np.zeros(0)
+    hz, amplitude, phase = np.array(tones).T
+    step = 2 * np.pi * hz / RATE
+    block = min(samples, 4096)
+    rows = -(-samples // block)
+    column = np.exp(1j * np.outer(np.arange(block), step))
+    row = amplitude * np.exp(1j * (np.outer(np.arange(rows) * block, step) + phase))
+    out = row.imag @ column.real.T + row.real @ column.imag.T
+    return out.ravel()[:samples]
+
+
+def _air_noise_and_tones(
+    samples: int, spindle_hz: float, machine: Machine, rng: np.random.Generator
+) -> tuple[np.ndarray, list[tuple[float, float, float]]]:
+    noise = 0.004 * rng.standard_normal(samples)
+    tones = [_tone(machine.whine_hz, 0.02, rng)]
+    tones += [_tone(order * spindle_hz, 0.003 / order, rng) for order in range(1, 6)]
+    return noise, tones
 
 
 def _air(
     seconds: float, spindle_hz: float, machine: Machine, rng: np.random.Generator
 ) -> np.ndarray:
-    t = np.arange(int(seconds * RATE)) / RATE
-    out = 0.004 * rng.standard_normal(len(t)) + _tone(t, machine.whine_hz, 0.02, rng)
-    for order in range(1, 6):
-        out += _tone(t, order * spindle_hz, 0.003 / order, rng)
-    return out
+    samples = int(seconds * RATE)
+    noise, tones = _air_noise_and_tones(samples, spindle_hz, machine, rng)
+    return noise + _sound(samples, tones)
 
 
 def _cut(
@@ -96,18 +123,19 @@ def _cut(
     machine: Machine,
     rng: np.random.Generator,
 ) -> np.ndarray:
-    t = np.arange(int(seconds * RATE)) / RATE
-    out = _air(seconds, spindle_hz, machine, rng) + 0.02 * rng.standard_normal(len(t))
+    samples = int(seconds * RATE)
+    noise, tones = _air_noise_and_tones(samples, spindle_hz, machine, rng)
+    noise += 0.02 * rng.standard_normal(samples)
     tooth_hz = spindle_hz * flutes
     for order in range(1, min(int(8000 / tooth_hz), 24) + 1):
-        out += _tone(t, order * tooth_hz, load / order, rng)
-        out += _tone(t, order * tooth_hz + spindle_hz, 0.2 * load / order, rng)  # runout
+        tones.append(_tone(order * tooth_hz, load / order, rng))
+        tones.append(_tone(order * tooth_hz + spindle_hz, 0.2 * load / order, rng))  # runout
     if chatter:
         chatter_hz = machine.natural_hz * 1.03
-        out += _tone(t, chatter_hz, 0.6, rng)
-        out += _tone(t, chatter_hz + tooth_hz, 0.15, rng)
-        out += _tone(t, abs(chatter_hz - tooth_hz), 0.15, rng)
-    return out
+        tones.append(_tone(chatter_hz, 0.6, rng))
+        tones.append(_tone(chatter_hz + tooth_hz, 0.15, rng))
+        tones.append(_tone(abs(chatter_hz - tooth_hz), 0.15, rng))
+    return noise + _sound(samples, tones)
 
 
 class Facing(StrEnum):

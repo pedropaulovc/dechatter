@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import functools
 import json
 import tomllib
 import typing
@@ -170,6 +171,13 @@ class Setup:
     planner: Planner = field(default_factory=Planner)
 
 
+@functools.cache
+def _hints(cls: type) -> dict[str, object]:
+    """A dataclass's field types, resolved once: resolving them takes long, and a setup is
+    parsed on every call into the session."""
+    return typing.get_type_hints(cls)
+
+
 def _coerce(hint: object, value: object) -> object:
     for candidate in typing.get_args(hint) or (hint,):
         if isinstance(candidate, type) and issubclass(candidate, StrEnum):
@@ -180,7 +188,7 @@ def _coerce(hint: object, value: object) -> object:
 
 
 def _build[T](cls: type[T], section: str, data: dict) -> T:
-    hints = typing.get_type_hints(cls)
+    hints = _hints(cls)
     unknown = set(data) - set(hints)
     if unknown:
         raise ConfigError(f"[{section}] unknown keys: {', '.join(sorted(unknown))}")
@@ -244,7 +252,7 @@ def _value(setup: Setup, at: str) -> object:
 
 def _shown_fields() -> set[str]:
     """Every field the wizard can show, as `section.field`."""
-    hints = typing.get_type_hints(Setup)
+    hints = _hints(Setup)
     shown = {
         f"{section.name}.{entry.name}"
         for section in dataclasses.fields(Setup)
@@ -307,7 +315,7 @@ def _parse(text: str, origin: str) -> tuple[Setup, Pending]:
     for name, f in sections.items():
         if name not in data and f.default_factory is dataclasses.MISSING:
             raise ConfigError(f"missing section [{name}]")
-        cls = typing.get_type_hints(Setup)[name]
+        cls = _hints(Setup)[name]
         built[name] = _build(cls, name, data.get(name, {}))
     setup = Setup(**built)
     _validate(setup)
@@ -371,7 +379,7 @@ def setup_values(path: Path) -> dict:
 
 def setup_defaults() -> dict:
     """Each section's default values, for the entries that have one."""
-    hints = typing.get_type_hints(Setup)
+    hints = _hints(Setup)
     return {
         section.name: {
             entry.name: entry.default

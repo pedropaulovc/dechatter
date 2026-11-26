@@ -5,6 +5,7 @@ import json
 import re
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from dechatter import bayes, gcode
@@ -420,32 +421,36 @@ def sweeps(plan, setup):
 
 
 def removed(stock, sweeps, radius):
-    """Carve the passes out of `stock`, a set of (x, y) points of material; return, per pass,
+    """Carve the passes out of `stock`, a grid's points of material; return, per pass,
     the points it cut and whether its plunge point was in the air."""
     cuts = []
     for y_c, x_from, x_to in sweeps:
         lo, hi = sorted((x_from, x_to))
-        plunge_clear = not any((x - x_from) ** 2 + (y - y_c) ** 2 < radius**2 for x, y in stock)
-        cut = {
-            (x, y)
-            for x, y in stock
-            if abs(y - y_c) < radius
-            and lo - (radius**2 - (y - y_c) ** 2) ** 0.5
-            < x
-            < hi + (radius**2 - (y - y_c) ** 2) ** 0.5
-        }
-        stock -= cut
-        cuts.append((cut, plunge_clear))
+        x, y = stock.x[stock.left], stock.y[stock.left]
+        plunge_clear = not np.any((x - x_from) ** 2 + (y - y_c) ** 2 < radius**2)
+        near = np.abs(y - y_c) < radius
+        reach = np.sqrt(np.where(near, radius**2 - (y - y_c) ** 2, 0.0))
+        taken = near & (lo - reach < x) & (x < hi + reach)
+        stock.left[np.flatnonzero(stock.left)[taken]] = False
+        cuts.append((set(zip(x[taken].tolist(), y[taken].tolist(), strict=True)), plunge_clear))
     return cuts
+
+
+@dataclasses.dataclass
+class Stock:
+    """Points of material; `left` marks those no pass has cut yet."""
+
+    x: np.ndarray
+    y: np.ndarray
+    left: np.ndarray
 
 
 def grid(length, width, step=0.25, y_step=0.1):
     """Points of material, at the middle of each cell so a narrow pass still finds some."""
-    return {
-        ((i + 0.5) * step, (j + 0.5) * y_step)
-        for i in range(int(length / step))
-        for j in range(int(width / y_step))
-    }
+    x = (np.arange(int(length / step)) + 0.5) * step
+    y = (np.arange(int(width / y_step)) + 0.5) * y_step
+    x, y = (a.ravel() for a in np.meshgrid(x, y, indexing="ij"))
+    return Stock(x, y, np.ones(x.size, bool))
 
 
 def relief_sweeps(plan, setup):

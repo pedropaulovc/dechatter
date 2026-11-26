@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
-import pytest
+# One BLAS thread, set before numpy loads: synth's matrix products are small, and on a busy
+# machine OpenBLAS's worker threads spin waiting on each other, several times slower.
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+
+import pytest  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).parent))
 
