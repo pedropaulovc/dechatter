@@ -1048,6 +1048,7 @@ const STEP_TEXT = {
   dwell: 'Spindle at speed in the air',
   cut: 'Cutting',
   face: 'Facing the top down',
+  relief: 'Milling a relief between lanes',
   retract: 'Backing off',
   end: 'Finishing',
 };
@@ -1319,16 +1320,18 @@ function legPlace(round, leg) {
 
 // A relief a leg mills before its passes, for the round's steps.
 function reliefText(leg, relief) {
-  const more = relief.done_y_mm > 0 || relief.done_depth_mm > 0 ? ', extending the one milled before' : '';
+  const more = relief.done.length ? ', extending the one milled before' : '';
   return `Before pass ${leg.first_pass}, the program mills a relief between lanes ${relief.boundary} and ${relief.boundary + 1} at X ${length(relief.x_mm, units())}${more}: a pocket back to Y ${length(relief.y_mm, units())} and ${length(relief.depth_mm, units(), { mmToo: true })} deep, in rows like facing. The passes on either side end and start in it, in the air. The recording runs on; the relief is not analysed.`;
 }
 
-// Where a round starts when it chose the lane: the one with the most stock left.
-function choiceText(round) {
-  const lane = round.legs[0].lane;
-  const chosen = round.lane_stock.find((s) => s.lane === lane);
-  const others = round.lane_stock.filter((s) => s.lane !== lane).map((s) => `lane ${s.lane} has ${length(s.left_mm, units())}${s.open ? '' : ', where the first cut does not fit'}`);
-  return ` It starts in lane ${lane}, which has the most stock left behind its face, ${length(chosen.left_mm, units(), { mmToo: true })}${others.length ? `; ${others.join('; ')}` : ''}.`;
+// Why a leg is on its lane when the round chose it: the lane not cut yet this round with
+// the most stock left that takes the leg's first cut.
+const FIT_TEXT = { fits: '', 'no room': ', where the cut does not fit', used: ', cut already this round' };
+
+function choiceText(leg) {
+  const chosen = leg.lane_stock.find((s) => s.lane === leg.lane);
+  const others = leg.lane_stock.filter((s) => s.lane !== leg.lane).map((s) => `lane ${s.lane} has ${length(s.left_mm, units())}${FIT_TEXT[s.fit]}`);
+  return ` Lane ${leg.lane} (from pass ${leg.first_pass}) has the most stock left behind its face, ${length(chosen.left_mm, units(), { mmToo: true })}${others.length ? `; ${others.join('; ')}` : ''}.`;
 }
 
 // Where along the stock a round cuts, leg by leg, and where it faces the top down.
@@ -1343,7 +1346,8 @@ function legsText(round) {
     }
     return `then, from pass ${leg.first_pass}, ${legPlace(round, leg)} ${faces}`;
   });
-  return `${parts.join('; ')}.${round.lane_stock.length ? choiceText(round) : ''}`;
+  const choices = round.legs.filter((leg) => leg.lane_stock.length).map(choiceText).join('');
+  return `${parts.join('; ')}.${choices}`;
 }
 
 // A row before each leg of a round in more than one: where its passes cut.

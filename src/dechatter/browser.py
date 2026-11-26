@@ -67,25 +67,29 @@ class Sessions:
             )
         return self.root / name
 
-    def _app(self, name: str) -> App:
+    def _app(self, name: str, discard: bool = True) -> App:
+        """The session's app, opened on first use; opening it discards an outdated unrun
+        round (see _discard_outdated) unless `discard` is off."""
         if name not in self._apps:
             target = self._existing(name)
             session.sweep_discarded(target)
             app = App(target, self.thresholds)
-            self._discard_outdated(target, app)
+            if discard:
+                self._discard_outdated(target, app)
             self._apps[name] = app
         return self._apps[name]
 
-    def _discard_outdated(self, target: Path, app: App) -> None:
+    def _discard_outdated(self, target: Path, app: App) -> bool:
         """Discard an unrun round an older dechatter planned with passes that stop in the
-        stock where lanes meet (session.outdated_round), so the next one is planned anew. A
-        session whose rounds do not load is left for the action that reads them to report."""
+        stock where lanes meet (session.outdated_round), so the next one is planned anew;
+        whether there was one. A session whose rounds do not load is left for the action
+        that reads them to report."""
         try:
             outdated = session.outdated_round(target)
         except EXPECTED:
-            return
+            return False
         if outdated is None:
-            return
+            return False
         aside = session.set_aside(outdated)
         app.discarded_round, app.discarded_why = outdated.plan.round, Discarded.LANES
         round_no = outdated.plan.round
@@ -94,6 +98,7 @@ class Sessions:
             shutil.rmtree(aside)
         except OSError as exc:
             log.warning("%s: could not delete %s yet: %s", target.name, aside.name, exc)
+        return True
 
     def names(self) -> list[str]:
         return sorted(p.parent.name for p in self.root.glob(f"*/{session.SETUP_FILE}"))
@@ -254,7 +259,8 @@ class Sessions:
         target = self._existing(name)
         self._not_recording(name, "reset")
         self._apps.pop(name, None)
-        app = self._app(name)
+        # Every round goes: none is discarded on the way, to be reported.
+        app = self._app(name, discard=False)
         session.reset(target)
         return app.state()
 
@@ -317,7 +323,9 @@ class Sessions:
         A round planned but not yet run is discarded when the setup changes its program, so
         the next one is planned from the new setup.
         """
-        recording = self._app(name).recording_round
+        self._existing(name)
+        # A round can only be recording in a session open in this browser.
+        recording = self._apps[name].recording_round if name in self._apps else None
         if recording is not None:
             raise SessionError(f"round {recording} is being recorded; change the setup after it")
         text = dump_setup(json.loads(values_json)).encode("utf-8")
@@ -327,7 +335,9 @@ class Sessions:
         stale, aside = None, None
         try:
             path.write_bytes(text)
-            app = self._app(name)
+            # An outdated round goes only once the setup is saved: a refused one leaves the
+            # session untouched.
+            app = self._app(name, discard=False)
             stale = session.stale_round(self._dir(name), app.setup)
             if stale is not None:
                 aside = session.set_aside(stale)
@@ -340,6 +350,8 @@ class Sessions:
             self._apps.pop(name, None)
             raise
         if aside is None:
+            if self._discard_outdated(self._dir(name), app):
+                shown = app.state()
             return shown
         log.info("%s: discarded unrun round %d planned from the old setup", name, stale.plan.round)
         # The new setup is saved: a round that will not delete now goes with the next sweep.

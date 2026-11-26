@@ -131,8 +131,8 @@ def _where(plan: Plan, units: Units) -> str:
         # Lanes count from the end the cutter meets first: the right one when it climbs.
         end = " from the right" if plan.direction is Direction.CLIMB else ""
         lane = f"lane {leg.lane} of {plan.lanes}{end}" if plan.lanes > 1 else ""
-        if number == 0 and plan.lane_stock:
-            chosen = next(s for s in plan.lane_stock if s.lane == leg.lane)
+        if leg.lane_stock:
+            chosen = next(s for s in leg.lane_stock if s.lane == leg.lane)
             lane += f" (most stock left, {_length(chosen.left_mm, units)})"
         faced = f"top faced down {_length(leg.reface_mm, units)}" if leg.reface_mm > 0 else ""
         reliefs = "".join(

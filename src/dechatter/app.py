@@ -278,12 +278,11 @@ class App:
             "program": self.program_name(r),
             "run_time_s": round(r.plan.run_time_s),
             "lanes": r.plan.lanes,
-            # The lanes as the round found them when it chose the one with the most stock
-            # left to start in; empty where it had no choice.
-            "lane_stock": [asdict(s) for s in r.plan.lane_stock],
             # Where the round cuts, in the order it runs: from each leg's first pass on, one
             # lane's face, with the top faced down first where `reface_mm` says so and the
-            # reliefs its passes start and end in milled before them.
+            # reliefs its passes start and end in milled before them; side milling in lanes,
+            # the lanes as the round found them when it chose the leg's (`lane_stock`, the
+            # one with the most stock left that takes its first cut; empty without a choice).
             "legs": [
                 {
                     "lane": leg.lane,
@@ -305,6 +304,7 @@ class App:
                         }
                         for relief in leg.reliefs
                     ],
+                    "lane_stock": [asdict(s) for s in leg.lane_stock],
                     "first_pass": leg.passes[0].id,
                 }
                 for leg in r.plan.legs

@@ -494,10 +494,13 @@ not fit; then it goes on in the next lane, and the one after that, within the sa
 Each new lane is a fresh face at `Y0` (or its face where an earlier round left it), at the
 same height above the vise jaws as the first, with the same work zero, and starts with its
 own truing pass. Each lane must be at least twice the cutter diameter long, and the number
-of lanes cannot change once a round was cut.
+of lanes cannot change once a round was cut. Side milling, each lane must also keep at least
+a cutter radius of stock between the reliefs at its ends (below).
 
 Side milling, a round starts in the lane with the most stock left that its first cut fits
-on (the lowest of those tied), then goes on in the lanes after it as above. Each pass cuts
+on, and each later leg goes to the lane not cut yet in the round with the most stock left
+that its next cut fits on (of lanes tied, the one the cutter meets first); only when none
+does is the top faced down, or the cuts left over dropped. Each pass cuts
 one lane and both its ends are in the air: where two lanes meet, a **relief** is milled
 first, a pocket a cutter diameter plus twice `face_width_mm` long, centred on the lane
 boundary, as deep as the passes go and as far back from the front as they reach. It is
@@ -505,7 +508,9 @@ milled like facing (rows along X at most `face_width_mm` apart from the front ba
 at most `face_depth_mm` deep, at the speed of the cut that comes next). Its ends are in the
 stock, so each row first plunges at its end and at its start, taking there what the rows
 before it left, and is then fed from one to the other, cutting a row's width. A leg mills
-it only as far as no earlier one on the same top did. A lane's passes run from the air (the
+it only as far back and as deep as its own passes go, leaving out what one milled before on
+the same top reaches, on the same rows (a pocket milled with another `face_width_mm` is
+milled again from the front). A lane's passes run from the air (the
 end of the stock, or the relief before it) into the relief after it, where the cutter,
 centred on the boundary, backs off the face (the last lane runs out past the end of the
 stock as usual). A pass that stopped in the
@@ -524,8 +529,9 @@ fresh stock (or the top faced down). A round of slots starts where the last slot
 the stock, in whichever lane that was.
 
 The program says in a comment where it changes lane and, side milling, which lane the round
-starts in and why (`STARTS IN`); the widget's round and the report list the lanes a round
-cuts, the pass each starts at and the stock each lane had left.
+starts in and each later leg goes to, and why (`STARTS IN`, and under each `LANE CHANGE`):
+the stock each lane had left. The widget's round and the report list the lanes a round
+cuts, the pass each starts at and, where it chose the lane, the stock left.
 
 A check of the other direction uses the lanes from the other end: climbing, the right-hand
 lane is its first. Side milling, it too starts in the lane with the most stock left, on

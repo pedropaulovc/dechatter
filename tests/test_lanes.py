@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import zipfile
 from pathlib import Path
 
@@ -183,7 +184,9 @@ def test_follow_on_rounds_and_a_climb_check_stay_within_width_at_both_ends(deep,
     )
     assert [leg.lane for leg in second.legs] == [2], "lane 2, fresh, has the most stock left"
     (extended,) = second.legs[0].reliefs
-    assert (extended.done_y_mm, extended.y_mm) == (7.2, second.legs[0].face_y_end_mm)
+    from dechatter.plan import Milled  # 0.8.1: imported here, so the module loads on 0.8.0
+
+    assert (extended.done, extended.y_mm) == ((Milled(7.2, 13.5),), second.legs[0].face_y_end_mm)
     assert_within_width(second, cut(stock, second, deep), deep)
     rounds.append(ran(second))
     climb = cutting(deep, Direction.CLIMB)
@@ -221,8 +224,39 @@ def test_a_new_round_after_0_8_0_ones_clears_the_steps_their_stops_left(deep):
         deep, envelope(deep), 2, PlannerKind.BAYES, tests, face=lane_1, made=left.made, lanes=2
     )
     assert [leg.lane for leg in plan.legs] == [1, 2]
-    assert plan.legs[0].reliefs[0].done_y_mm == 0.0, "milled from the front"
+    assert plan.legs[0].reliefs[0].done == (), "milled from the front"
     assert_within_width(plan, cut(stock, plan, deep), deep)
+
+
+def test_a_relief_extended_back_and_deeper_keeps_the_rows_milled_before(deep):
+    """An extension leaves out what was milled and puts its rows within it where the earlier
+    rows were, so no row's end cap, nor a rapid down to a level, meets the scalloped walls
+    the earlier rows left; a pocket of another row step (face_width_mm changed) counts as
+    not milled. Every relief row ends somewhere of its own, as the widget waits on it."""
+    from dechatter.plan import Milled, Relief, relief_rows
+
+    step = 3.175
+    earlier = Relief(1, 7.0, 6.0, step)
+    later = Relief(1, 12.0, 9.0, step, (Milled(7.0, 6.0),))
+    old = {row.y_mm for row in relief_rows(deep, 2, 0.0, earlier)}
+    for row in relief_rows(deep, 2, 0.0, later):
+        back = row.y_mm + deep.tool.diameter_mm / 2
+        if back <= 7.0 + 1e-6:
+            assert row.y_mm in old and row.z_mm > 6.0, "within it, only deeper, on its rows"
+    env = envelope(deep)
+    narrow = Relief(1, 7.2, 13.5, 1.0)
+    plan = assemble(
+        deep, env, 2, PlannerKind.GRID, grid_tests(deep, env), lanes=2, reliefs=(narrow,)
+    )
+    assert all(r.done == () and r.step_mm == step for r in plan.legs[0].reliefs)
+    # #3427's climb check milled a relief 2.9 mm back: one row a level.
+    shallow = assemble(
+        deep, env, 3, PlannerKind.GRID, [(2046.0, 0.4, None)] * 3, lanes=2, face=Face(y_mm=1.0)
+    )
+    found = gcode.blocks(shallow, deep, gcode.Units.MM)
+    targets = [b.target for b in found if b.target is not None]
+    assert all(a != b for a, b in zip(targets, targets[1:], strict=False))
+    assert sum(b.step is gcode.Step.RELIEF for b in found) > 1
 
 
 def test_a_round_starts_in_the_lane_with_the_most_stock_left(tmp_path):
@@ -234,8 +268,39 @@ def test_a_round_starts_in_the_lane_with_the_most_stock_left(tmp_path):
         for path in FIXTURE.rglob("*"):
             if path.is_file():
                 z.write(path, f"issue3427/{path.relative_to(FIXTURE).as_posix()}")
+    # #64's table: rounds 1 and 2 cut X0-63 back to Y10.7, round 3's climb check X63-126 to
+    # Y2.9, and 0.8.0 planned round 4 in X0-63 again, Y10.7 to 12.4.
+    table = [
+        (r.plan.direction, r.plan.legs[0].lane, r.plan.legs[0].face_y_start_mm, round(faces[-1], 3))
+        for r in session.load_rounds(FIXTURE)
+        for faces in [[leg.face_y_end_mm for leg in r.plan.legs if leg.lane == r.plan.legs[0].lane]]
+    ]
+    conventional, climb = Direction.CONVENTIONAL, Direction.CLIMB
+    assert table == [
+        (conventional, 1, 0.0, 7.2),
+        (conventional, 1, 7.2, 10.7),
+        (climb, 1, 0.0, 2.9),
+        (conventional, 1, 10.7, 12.4),
+    ]
+    # Reset discards every round and reports none discarded on the way; a refused setup
+    # leaves the session as it was, the unrun round 0.8.0 planned included.
+    forms = Sessions(tmp_path / "forms")
+    values = forms.setup_form(forms.import_zip(data.getvalue()))["values"]
+    other = Sessions(tmp_path / "other")
+    reset = other.import_zip(data.getvalue())
+    assert other.reset(reset)["discarded_round"] is None
+    refused = Sessions(tmp_path / "refused")
+    kept = refused.import_zip(data.getvalue())
+    wrong = {**values, "tool": {**values["tool"], "flutes": 4}}
+    with pytest.raises(RuntimeError, match="was cut with another"):
+        refused.save_setup(kept, json.dumps(wrong))
+    assert (tmp_path / "refused" / kept / "round-04").is_dir()
     sessions = Sessions(tmp_path)
     name = sessions.import_zip(data.getvalue())
+    # Opened, the unrun round 4 0.8.0 planned is discarded, saying why.
+    state = sessions.state(name)
+    assert (state["discarded_round"], state["discarded_why"]) == (4, "lanes")
+    assert [r["round"] for r in state["rounds"]] == [1, 2, 3]
     for width, left in ((13.0, 10.1), (11.0, 8.1)):
         # The setup as it is, then width_mm lowered: the unrun round 4 goes with the change.
         values = sessions.setup_form(name)["values"]
@@ -245,11 +310,16 @@ def test_a_round_starts_in_the_lane_with_the_most_stock_left(tmp_path):
         assert (planned["round"], planned["direction"]) == (4, "conventional")
         assert planned["legs"][0]["lane"] == 2 and planned["legs"][0]["lane_x_mm"] == [63, 126]
         assert planned["legs"][0]["face_y_start_mm"] == 2.9
-        stock = {s["lane"]: s for s in planned["lane_stock"]}
+        stock = {s["lane"]: s for s in planned["legs"][0]["lane_stock"]}
         assert stock[1]["left_mm"] == pytest.approx(width - 10.7)
-        assert stock[2] == {"lane": 2, "left_mm": left, "open": True}
+        assert stock[2] == {"lane": 2, "left_mm": left, "fit": "fits"}
         relief = planned["legs"][0]["reliefs"][0]
         assert (relief["boundary"], relief["x_mm"], relief["depth_mm"]) == (1, 63, 13.5)
         program = sessions.program(name, 4, "mm")
-        assert "(STARTS IN lane 2 of 2, X63 to X126: of the lanes its first cut fits on" in program
+        assert "(STARTS IN lane 2 of 2, X63 to X126: of the lanes not cut yet this round" in (
+            program
+        )
         assert "(RELIEF: a pocket between lanes 1 and 2 at X63" in program
+        page = sessions.report_html(name, "mm")
+        assert re.search(r"lane 2 of 2 \(most stock left, [\d.]+ mm\)", page)
+        assert "relief between lanes 1 and 2 milled before pass" in page

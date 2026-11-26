@@ -7,6 +7,8 @@ from dataclasses import dataclass
 
 from .config import Coolant, Direction, Setup, SpindleControl, Vary
 from .plan import (
+    Fit,
+    Leg,
     Milling,
     Order,
     Pass,
@@ -14,11 +16,11 @@ from .plan import (
     Plan,
     PlannerKind,
     Relief,
+    boundary_x_mm,
     facing_rows,
     lane_x_mm,
     other_direction,
     relief_rows,
-    relief_wall_mm,
     travel,
 )
 
@@ -162,8 +164,13 @@ def blocks(plan: Plan, setup: Setup, units: Units) -> list[Block]:
             for index, row in enumerate(relief_found):
                 x_start, x_end = x_at(row.start), x_at(row.end)
                 # Down through what is milled above, to the clearance over it.
-                over = f"G0 Z{n(clearance - row.above_mm)}"
+                over = clearance - row.above_mm
                 plunge = f"G1 Z{n(-row.z_mm)} F{n(setup.program.plunge_feed_mm_min)}"
+                # Between rows the cutter stays in the pocket, the clearance over the level
+                # above (every row of which is milled), so each row ends somewhere of its own;
+                # after the last it goes up to the safe height.
+                last = index == len(relief_found) - 1
+                up = safe_z if last else over
                 found.append(
                     Block(
                         Step.RELIEF,
@@ -171,17 +178,17 @@ def blocks(plan: Plan, setup: Setup, units: Units) -> list[Block]:
                             # The row's far end first, where the rows before it left their
                             # end caps' crescents: plunged, then fed into, it cuts its step.
                             f"G0 X{n(x_end)} Y{n(row.y_mm)}",
-                            over,
+                            f"G0 Z{n(over)}",
                             plunge,
-                            over,
+                            f"G0 Z{n(over)}",
                             f"G0 X{n(x_start)}",
                             plunge,
                             f"G1 X{n(x_end)} F{n(feed)}",
-                            f"G0 Z{n(safe_z)}",
+                            f"G0 Z{n(up)}",
                         ),
                         None,
                         first.rpm,
-                        target=move(x=x_end, y=row.y_mm, z=safe_z),
+                        target=move(x=x_end, y=row.y_mm, z=up),
                         leg=number,
                         rows_after=len(relief_found) - 1 - index,
                         boundary=relief.boundary,
@@ -270,39 +277,40 @@ def _lane(plan: Plan, setup: Setup, lane: int) -> str:
 
 def _relief(plan: Plan, setup: Setup, relief: Relief) -> str:
     """Where a relief is and how far it goes, for the program's comments."""
-    at = relief.boundary * setup.stock.length_mm / plan.lanes
-    wall = relief_wall_mm(setup)
-    xs = [at - wall, at, at + wall]
-    if setup.cut.direction is Direction.CLIMB:
-        xs = [setup.stock.length_mm - x for x in reversed(xs)]
+    at = boundary_x_mm(setup, relief.boundary, plan.lanes)
+    wall = setup.tool.diameter_mm / 2 + relief.step_mm
     lanes = f"lanes {relief.boundary} and {relief.boundary + 1}"
-    more = (
-        f", extending what was milled to Y{_n(relief.done_y_mm)} and "
-        f"{_n(relief.done_depth_mm)} mm deep"
-        if relief.done_y_mm > 0 or relief.done_depth_mm > 0
-        else ""
+    before = "; ".join(f"Y{_n(m.y_mm)} and {_n(m.depth_mm)} mm deep" for m in relief.done)
+    more = f", extending what was milled before ({before})" if before else ""
+    return (
+        f"a pocket between {lanes} at X{_n(at)}, X{_n(at - wall)} to X{_n(at + wall)}, back "
+        f"to Y{_n(relief.y_mm)} and {_n(relief.depth_mm)} mm deep{more}"
+    )
+
+
+FIT_TEXT = {Fit.FITS: "", Fit.NO_ROOM: ", no room for the cut", Fit.USED: ", cut already"}
+
+
+def _choice(leg: Leg) -> str:
+    """Why a leg is on its lane, when the round chose it: the most stock left."""
+    chosen = next(s for s in leg.lane_stock if s.lane == leg.lane)
+    others = "; ".join(
+        f"lane {s.lane}: {_n(s.left_mm, 1)} mm{FIT_TEXT[s.fit]}"
+        for s in leg.lane_stock
+        if s.lane != leg.lane
     )
     return (
-        f"a pocket between {lanes} at X{_n(xs[1])}, X{_n(xs[0])} to X{_n(xs[2])}, back to "
-        f"Y{_n(relief.y_mm)} and {_n(relief.depth_mm)} mm deep{more}"
+        "of the lanes not cut yet this round that its first cut fits on, the one with the "
+        f"most stock left behind its face, {_n(chosen.left_mm, 1)} mm; {others}"
     )
 
 
 def _choice_lines(plan: Plan, setup: Setup) -> list[str]:
     """What the header says of where the round starts, when it chose the lane."""
-    if not plan.lane_stock:
+    first = plan.legs[0]
+    if not first.lane_stock:
         return []
-    lane = plan.legs[0].lane
-    chosen = next(s for s in plan.lane_stock if s.lane == lane)
-    others = "; ".join(
-        f"lane {s.lane}: {_n(s.left_mm, 1)} mm{'' if s.open else ', no room for the first cut'}"
-        for s in plan.lane_stock
-        if s.lane != lane
-    )
-    return [
-        f"(STARTS IN {_lane(plan, setup, lane)}: of the lanes its first cut fits on, the one "
-        f"with the most stock left behind its face, {_n(chosen.left_mm, 1)} mm; {others})"
-    ]
+    return [f"(STARTS IN {_lane(plan, setup, first.lane)}: {_choice(first)})"]
 
 
 def _leg_lines(plan: Plan, setup: Setup) -> list[str]:
@@ -355,7 +363,10 @@ def _leg_start(plan: Plan, setup: Setup, number: int) -> list[str]:
     fresh = "slots from Y0 again" if slot else "a fresh face at Y0"
     if not slot and leg.face_y_start_mm > 0:
         fresh = f"its face at Y{_n(leg.face_y_start_mm)}"
-    return [f"(LANE CHANGE: {where} from here, {fresh}; keep the zero)"]
+    lines = [f"(LANE CHANGE: {where} from here, {fresh}; keep the zero)"]
+    if leg.lane_stock:
+        lines.append(f"(lane {leg.lane}: {_choice(leg)})")
+    return lines
 
 
 def _held(plan: Plan) -> str:

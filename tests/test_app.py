@@ -1426,7 +1426,7 @@ def test_a_check_takes_lanes_from_the_other_end_and_the_session_goes_on_from_its
     assert third["direction"] == "conventional"
     assert (third["legs"][0]["lane"], third["legs"][0]["face_y_start_mm"]) == (2, 0.0)
     width = form["stock"]["width_mm"]
-    stock = [(s["lane"], s["left_mm"]) for s in third["lane_stock"]]
+    stock = [(s["lane"], s["left_mm"]) for s in third["legs"][0]["lane_stock"]]
     assert stock == [
         (1, pytest.approx(width - first["legs"][-1]["face_y_end_mm"], abs=0.01)),
         (2, width),
@@ -1596,7 +1596,7 @@ def test_a_round_starts_in_the_lane_with_the_most_stock_left(engine):
     legs = second["legs"]
     assert [(leg["lane"], leg["face_y_start_mm"]) for leg in legs[:1]] == [(2, 0.0)]
     end = first["legs"][0]["face_y_end_mm"]
-    assert [(s["lane"], s["left_mm"]) for s in second["lane_stock"]] == [
+    assert [(s["lane"], s["left_mm"]) for s in legs[0]["lane_stock"]] == [
         (1, pytest.approx(20.0 - end)),
         (2, 20.0),
     ]
@@ -1708,7 +1708,7 @@ def test_a_round_stopped_before_its_facing_plans_on_the_top_as_it_was(engine):
     widths = [p.width_mm for p in leg.passes if p.id <= cut.id]
     assert (start["lane"], start["top_mm"], start["reface_mm"]) == (3, 0.0, 0.0)
     assert start["face_y_start_mm"] == 0.0
-    stock = {s["lane"]: s["left_mm"] for s in second["lane_stock"]}
+    stock = {s["lane"]: s["left_mm"] for s in start["lane_stock"]}
     assert stock[2] == pytest.approx(form["stock"]["width_mm"] - sum(widths))
 
 
