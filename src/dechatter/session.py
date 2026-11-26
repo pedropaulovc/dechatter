@@ -24,7 +24,9 @@ from .config import (
     Vary,
     full_width,
     load_setup,
+    relief_room_mm,
     setup_source,
+    side_milled,
 )
 from .detect import Thresholds, Verdict
 from .plan import (
@@ -1390,7 +1392,8 @@ def _unrun(r: Round) -> bool:
 
 
 def check_measured(rounds: list[Round], setup: Setup) -> None:
-    """Refuse a setup that differs from a cut round's in what was measured."""
+    """Refuse a setup that differs from a cut round's in what was measured, or that would
+    leave the lanes the rounds settled too short to side-mill between their reliefs."""
     for r in reversed(rounds):
         if _unrun(r):
             continue
@@ -1402,6 +1405,15 @@ def check_measured(rounds: list[Round], setup: Setup) -> None:
             "stability map belongs to the setup it was measured with. Put the setup back, or "
             "start a new session for this one"
         )
+    lanes = rounds[-1].plan.lanes if rounds else 1
+    if lanes > 1 and side_milled(setup):
+        between = relief_room_mm(setup, lanes)
+        if between < setup.tool.diameter_mm / 2 - 1e-9:
+            raise SessionError(
+                f"each of the session's {lanes} lanes would keep {between:.1f} mm of stock "
+                "between the reliefs milled where it meets the lanes beside it, less than a "
+                "cutter radius: lower [program] face_width_mm, or start a new session"
+            )
 
 
 def stale_round(session: Path, setup: Setup) -> Round | None:

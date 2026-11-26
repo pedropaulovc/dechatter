@@ -296,6 +296,13 @@ def test_lanes_whose_reliefs_would_meet_are_refused(deep):
     env = envelope(wide)
     with pytest.raises(PlanError, match="less than a cutter radius"):
         assemble(wide, env, 2, PlannerKind.GRID, grid_tests(wide, env), lanes=3)
+    # Lanes left to dechatter are ones whose reliefs leave room.
+    from dechatter.config import relief_room_mm
+    from dechatter.plan import auto_lanes
+
+    lanes = auto_lanes(wide, env)
+    assert lanes < 3 and relief_room_mm(wide, lanes) >= wide.tool.diameter_mm / 2
+    assemble(wide, env, 2, PlannerKind.GRID, grid_tests(wide, env))
 
 
 def test_a_0_8_0_round_with_a_recording_is_kept(tmp_path):

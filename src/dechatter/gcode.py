@@ -78,7 +78,7 @@ class Block:
     # then. None for a block that moves nothing.
     target: dict[str, float] | None = None
     leg: int | None = None  # the plan's leg; facing and reliefs belong to the leg they serve
-    rows_after: int | None = None  # FACE, RELIEF: the rows still to come after this one
+    rows_after: int | None = None  # FACE: the facing's rows still to come after this one
     boundary: int | None = None  # RELIEF: the boundary between lanes it is milled at
     # SET_SPINDLE on a machine with speed stops: which stop `rpm` is, 1 the slowest, of how many.
     stop: int | None = None
@@ -161,12 +161,12 @@ def blocks(plan: Plan, setup: Setup, units: Units) -> list[Block]:
                 )
             )
         for relief, relief_found in reliefs:
-            for index, row in enumerate(relief_found):
+            for row in relief_found:
                 x_start, x_end = x_at(row.start), x_at(row.end)
                 # Down through what this row milled above, to the clearance over it.
                 over = clearance - row.above_mm
                 plunge = f"G1 Z{n(-row.z_mm)} F{n(setup.program.plunge_feed_mm_min)}"
-                common = {"leg": number, "rows_after": len(relief_found) - 1 - index}
+                common = {"leg": number, "boundary": relief.boundary}
                 found.append(
                     Block(
                         Step.RELIEF,
@@ -184,7 +184,6 @@ def blocks(plan: Plan, setup: Setup, units: Units) -> list[Block]:
                         None,
                         first.rpm,
                         target=move(x=x_end, y=row.y_mm, z=-row.z_mm),
-                        boundary=relief.boundary,
                         **common,
                     )
                 )
@@ -198,7 +197,6 @@ def blocks(plan: Plan, setup: Setup, units: Units) -> list[Block]:
                         None,
                         first.rpm,
                         target=move(x=x_end, y=row.y_mm, z=safe_z),
-                        boundary=relief.boundary,
                         **common,
                     )
                 )

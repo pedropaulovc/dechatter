@@ -24,6 +24,7 @@ from .config import (
     full_width,
     relief_room_mm,
     relief_wall_mm,
+    side_milled,
     slot_wall_mm,
 )
 from .detect import Verdict
@@ -640,20 +641,22 @@ def auto_lanes(setup: Setup, env: Envelope) -> int:
     """The setup's lanes, or when it leaves them empty, as many as the stock length holds
     with every lane at least twice the cutter diameter long and every cut at least
     `planner.min_cut_s` long at the fastest test speed (where cuts are shortest; with speed
-    stops, the fastest stop), less what the reliefs take at a side-milling lane's inner
-    ends (see Relief)."""
+    stops, the fastest stop); where any level side-mills, those cuts and a cutter radius
+    must fit between the reliefs at a lane's inner ends (see Relief, assemble)."""
     if setup.stock.lanes is not None:
         return setup.stock.lanes
     fastest = env.speed_stops_rpm[-1] if env.speed_stops_rpm else env.speed_max_rpm
     feed_mm_s = env.chip_load_mm * setup.tool.flutes * fastest / 60
     cut = feed_mm_s * setup.planner.min_cut_s
     shortest = 2 * setup.tool.diameter_mm
-    wall = relief_wall_mm(setup) if milling(setup) is Milling.SIDE else 0.0
+    side = side_milled(setup)
     lanes = max(1, int(setup.stock.length_mm / max(shortest, cut) + 1e-9))
     while lanes > 1:
         length = setup.stock.length_mm / lanes
-        inner = 1 if lanes == 2 else 2  # the ends a relief takes, in the most hemmed-in lane
-        if length >= shortest - 1e-9 and length - inner * wall >= cut - 1e-9:
+        room, need = length, cut
+        if side:
+            room, need = relief_room_mm(setup, lanes), max(cut, setup.tool.diameter_mm / 2)
+        if length >= shortest - 1e-9 and room >= need - 1e-9:
             break
         lanes -= 1
     return lanes
