@@ -163,14 +163,10 @@ def blocks(plan: Plan, setup: Setup, units: Units) -> list[Block]:
         for relief, relief_found in reliefs:
             for index, row in enumerate(relief_found):
                 x_start, x_end = x_at(row.start), x_at(row.end)
-                # Down through what is milled above, to the clearance over it.
+                # Down through what this row milled above, to the clearance over it.
                 over = clearance - row.above_mm
                 plunge = f"G1 Z{n(-row.z_mm)} F{n(setup.program.plunge_feed_mm_min)}"
-                # Between rows the cutter stays in the pocket, the clearance over the level
-                # above (every row of which is milled), so each row ends somewhere of its own;
-                # after the last it goes up to the safe height.
-                last = index == len(relief_found) - 1
-                up = safe_z if last else over
+                common = {"leg": number, "rows_after": len(relief_found) - 1 - index}
                 found.append(
                     Block(
                         Step.RELIEF,
@@ -184,14 +180,26 @@ def blocks(plan: Plan, setup: Setup, units: Units) -> list[Block]:
                             f"G0 X{n(x_start)}",
                             plunge,
                             f"G1 X{n(x_end)} F{n(feed)}",
-                            f"G0 Z{n(up)}",
                         ),
                         None,
                         first.rpm,
-                        target=move(x=x_end, y=row.y_mm, z=up),
-                        leg=number,
-                        rows_after=len(relief_found) - 1 - index,
+                        target=move(x=x_end, y=row.y_mm, z=-row.z_mm),
                         boundary=relief.boundary,
+                        **common,
+                    )
+                )
+                # Up to the safe height after every row, a block of its own: the next row's
+                # move along Y passes over the walls the end caps scalloped, and every block
+                # ends where the one before did not (the widget waits on each one's target).
+                found.append(
+                    Block(
+                        Step.RELIEF,
+                        (f"G0 Z{n(safe_z)}",),
+                        None,
+                        first.rpm,
+                        target=move(x=x_end, y=row.y_mm, z=safe_z),
+                        boundary=relief.boundary,
+                        **common,
                     )
                 )
 

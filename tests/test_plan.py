@@ -450,10 +450,11 @@ def grid(length, width, step=0.25, y_step=0.1):
 
 def relief_sweeps(plan, setup):
     """(y of the cutter centre, x where the row's feed starts, x where it ends) per relief
-    row; each row plunges at its end, then at its start, then feeds from one to the other."""
+    row; each row plunges at its end, then at its start, then feeds from one to the other,
+    and goes up to the safe height in a block of its own."""
     found = []
     for block in gcode.blocks(plan, setup, MM):
-        if block.step is gcode.Step.RELIEF:
+        if block.step is gcode.Step.RELIEF and block.lines != (f"G0 Z{setup.program.safe_z_mm:g}",):
             ends = [line for line in block.lines if line.startswith("G0 X")]
             assert len(ends) == 2 and ends[0].endswith(f"Y{block.target['y']:g}")
             start = float(ends[1].split()[1][1:])
@@ -648,6 +649,7 @@ def test_a_round_uses_what_every_lane_has_left_before_it_faces_the_top_down(writ
         for number, leg in enumerate(legs)
         for relief in leg.reliefs
         for _ in relief_rows(setup, 3, leg.top_mm, relief)
+        for _block in ("row", "up")
     ]
     rows = facing_rows(setup, legs[3].top_mm, legs[3].reface_mm)
     faces = [i for i, b in enumerate(found) if b.step is gcode.Step.FACE]

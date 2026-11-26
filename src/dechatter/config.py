@@ -424,6 +424,13 @@ def relief_wall_mm(setup: Setup) -> float:
     return setup.tool.diameter_mm / 2 + face_step_mm(setup)
 
 
+def relief_room_mm(setup: Setup, lanes: int) -> float:
+    """The stock the most hemmed-in of `lanes` side-milling lanes keeps between the reliefs
+    at its inner ends (one for two lanes, two for more)."""
+    inner = 1 if lanes == 2 else 2
+    return setup.stock.length_mm / lanes - inner * relief_wall_mm(setup)
+
+
 def _number(value: object) -> bool:
     return type(value) in (int, float)
 
@@ -531,11 +538,14 @@ def _validate(setup: Setup) -> None:
             f"{stock.length_mm:g} mm in {stock.lanes} lanes is "
             f"{stock.length_mm / stock.lanes:.1f} mm each"
         )
-    if stock.lanes is not None and stock.lanes > 1 and not full_width(setup):
-        # Side milling: the reliefs where lanes meet take relief_wall_mm of each lane at each
-        # inner end. The most hemmed-in lane must keep a cutter radius of stock between them.
-        inner = 1 if stock.lanes == 2 else 2
-        between = stock.length_mm / stock.lanes - inner * relief_wall_mm(setup)
+    narrower = any(
+        w < tool.diameter_mm - FULL_WIDTH_TOLERANCE_MM for w in setup.cut.other_widths_mm
+    )
+    if stock.lanes is not None and stock.lanes > 1 and (not full_width(setup) or narrower):
+        # Side milling, at the setup's width or another: the reliefs where lanes meet take
+        # relief_wall_mm of each lane at each inner end, and the most hemmed-in lane must
+        # keep a cutter radius of stock between them. Planning checks lanes it settles.
+        between = relief_room_mm(setup, stock.lanes)
         if between < tool.diameter_mm / 2 - 1e-9:
             raise ConfigError(
                 "[stock] each lane must keep at least a cutter radius of stock between the "

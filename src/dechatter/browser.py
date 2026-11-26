@@ -261,7 +261,11 @@ class Sessions:
         self._apps.pop(name, None)
         # Every round goes: none is discarded on the way, to be reported.
         app = self._app(name, discard=False)
-        session.reset(target)
+        try:
+            session.reset(target)
+        except Exception:
+            self._apps.pop(name, None)  # opened anew, it discards what it should
+            raise
         return app.state()
 
     def setup_status(self, name: str) -> dict:

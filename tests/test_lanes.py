@@ -243,20 +243,70 @@ def test_a_relief_extended_back_and_deeper_keeps_the_rows_milled_before(deep):
         back = row.y_mm + deep.tool.diameter_mm / 2
         if back <= 7.0 + 1e-6:
             assert row.y_mm in old and row.z_mm > 6.0, "within it, only deeper, on its rows"
+    # A deeper relief reaching less far back than an earlier one: its last row lies between
+    # the earlier rows, so it is milled from the top, never entered by a rapid below it.
+    wide = Relief(1, 12.7, 6.0, step)
+    deeper = Relief(1, 7.9, 10.0, step, (Milled(12.7, 6.0),))
+    radius = deep.tool.diameter_mm / 2
+    between = [r for r in relief_rows(deep, 2, 0.0, deeper) if r.y_mm == round(7.9 - radius, 3)]
+    assert between[0].above_mm == 0.0 and len(between) == 10
+    # Every row entered below the top lies where an earlier row was milled.
+    entered = {}
+    for r in relief_rows(deep, 2, 0.0, deeper):
+        entered[r.y_mm] = min(entered.get(r.y_mm, r.above_mm), r.above_mm)
+    below = {y for y, above in entered.items() if above > 0}
+    assert below and below <= {r.y_mm for r in relief_rows(deep, 2, 0.0, wide)}
     env = envelope(deep)
     narrow = Relief(1, 7.2, 13.5, 1.0)
     plan = assemble(
         deep, env, 2, PlannerKind.GRID, grid_tests(deep, env), lanes=2, reliefs=(narrow,)
     )
     assert all(r.done == () and r.step_mm == step for r in plan.legs[0].reliefs)
-    # #3427's climb check milled a relief 2.9 mm back: one row a level.
+    # #3427's climb check milled a relief 2.9 mm back: one row a level. Each row goes up to
+    # the safe height in a block of its own, so no block ends within the widget's 0.02 mm of
+    # where the one before it did.
     shallow = assemble(
         deep, env, 3, PlannerKind.GRID, [(2046.0, 0.4, None)] * 3, lanes=2, face=Face(y_mm=1.0)
     )
     found = gcode.blocks(shallow, deep, gcode.Units.MM)
     targets = [b.target for b in found if b.target is not None]
-    assert all(a != b for a, b in zip(targets, targets[1:], strict=False))
-    assert sum(b.step is gcode.Step.RELIEF for b in found) > 1
+    assert all(
+        max(abs(a.get(k, 0.0) - b.get(k, 0.0)) for k in {*a, *b}) > 0.02
+        for a, b in zip(targets, targets[1:], strict=False)
+        if a.keys() == b.keys()
+    )
+    rows = [b for b in found if b.step is gcode.Step.RELIEF]
+    assert len(rows) > 2 and all(
+        up.lines == (f"G0 Z{deep.program.safe_z_mm:g}",) for up in rows[1::2]
+    )
+
+
+def test_lanes_whose_reliefs_would_meet_are_refused(deep):
+    """A face_width_mm raised after round 1 settled the lanes: planning refuses lanes whose
+    reliefs would leave less than a cutter radius of stock between them."""
+    import dataclasses
+
+    from dechatter.plan import PlanError
+
+    wide = dataclasses.replace(
+        deep,
+        stock=dataclasses.replace(deep.stock, length_mm=70.0, lanes=None),
+        program=dataclasses.replace(deep.program, face_width_mm=6.35),
+    )
+    env = envelope(wide)
+    with pytest.raises(PlanError, match="less than a cutter radius"):
+        assemble(wide, env, 2, PlannerKind.GRID, grid_tests(wide, env), lanes=3)
+
+
+def test_a_0_8_0_round_with_a_recording_is_kept(tmp_path):
+    """Only a round 0.8.0 planned and nothing more is discarded: one recorded is kept."""
+    import shutil
+
+    copy = tmp_path / "issue3427"
+    shutil.copytree(FIXTURE, copy)
+    assert session.outdated_round(copy).plan.round == 4
+    (copy / "round-04" / "recording.wav").write_bytes(b"")
+    assert session.outdated_round(copy) is None
 
 
 def test_a_round_starts_in_the_lane_with_the_most_stock_left(tmp_path):

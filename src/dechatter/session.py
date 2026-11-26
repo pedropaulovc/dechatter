@@ -926,7 +926,7 @@ def _stock_left(rounds: list[Round], direction: Direction, kind: Milling) -> Sto
     many lanes from that end it may use (None: all).
 
     Side milling in lanes: every lane, whichever way it was cut; the face gives only the
-    top, and the round starts in the lane with the most stock left (see plan._start). Its
+    top, and each leg goes to the lane with the most stock left (see plan._choose). Its
     passes start and end in reliefs, so none crosses another lane.
 
     Slots in lanes: each direction uses the lanes from the end it meets first, so the two
