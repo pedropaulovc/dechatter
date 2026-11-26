@@ -1,9 +1,21 @@
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
 import pytest
+
+# One BLAS thread per process, set before numpy loads: synth's matrix products are small, the
+# tests already run one process per core, and on a busy machine BLAS threads spin waiting on
+# each other, several times slower.
+for threads in (
+    "OPENBLAS_NUM_THREADS",
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+):
+    os.environ.setdefault(threads, "1")
 
 sys.path.insert(0, str(Path(__file__).parent))
 
