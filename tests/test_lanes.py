@@ -65,16 +65,45 @@ class Slice:
         return float(taken.sum()) * HX * HY
 
     def move(self, start: tuple[float, float], end: tuple[float, float]) -> np.ndarray:
-        """Sweep the cutter from `start` to `end`: the area removed per mm at each step."""
+        """Sweep the cutter from `start` to `end`: the area removed per mm at each step.
+
+        As `take` at each step, in one pass over the cells: a cell's distance to the cutter's
+        centre is a quadratic in the step, so a cell is inside the cutter for one run of steps
+        and is taken at the first. That step is solved for, then checked as `take` checks it,
+        at it and the one before, so rounding moves no cell to another step.
+        """
         (x0, y0), (x1, y1) = start, end
         length = float(np.hypot(x1 - x0, y1 - y0))
+        assert length > 0, "a move within the slice goes somewhere"
         steps = max(1, int(np.ceil(length / STEP_MM)))
-        return np.array(
-            [
-                self.take(x0 + (x1 - x0) * k / steps, y0 + (y1 - y0) * k / steps) / (length / steps)
-                for k in range(1, steps + 1)
-            ]
-        )
+        r = self.radius
+        ci = np.nonzero((self.xs >= min(x0, x1) - r) & (self.xs <= max(x0, x1) + r))[0]
+        ri = np.nonzero((self.ys >= min(y0, y1) - r) & (self.ys <= max(y0, y1) + r))[0]
+        if not ci.size or not ri.size:
+            return np.zeros(steps)
+        held = self.stock[np.ix_(ci, ri)]
+        i, j = np.nonzero(held)
+        cx, cy = self.xs[ci[i]], self.ys[ri[j]]
+        dx, dy = (x1 - x0) / steps, (y1 - y0) / steps
+        a = dx * dx + dy * dy
+        b = (cx - x0) * dx + (cy - y0) * dy
+        c = (cx - x0) ** 2 + (cy - y0) ** 2 - r * r
+        disc = b * b - a * c
+        root = np.sqrt(np.maximum(disc, 0.0))
+        k = np.maximum(1, np.ceil((b - root) / a)).astype(np.int64)
+        reach = (disc >= -1e-9) & (k <= np.minimum(steps + 1, np.floor((b + root) / a) + 1))
+
+        def inside(k: np.ndarray) -> np.ndarray:  # exactly as `take` tests it at step k
+            x = x0 + (x1 - x0) * k / steps
+            y = y0 + (y1 - y0) * k / steps
+            return (cx - x) ** 2 + (cy - y) ** 2 <= r * r
+
+        k = np.where((k > 1) & inside(k - 1), k - 1, k)
+        k = np.where(~inside(k) & (k < steps), k + 1, k)
+        hit = reach & inside(k) & (k <= steps)
+        held[i[hit], j[hit]] = False
+        self.stock[np.ix_(ci, ri)] = held
+        return np.bincount(k[hit] - 1, minlength=steps) * HX * HY / (length / steps)
 
 
 def cut(stock: Slice, plan, setup) -> dict[int, float]:
