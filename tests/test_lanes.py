@@ -65,16 +65,46 @@ class Slice:
         return float(taken.sum()) * HX * HY
 
     def move(self, start: tuple[float, float], end: tuple[float, float]) -> np.ndarray:
-        """Sweep the cutter from `start` to `end`: the area removed per mm at each step."""
+        """Sweep the cutter from `start` to `end`: the area removed per mm at each step.
+
+        What `take` at each step removes, in one pass over the cells: a cell is inside the
+        cutter for one run of steps, set by how far along the move it lies and how far off
+        it, and is taken at the first. That step is solved for, then checked as `take`
+        checks it, and moved to the step before or after should rounding put it one off.
+        """
         (x0, y0), (x1, y1) = start, end
         length = float(np.hypot(x1 - x0, y1 - y0))
+        assert length > 0, "a move within the slice goes somewhere"
         steps = max(1, int(np.ceil(length / STEP_MM)))
-        return np.array(
-            [
-                self.take(x0 + (x1 - x0) * k / steps, y0 + (y1 - y0) * k / steps) / (length / steps)
-                for k in range(1, steps + 1)
-            ]
-        )
+        r = self.radius
+        reach = r + 1e-9  # every cell `take` looks at, whichever way its sums round
+        xa, xb = np.searchsorted(self.xs, [min(x0, x1) - reach, max(x0, x1) + reach])
+        ya, yb = np.searchsorted(self.ys, [min(y0, y1) - reach, max(y0, y1) + reach])
+        held = self.stock[xa:xb, ya:yb]
+        i, j = np.nonzero(held)
+        cx, cy = self.xs[xa + i], self.ys[ya + j]
+        ux, uy = (x1 - x0) / length, (y1 - y0) / length
+        along = (cx - x0) * ux + (cy - y0) * uy
+        off = (cx - x0) * uy - (cy - y0) * ux
+        half = np.sqrt(np.maximum(r * r - off * off, 0.0))
+        k = np.clip(np.ceil((along - half) / (length / steps)), 1, steps).astype(np.int64)
+
+        def inside(k: np.ndarray, at: slice | np.ndarray = slice(None)) -> np.ndarray:
+            """As `take` tests the cells `at` at step `k`."""
+            x = x0 + (x1 - x0) * k / steps
+            y = y0 + (y1 - y0) * k / steps
+            return (cx[at] - x) ** 2 + (cy[at] - y) ** 2 <= r * r
+
+        before = np.flatnonzero(k > 1)
+        early = np.zeros(k.size, bool)
+        early[before] = inside(k[before] - 1, before)
+        hit = early | inside(k)
+        k[early] -= 1
+        late = ~hit & (k < steps)
+        k[late] += 1
+        hit[late] = inside(k[late], late)
+        held[i[hit], j[hit]] = False
+        return np.bincount(k[hit] - 1, minlength=steps) * HX * HY / (length / steps)
 
 
 def cut(stock: Slice, plan, setup) -> dict[int, float]:
@@ -115,6 +145,39 @@ def assert_within_width(plan, loads: dict[int | None, float], setup) -> None:
     assert not heavy, f"passes removing more per mm than their width (width, load): {heavy}"
     step = setup.program.face_width_mm or setup.tool.diameter_mm / 4
     assert loads.get(None, 0.0) <= step + TOLERANCE_MM, "a relief row cuts wider than its step"
+
+
+def stepped(stock: Slice, start: tuple[float, float], end: tuple[float, float]) -> np.ndarray:
+    """`move` the slow way, `take` at each step: what `move` must equal."""
+    (x0, y0), (x1, y1) = start, end
+    length = float(np.hypot(x1 - x0, y1 - y0))
+    steps = max(1, int(np.ceil(length / STEP_MM)))
+    return np.array(
+        [
+            stock.take(x0 + (x1 - x0) * k / steps, y0 + (y1 - y0) * k / steps) / (length / steps)
+            for k in range(1, steps + 1)
+        ]
+    )
+
+
+def test_a_move_takes_what_the_cutter_takes_at_each_of_its_steps():
+    """`move` takes in one pass what `take` takes step by step: the same area at each step
+    and the same stock left. Along the grid and across it, diagonally, in one short step,
+    grazing a grid line (at Y-6.30 the cutter's back reaches Y0.05, a row of cells, only
+    through rounding), into what an earlier move cut, and off the stock."""
+    moves = [
+        ((0.025, -6.30), (1.025, -6.30)),
+        ((-3.0, 2.0), (12.0, 7.3)),
+        ((5.0, 5.0), (5.01, 5.0)),
+        ((10.0, 3.0), (2.0, 3.0)),
+        ((7.0, 9.0), (7.0, -2.0)),
+        ((30.0, 4.0), (-5.0, 4.0)),
+        ((4.0, -20.0), (4.0, -15.0)),
+    ]
+    swept, taken = Slice(20.0, 8.0, 1.0, 6.35), Slice(20.0, 8.0, 1.0, 6.35)
+    for start, end in moves:
+        assert np.array_equal(swept.move(start, end), stepped(taken, start, end)), (start, end)
+        assert np.array_equal(swept.stock, taken.stock), (start, end)
 
 
 @pytest.fixture
