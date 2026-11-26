@@ -1,0 +1,55 @@
+[machine]
+max_rpm = 2800
+spindle_power_hp = 2
+weight_kg = 250
+min_rpm = 100
+name = "PM-30MV"
+spindle = "manual"
+speed_stops_rpm = [108, 215, 323, 431, 538, 646, 754, 862, 969, 1077, 1185, 1292, 1400, 1513, 1616, 1723, 1839, 1950, 2046, 2154, 2276, 2380, 2483, 2592, 2692, 2794]
+
+[tool]
+diameter_mm = 12.7
+flutes = 3
+stickout_mm = 28.52
+holder = "R8"
+material = "carbide"
+
+[cut]
+material = "steel-1018"
+axial_depth_mm = 13.5
+other_depths_mm = [10.6, 6.6, 4.6]
+width_max_mm = 6.4
+vary = "width"
+chip_load_mm = 0.071
+speed_min_rpm = 1500
+speed_max_rpm = 2800
+direction = "conventional"
+
+[stock]
+length_mm = 126
+width_mm = 13
+lanes = 2
+height_mm = 25.65
+thickness_mm = 13.27
+
+[program]
+dwell_s = 4
+clearance_mm = 3
+safe_z_mm = 10
+plunge_feed_mm_min = 150
+truing_width_mm = 0.2
+coolant = "none"
+face_depth_mm = 1
+
+[planner]
+round1_speeds = 5
+round1_width_fractions = [0.03, 0.06, 0.12]
+batch_size = 8
+min_probability = 0.8
+probability_floor = 0.5
+stop_improvement = 0.05
+chip_load_sweep_low = 0.6
+chip_load_sweep_high = 1.7
+check_fractions = [0.5, 0.75, 1]
+check_steps_beyond = 1
+min_cut_s = 6

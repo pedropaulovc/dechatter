@@ -20,7 +20,7 @@ from pathlib import Path
 import numpy as np
 
 from . import gcode, materials, report, seeding, session
-from .app import App
+from .app import App, Discarded
 from .audio import AudioError
 from .config import (
     TEMPLATE,
@@ -71,8 +71,29 @@ class Sessions:
         if name not in self._apps:
             target = self._existing(name)
             session.sweep_discarded(target)
-            self._apps[name] = App(target, self.thresholds)
+            app = App(target, self.thresholds)
+            self._discard_outdated(target, app)
+            self._apps[name] = app
         return self._apps[name]
+
+    def _discard_outdated(self, target: Path, app: App) -> None:
+        """Discard an unrun round an older dechatter planned with passes that stop in the
+        stock where lanes meet (session.outdated_round), so the next one is planned anew. A
+        session whose rounds do not load is left for the action that reads them to report."""
+        try:
+            outdated = session.outdated_round(target)
+        except EXPECTED:
+            return
+        if outdated is None:
+            return
+        aside = session.set_aside(outdated)
+        app.discarded_round, app.discarded_why = outdated.plan.round, Discarded.LANES
+        round_no = outdated.plan.round
+        log.info("%s: discarded unrun round %d, planned by dechatter 0.8.0", target.name, round_no)
+        try:
+            shutil.rmtree(aside)
+        except OSError as exc:
+            log.warning("%s: could not delete %s yet: %s", target.name, aside.name, exc)
 
     def names(self) -> list[str]:
         return sorted(p.parent.name for p in self.root.glob(f"*/{session.SETUP_FILE}"))
@@ -310,7 +331,7 @@ class Sessions:
             stale = session.stale_round(self._dir(name), app.setup)
             if stale is not None:
                 aside = session.set_aside(stale)
-                app.discarded_round = stale.plan.round
+                app.discarded_round, app.discarded_why = stale.plan.round, Discarded.SETUP
             shown = app.state()
         except Exception:
             if aside is not None:

@@ -124,22 +124,32 @@ HELD = {Vary.WIDTH: "deep", Vary.DEPTH: "wide"}
 
 
 def _where(plan: Plan, units: Units) -> str:
-    """Where a round cuts, as it goes: its lanes, and where it faces the top down."""
+    """Where a round cuts, as it goes: its lanes, where it chose to start, the reliefs it
+    mills between lanes and where it faces the top down."""
     parts = []
     for number, leg in enumerate(plan.legs):
         # Lanes count from the end the cutter meets first: the right one when it climbs.
         end = " from the right" if plan.direction is Direction.CLIMB else ""
         lane = f"lane {leg.lane} of {plan.lanes}{end}" if plan.lanes > 1 else ""
+        if number == 0 and plan.lane_stock:
+            chosen = next(s for s in plan.lane_stock if s.lane == leg.lane)
+            lane += f" (most stock left, {_length(chosen.left_mm, units)})"
         faced = f"top faced down {_length(leg.reface_mm, units)}" if leg.reface_mm > 0 else ""
+        reliefs = "".join(
+            f", relief between lanes {r.boundary} and {r.boundary + 1} milled before pass "
+            f"{leg.passes[0].id}"
+            for r in leg.reliefs
+        )
         start = leg.passes[0].id
         if number == 0:
             parts += [p for p in (lane, faced and f"{faced} first") if p]
+            parts += [reliefs[2:]] if reliefs else []
             continue
         if faced:
             again = "the top" if plan.milling is Milling.SLOT else "the front face"
-            parts.append(f"{faced} before pass {start}, then {lane or again} again")
+            parts.append(f"{faced} before pass {start}, then {lane or again} again{reliefs}")
             continue
-        parts.append(f"{lane} from pass {start}")
+        parts.append(f"{lane} from pass {start}{reliefs}")
     return "".join(f", {p}" for p in parts)
 
 

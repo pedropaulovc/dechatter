@@ -21,6 +21,7 @@ from .detect import Thresholds, Verdict
 from .plan import (
     PassKind,
     PlannerKind,
+    boundary_x_mm,
     cutting,
     envelope,
     feed_mm_min,
@@ -50,6 +51,14 @@ class Next(StrEnum):
     CONVERGED = "converged"  # converged, and nothing more on offer
 
 
+class Discarded(StrEnum):
+    """Why an unrun round was thrown away, to be planned again."""
+
+    SETUP = "setup"  # it was planned from a setup since changed in what its program does
+    # dechatter 0.8.0 planned it with passes that stop in the stock where lanes meet.
+    LANES = "lanes"
+
+
 class App:
     def __init__(self, session_dir: Path, thresholds: Thresholds):
         self.session_dir = session_dir
@@ -66,7 +75,8 @@ class App:
         if self.seed is not None:
             seeding.check(self.seed, self.setup, self.source.pending)
         self.recording_round: int | None = None
-        self.discarded_round: int | None = None  # unrun round a setup change threw away
+        self.discarded_round: int | None = None  # unrun round thrown away, to plan again
+        self.discarded_why: Discarded | None = None
 
     def program_name(self, r: session.Round) -> str:
         """Names one planned program: a round planned again after a setup change gets a new
@@ -158,6 +168,7 @@ class App:
             "level_mm": level,
             "recording_round": self.recording_round,
             "discarded_round": self.discarded_round,
+            "discarded_why": self.discarded_why,
             "rounds": [self._round_json(r) for r in rounds],
             # Each cut at the speed heard in it, else (asked_rpm None) at the one asked for.
             "observations": [
@@ -267,8 +278,12 @@ class App:
             "program": self.program_name(r),
             "run_time_s": round(r.plan.run_time_s),
             "lanes": r.plan.lanes,
+            # The lanes as the round found them when it chose the one with the most stock
+            # left to start in; empty where it had no choice.
+            "lane_stock": [asdict(s) for s in r.plan.lane_stock],
             # Where the round cuts, in the order it runs: from each leg's first pass on, one
-            # lane's face, with the top faced down first where `reface_mm` says so.
+            # lane's face, with the top faced down first where `reface_mm` says so and the
+            # reliefs its passes start and end in milled before them.
             "legs": [
                 {
                     "lane": leg.lane,
@@ -279,6 +294,17 @@ class App:
                     "face_y_end_mm": round(leg.face_y_end_mm, 2),
                     "top_mm": leg.top_mm,
                     "reface_mm": leg.reface_mm,
+                    "reliefs": [
+                        {
+                            **asdict(relief),
+                            "x_mm": boundary_x_mm(
+                                cutting(self.setup, r.plan.direction),
+                                relief.boundary,
+                                r.plan.lanes,
+                            ),
+                        }
+                        for relief in leg.reliefs
+                    ],
                     "first_pass": leg.passes[0].id,
                 }
                 for leg in r.plan.legs
@@ -339,15 +365,15 @@ class App:
 
     def plan(self, stock: Stock) -> None:
         session.plan_next(self.session_dir, self.source, self.env, stock)
-        self.discarded_round = None
+        self.discarded_round, self.discarded_why = None, None
 
     def plan_sweep(self, stock: Stock) -> None:
         session.plan_sweep(self.session_dir, self.source, self.env, stock)
-        self.discarded_round = None
+        self.discarded_round, self.discarded_why = None, None
 
     def plan_check(self, stock: Stock, level_mm: float | None) -> None:
         session.plan_check(self.session_dir, self.source, self.env, stock, level_mm)
-        self.discarded_round = None
+        self.discarded_round, self.discarded_why = None, None
 
     def _planned(self, number: int) -> tuple[session.Round, Setup]:
         target = self._round(number)

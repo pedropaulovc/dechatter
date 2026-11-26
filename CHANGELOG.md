@@ -6,6 +6,44 @@ What changed for people who use the dechatter widget and command line. The forma
 
 ## [Unreleased]
 
+### Fixed
+
+- Side milling in lanes, every pass rang as chatter where it stopped, short of the next
+  lane: it stopped in the stock, and in its last millimetre it cut away the crescent the
+  previous pass's end cap had left there, as wide as the face is deep. On
+  harmonic-analyzer#3427 (a 1/2 in cutter 13.5 mm deep in 1018) a pass 0.8 mm wide
+  ended removing 5.6 mm² per mm of feed, a 5.6 mm wide cut. A pass now ends in a **relief**
+  milled where the lanes meet: a pocket a cutter diameter plus twice `face_width_mm` long,
+  centred on the boundary, milled like facing (rows at most `face_width_mm` apart, levels at
+  most `face_depth_mm` deep, at the next cut's speed; each row plunged at both its ends, in
+  the stock, before it is fed from one to the other) as deep as the passes go and as far
+  back as they reach. The relief is also where the next lane's passes start, so both ends of
+  every pass are in the air, in either direction, and no pass engages more than its width
+  (`tests/test_lanes.py` measures it on the stock). Each leg mills a relief only as far
+  and as deep as none milled on the same top did; it is never analysed, and the run time,
+  the program (a `RELIEF` comment), the widget's round and the report list it, as they do
+  facing. Automatic lanes leave every cut long enough besides the reliefs, so a block may
+  get fewer lanes than with 0.8.0. Slots keep stopping short of the next lane.
+- Verdicts from 0.8.0 rounds stand: a pass's analysed window ended a lead-in (about a cutter
+  radius of travel) before the cut's end and was trimmed by a further 15%, so it never
+  reached the last millimetre where the stop rang.
+- Side milling in lanes, a new round starts in the lane with the most stock left that its
+  first cut fits on (harmonic-analyzer#3427: 8.1 mm left in X63–126 after a climb check
+  cut it back to Y2.9, against 2.3 mm in X0–63), then goes on in the lanes after it, then
+  faces the top down or asks for fresh stock, as before. With 0.8.0 a conventional round
+  went back to where the last conventional round left off and, with `width_mm` lowered to
+  11, refused with "stock exhausted: 0.3 mm left … in lane 1 of 2" though the other lane had
+  room. Passes no longer cross another lane, so lanes are apart: either direction may use
+  any lane, and a lane may be cut further back or deeper than its neighbours. The plan
+  (`lane_stock`), the widget's round and a `STARTS IN` comment in the program say which
+  lane and how much stock each had left; when no lane has room, the reason lists each.
+- Sessions with rounds from 0.8.0 go on: those rounds keep their program and `plan.json`,
+  and new rounds use the reliefs, counting a pass the old rounds stopped in the stock as
+  having left a step to clear. A round 0.8.0 planned for side milling in lanes but never ran
+  is discarded when the session opens, saying why, so the next plan uses the reliefs.
+  An unrun round is otherwise discarded (and planned again) by saving a setup change that
+  alters its program, or by Reset. Plans are now schema 5, which 0.8.0 refuses.
+
 ## [0.8.0] - 2026-11-25
 
 ### Added

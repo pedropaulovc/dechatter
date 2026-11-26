@@ -1,0 +1,57 @@
+{
+  "round": 4,
+  "planner": "bayes",
+  "flutes": 3,
+  "diameter_mm": 12.7,
+  "vary": "width",
+  "fixed_mm": 13.5,
+  "milling": "side",
+  "chip_load_mm": 0.071,
+  "dwell_s": 4,
+  "legs": [
+    {
+      "lane": 1,
+      "face_y_start_mm": 10.7,
+      "passes": [
+        {
+          "id": 0,
+          "kind": "truing",
+          "rpm": 2046,
+          "width_mm": 0.2,
+          "depth_mm": 13.5,
+          "feed_mm_min": 435.8,
+          "expected_cut_s": 8.02,
+          "lead_in_s": 1.07,
+          "plunge_s": 6.6,
+          "p_stable": null,
+          "chip_load_mm": null,
+          "expected": null
+        },
+        {
+          "id": 1,
+          "kind": "test",
+          "rpm": 2046,
+          "width_mm": 1.5,
+          "depth_mm": 13.5,
+          "feed_mm_min": 435.8,
+          "expected_cut_s": 8.36,
+          "lead_in_s": 0.72,
+          "plunge_s": 6.6,
+          "p_stable": 0.803,
+          "chip_load_mm": null,
+          "expected": null
+        }
+      ],
+      "lane_cap_mm": null,
+      "top_mm": 0.0,
+      "reface_mm": 0.0,
+      "face_s": 0,
+      "wall_mm": 0.0
+    }
+  ],
+  "planned_on": "2026-11-25",
+  "direction": "conventional",
+  "start": "in use",
+  "lanes": 2,
+  "schema": 4
+}

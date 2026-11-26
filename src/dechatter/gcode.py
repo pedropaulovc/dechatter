@@ -13,9 +13,12 @@ from .plan import (
     PassKind,
     Plan,
     PlannerKind,
+    Relief,
     facing_rows,
     lane_x_mm,
     other_direction,
+    relief_rows,
+    relief_wall_mm,
     travel,
 )
 
@@ -53,6 +56,7 @@ class Step(enum.StrEnum):
     SPINDLE = "spindle"  # the program sets the speed (M3 S); moves nothing
     SET_SPINDLE = "set-spindle"  # manual spindle: the operator sets it (an M0 in the file)
     FACE = "face"  # one row of facing the top down, beside the stock to beside it again
+    RELIEF = "relief"  # one row of a relief between lanes; not analysed, like facing
     PLUNGE = "plunge"  # down to depth, in the air beside the stock
     DWELL = "dwell"  # spindle at speed in the air: the reference sound before the cut
     CUT = "cut"
@@ -71,8 +75,9 @@ class Block:
     # units (controllers report positions in mm unless set otherwise); only the axes known by
     # then. None for a block that moves nothing.
     target: dict[str, float] | None = None
-    leg: int | None = None  # the plan's leg; facing belongs to the leg it lowers the top for
-    rows_after: int | None = None  # FACE: the facing's rows still to come after this one
+    leg: int | None = None  # the plan's leg; facing and reliefs belong to the leg they serve
+    rows_after: int | None = None  # FACE, RELIEF: the rows still to come after this one
+    boundary: int | None = None  # RELIEF: the boundary between lanes it is milled at
     # SET_SPINDLE on a machine with speed stops: which stop `rpm` is, 1 the slowest, of how many.
     stop: int | None = None
     stops: int | None = None
@@ -121,26 +126,56 @@ def blocks(plan: Plan, setup: Setup, units: Units) -> list[Block]:
     spindle_rpm = None
     for number, leg in enumerate(plan.legs):
         rows = facing_rows(setup, leg.top_mm, leg.reface_mm)
-        if rows:
-            # The top comes down at the leg's first speed: no extra spindle stop.
-            first = leg.passes[0]
+        reliefs = [(r, relief_rows(setup, plan.lanes, leg.top_mm, r)) for r in leg.reliefs]
+        first = leg.passes[0]
+        feed = plan.chip_load_mm * plan.flutes * first.rpm
+        if rows or any(milled for _, milled in reliefs):
+            # The top comes down, and the reliefs are milled, at the leg's first speed: no
+            # extra spindle stop.
             if manual and first.rpm != spindle_rpm:
                 found.append(_set_spindle(setup, first.rpm, None, number))
             if not manual:
                 spindle = (f"M3 S{first.rpm}",)
                 found.append(Block(Step.SPINDLE, spindle, None, first.rpm, leg=number))
             spindle_rpm = first.rpm
-            feed = plan.chip_load_mm * plan.flutes * first.rpm
-            old_top = leg.top_mm - leg.reface_mm
-            for index, row in enumerate(rows):
+        old_top = leg.top_mm - leg.reface_mm
+        for index, row in enumerate(rows):
+            x_start, x_end = x_at(row.start), x_at(row.end)
+            found.append(
+                Block(
+                    Step.FACE,
+                    (
+                        f"G0 X{n(x_start)} Y{n(row.y_mm)}",
+                        f"G0 Z{n(clearance - old_top)}",
+                        f"G1 Z{n(-row.z_mm)} F{n(setup.program.plunge_feed_mm_min)}",
+                        f"G1 X{n(x_end)} F{n(feed)}",
+                        f"G0 Z{n(safe_z)}",
+                    ),
+                    None,
+                    first.rpm,
+                    target=move(x=x_end, y=row.y_mm, z=safe_z),
+                    leg=number,
+                    rows_after=len(rows) - 1 - index,
+                )
+            )
+        for relief, relief_found in reliefs:
+            for index, row in enumerate(relief_found):
                 x_start, x_end = x_at(row.start), x_at(row.end)
+                # Down through what is milled above, to the clearance over it.
+                over = f"G0 Z{n(clearance - row.above_mm)}"
+                plunge = f"G1 Z{n(-row.z_mm)} F{n(setup.program.plunge_feed_mm_min)}"
                 found.append(
                     Block(
-                        Step.FACE,
+                        Step.RELIEF,
                         (
-                            f"G0 X{n(x_start)} Y{n(row.y_mm)}",
-                            f"G0 Z{n(clearance - old_top)}",
-                            f"G1 Z{n(-row.z_mm)} F{n(setup.program.plunge_feed_mm_min)}",
+                            # The row's far end first, where the rows before it left their
+                            # end caps' crescents: plunged, then fed into, it cuts its step.
+                            f"G0 X{n(x_end)} Y{n(row.y_mm)}",
+                            over,
+                            plunge,
+                            over,
+                            f"G0 X{n(x_start)}",
+                            plunge,
                             f"G1 X{n(x_end)} F{n(feed)}",
                             f"G0 Z{n(safe_z)}",
                         ),
@@ -148,7 +183,8 @@ def blocks(plan: Plan, setup: Setup, units: Units) -> list[Block]:
                         first.rpm,
                         target=move(x=x_end, y=row.y_mm, z=safe_z),
                         leg=number,
-                        rows_after=len(rows) - 1 - index,
+                        rows_after=len(relief_found) - 1 - index,
+                        boundary=relief.boundary,
                     )
                 )
 
@@ -160,7 +196,7 @@ def blocks(plan: Plan, setup: Setup, units: Units) -> list[Block]:
             face += p.width_mm + leg.wall_mm
             y_cut = face - radius
             bottom = -(leg.top_mm + p.depth_mm)
-            path = travel(setup, leg.lane, plan.lanes, face, p.width_mm)
+            path = travel(setup, leg.lane, plan.lanes, face, p.width_mm, plan.lane_end)
             # Off the face it cut, then up; a slot has stock on both sides: straight up.
             y_clear = y_cut if slot else y_cut - clearance
             back_off = () if slot else (f"G0 Y{n(y_clear)}",)
@@ -232,6 +268,43 @@ def _lane(plan: Plan, setup: Setup, lane: int) -> str:
     return f"lane {lane} of {plan.lanes}, X{_n(first)} to X{_n(last)}"
 
 
+def _relief(plan: Plan, setup: Setup, relief: Relief) -> str:
+    """Where a relief is and how far it goes, for the program's comments."""
+    at = relief.boundary * setup.stock.length_mm / plan.lanes
+    wall = relief_wall_mm(setup)
+    xs = [at - wall, at, at + wall]
+    if setup.cut.direction is Direction.CLIMB:
+        xs = [setup.stock.length_mm - x for x in reversed(xs)]
+    lanes = f"lanes {relief.boundary} and {relief.boundary + 1}"
+    more = (
+        f", extending what was milled to Y{_n(relief.done_y_mm)} and "
+        f"{_n(relief.done_depth_mm)} mm deep"
+        if relief.done_y_mm > 0 or relief.done_depth_mm > 0
+        else ""
+    )
+    return (
+        f"a pocket between {lanes} at X{_n(xs[1])}, X{_n(xs[0])} to X{_n(xs[2])}, back to "
+        f"Y{_n(relief.y_mm)} and {_n(relief.depth_mm)} mm deep{more}"
+    )
+
+
+def _choice_lines(plan: Plan, setup: Setup) -> list[str]:
+    """What the header says of where the round starts, when it chose the lane."""
+    if not plan.lane_stock:
+        return []
+    lane = plan.legs[0].lane
+    chosen = next(s for s in plan.lane_stock if s.lane == lane)
+    others = "; ".join(
+        f"lane {s.lane}: {_n(s.left_mm, 1)} mm{'' if s.open else ', no room for the first cut'}"
+        for s in plan.lane_stock
+        if s.lane != lane
+    )
+    return [
+        f"(STARTS IN {_lane(plan, setup, lane)}: of the lanes its first cut fits on, the one "
+        f"with the most stock left behind its face, {_n(chosen.left_mm, 1)} mm; {others})"
+    ]
+
+
 def _leg_lines(plan: Plan, setup: Setup) -> list[str]:
     """The header's account of where the round cuts, leg by leg."""
     lines = []
@@ -250,6 +323,11 @@ def _leg_lines(plan: Plan, setup: Setup) -> list[str]:
             )
         if leg.reface_mm == 0 and number == 0 and leg.top_mm > 0:
             lines.append(f"(the top stands at Z{_n(-leg.top_mm)}, faced down by earlier rounds)")
+        for relief in leg.reliefs:
+            lines.append(
+                f"({then}RELIEF: {_relief(plan, setup, relief)}, milled in rows like facing; "
+                "the passes end and start in it, in the air; not analysed)"
+            )
         faces = f"front face from Y{_n(leg.face_y_start_mm)} to Y{_n(leg.face_y_end_mm)}"
         if plan.milling is Milling.SLOT:
             faces = f"slots in the top from Y{_n(leg.face_y_start_mm)} to Y{_n(leg.face_y_end_mm)}"
@@ -275,6 +353,8 @@ def _leg_start(plan: Plan, setup: Setup, number: int) -> list[str]:
             f"then {where} from Y0 again, below the new top; keep the zero)"
         ]
     fresh = "slots from Y0 again" if slot else "a fresh face at Y0"
+    if not slot and leg.face_y_start_mm > 0:
+        fresh = f"its face at Y{_n(leg.face_y_start_mm)}"
     return [f"(LANE CHANGE: {where} from here, {fresh}; keep the zero)"]
 
 
@@ -331,6 +411,7 @@ def render(plan: Plan, setup: Setup, units: Units) -> str:
         f"{_n(plan.chip_load_mm)} mm per tooth)",
         "(WCS zero: X = left end of stock, Y = front face as first mounted, Z = top)",
         *_direction_lines(plan, setup),
+        *_choice_lines(plan, setup),
         *_leg_lines(plan, setup),
         _stop_rule(plan),
         MANUAL_NOTE if manual else "(the program starts, sets and stops the spindle)",
@@ -338,11 +419,15 @@ def render(plan: Plan, setup: Setup, units: Units) -> str:
     ]
     passes = {p.id: p for p in plan.passes}
     found = blocks(plan, setup, units)
-    leg = 0
+    leg, relief = 0, None
     for block in found:
         if block.leg is not None and block.leg != leg:
-            leg = block.leg
+            leg, relief = block.leg, None
             lines += _leg_start(plan, setup, leg)
+        if block.step is Step.RELIEF and block.boundary != relief:
+            relief = block.boundary
+            milled = next(r for r in plan.legs[leg].reliefs if r.boundary == relief)
+            lines.append(f"(RELIEF: {_relief(plan, setup, milled)}; not analysed)")
         if block.step is Step.RAPID:
             p = passes[block.pass_id]
             label = "test" if p.kind is PassKind.TEST else p.kind.value

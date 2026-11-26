@@ -262,32 +262,29 @@ def test_a_cut_deeper_than_its_face_allows_moves_to_a_fresh_lane():
         made.append(Made(1, y, p.depth_mm))
     face = Face(y_mm=y)
     # The first lane's face ends 0.6 mm deep. It takes the shallower cut as it stands; the
-    # deeper ones go to the second lane, a fresh face, each no deeper than the first lane
-    # was cut that far back, which the cutter crosses to reach it.
+    # deeper ones go to the second lane, a fresh face. No pass crosses the first lane: they
+    # start in the relief where the lanes meet, milled as deep as they go.
     tests = [(2000.0, 1.0, 0.9)] * 12 + [(2000.0, 0.5, 0.9)]
     plan = assemble(setup, env, 2, PlannerKind.BAYES, tests, face=face, made=tuple(made))
     assert [(leg.lane, leg.face_y_start_mm) for leg in plan.legs] == [(1, y), (2, 0.0)]
     assert [p.depth_mm for p in plan.legs[0].passes] == [0.5, 0.5]  # truing, then the test
     fresh = plan.legs[1]
-    assert fresh.lane_cap_mm == pytest.approx(y + 3.2)
-    reached = 0.0
-    for p in fresh.passes:
-        reached += p.width_mm
-        behind = min((m for m in made if m.y_mm >= reached - 1e-6), key=lambda m: m.y_mm)
-        assert p.depth_mm == 1.0 <= behind.depth_mm
-    # The first lane was cut 1.8 and 1.2 mm deep for 30.2 mm back: ten 3 mm cuts fit, and the
-    # two beyond them would cross stock cut only 0.6 mm deep.
-    assert len(fresh.passes) == 1 + 10
+    assert fresh.lane_cap_mm is None
+    assert [p.depth_mm for p in fresh.passes] == [1.0] * 13
+    ((relief_y, relief_depth),) = [(r.y_mm, r.depth_mm) for r in fresh.reliefs]
+    assert relief_y >= fresh.face_y_end_mm and relief_depth == 1.0
 
-    # Deeper than the first lane ever went: no lane is clear for it, only a faced top.
-    with pytest.raises(PlanError, match="would cut 2.4 mm deep.*only flat down to 0.6 mm"):
-        assemble(
-            setup, env, 2, PlannerKind.BAYES, [(2000.0, 2.4, 0.9)], face=face, made=tuple(made)
-        )
-    tall = slots(**SIDE, **TWO_LANES)
+    # Deeper than the first lane ever went: the fresh lane takes it all the same.
     plan = assemble(
-        tall, env, 2, PlannerKind.BAYES, [(2000.0, 2.4, 0.9)], face=face, made=tuple(made)
+        setup, env, 2, PlannerKind.BAYES, [(2000.0, 2.4, 0.9)], face=face, made=tuple(made)
     )
+    assert [(leg.lane, leg.reliefs[0].depth_mm) for leg in plan.legs] == [(2, 2.4)]
+    # With the second lane cut shallow as well, no lane is flat that deep: only a faced top.
+    both = (*made, Made(2, 3.0, 0.6))
+    with pytest.raises(PlanError, match="would cut 2.4 mm deep.*only flat down to 0.6 mm"):
+        assemble(setup, env, 2, PlannerKind.BAYES, [(2000.0, 2.4, 0.9)], face=face, made=both)
+    tall = slots(**SIDE, **TWO_LANES)
+    plan = assemble(tall, env, 2, PlannerKind.BAYES, [(2000.0, 2.4, 0.9)], face=face, made=both)
     assert plan.legs[0].reface_mm == pytest.approx(1.8 + REFACE_EXTRA_MM)
 
 
@@ -320,8 +317,9 @@ def test_a_slot_stopped_part_way_clears_nothing_for_the_next_lane():
     )
     results = session.Results(1, "recording.wav", Thresholds(), heard)
     cut = session.Round(Path("round-01"), first, results)
-    face, made, lanes_open = session._stock_left([cut], first.direction)
-    assert lanes_open is None, "nothing was cut the other way"
+    left = session._stock_left([cut], first.direction, Milling.SLOT)
+    face, made = left.face, left.made
+    assert left.lanes_open is None and left.reliefs == (), "nothing was cut the other way"
     # Its row is used in lane 1, and the stock beyond where it stopped stands uncut.
     assert (face.lane, face.y_mm, face.remnant_mm) == (1, pytest.approx(2 * PITCH), 0.0)
     assert [m.reach for m in made] == [Reach.END, Reach.PART]
@@ -635,10 +633,9 @@ def test_full_width_slots_get_no_check_but_a_narrower_width_does():
     assert [best.width_mm for best in session.to_check(setup, env, found, [])] == [3.0]
 
 
-def test_a_fresh_lane_takes_the_cuts_the_lane_before_cleared_first():
-    """Side milling deepest first: the next lane is clear only as deep as the lane before it
-    was cut, so the cuts no deeper than that go there first, and the deeper one gets a top
-    of its own instead of keeping them all off the lane."""
+def test_a_fresh_lane_takes_the_cuts_deeper_than_the_lane_before_allows():
+    """Side milling deepest first: the lane in use holds the cut its face is flat for, and
+    the next lane, fresh, takes the deeper one and the rest, none crossing the lane in use."""
     setup = slots(**SIDE, **TWO_LANES)
     env = envelope(setup)
     tests = [(1500.0, 1.25, None), (1500.0, 0.9, None), (1500.0, 0.6, None)]
@@ -648,7 +645,7 @@ def test_a_fresh_lane_takes_the_cuts_the_lane_before_cleared_first():
         (leg.lane, leg.reface_mm > 0, [p.depth_mm for p in leg.passes if p.kind is PassKind.TEST])
         for leg in plan.legs
     ]
-    assert legs == [(1, False, [0.9]), (2, False, [0.6]), (1, True, [1.25])]
+    assert legs == [(1, False, [0.9]), (2, False, [1.25, 0.6])]
 
 
 def test_no_check_is_offered_where_the_power_cap_trims_the_best_cut_itself():

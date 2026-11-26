@@ -1144,7 +1144,10 @@ function renderStep() {
   }
 
   if (state.discarded_round !== null) {
-    step.append(el('p', {}, `Round ${state.discarded_round} had not been run and was planned from the old setup, so it was discarded.`));
+    const why = state.discarded_why === 'lanes'
+      ? 'was planned by dechatter 0.8.0, whose passes stop in the stock where lanes meet and engage up to the face\'s depth at the end'
+      : 'was planned from the old setup';
+    step.append(el('p', {}, `Round ${state.discarded_round} had not been run and ${why}, so it was discarded: plan it again.`));
   }
 
   if (state.next === 'converged') {
@@ -1261,6 +1264,7 @@ function renderStep() {
       ...(round.direction === 'climb' ? [el('li', {}, 'Climb milling needs a machine without backlash (ball screws). With backlash the cutter can pull the table into the cut: feed-hold at the first snatch.')] : []),
       el('li', {}, start, ' runs the round from here, one move at a time, and records it. Keep this tab open.', ...(unknownUnits ? [' cncjs has not reported G20 or G21 yet; the machine is in ', declare] : [])),
       ...midFacings.map((leg) => el('li', {}, `Before pass ${leg.first_pass}, as ${round.lanes > 1 ? 'the lanes left have' : round.milling === 'slot' ? 'the top has' : 'the face has'} no room for the next cut, the program faces the top down ${length(leg.reface_mm, units(), { mmToo: true })}, to Z ${length(-leg.top_mm, units(), { mmToo: true })}, and goes on at the first lane with the same zero${state.spindle === 'manual' ? '' : ', without stopping'}. The recording runs on; the facing is not analysed.`)),
+      ...round.legs.flatMap((leg) => leg.reliefs.map((relief) => el('li', {}, reliefText(leg, relief)))),
       ...(round.order === 'deepest-first' ? [el('li', {}, 'The deepest cuts come first: stock is only clear down to the shallowest cut made in front of it. The first pass is the heaviest, so be ready to stop it.')] : []),
       ...(state.spindle === 'manual' ? [el('li', {}, `Before each of its ${speedChanges(round)} spindle speeds the round stops; set the speed shown here and press Continue.`)] : []),
     ),
@@ -1313,6 +1317,20 @@ function legPlace(round, leg) {
   return `${slots}lane ${leg.lane} of ${round.lanes} (X ${length(x0, units())} to ${length(x1, units())})`;
 }
 
+// A relief a leg mills before its passes, for the round's steps.
+function reliefText(leg, relief) {
+  const more = relief.done_y_mm > 0 || relief.done_depth_mm > 0 ? ', extending the one milled before' : '';
+  return `Before pass ${leg.first_pass}, the program mills a relief between lanes ${relief.boundary} and ${relief.boundary + 1} at X ${length(relief.x_mm, units())}${more}: a pocket back to Y ${length(relief.y_mm, units())} and ${length(relief.depth_mm, units(), { mmToo: true })} deep, in rows like facing. The passes on either side end and start in it, in the air. The recording runs on; the relief is not analysed.`;
+}
+
+// Where a round starts when it chose the lane: the one with the most stock left.
+function choiceText(round) {
+  const lane = round.legs[0].lane;
+  const chosen = round.lane_stock.find((s) => s.lane === lane);
+  const others = round.lane_stock.filter((s) => s.lane !== lane).map((s) => `lane ${s.lane} has ${length(s.left_mm, units())}${s.open ? '' : ', where the first cut does not fit'}`);
+  return ` It starts in lane ${lane}, which has the most stock left behind its face, ${length(chosen.left_mm, units(), { mmToo: true })}${others.length ? `; ${others.join('; ')}` : ''}.`;
+}
+
 // Where along the stock a round cuts, leg by leg, and where it faces the top down.
 function legsText(round) {
   const parts = round.legs.map((leg, i) => {
@@ -1325,7 +1343,7 @@ function legsText(round) {
     }
     return `then, from pass ${leg.first_pass}, ${legPlace(round, leg)} ${faces}`;
   });
-  return `${parts.join('; ')}.`;
+  return `${parts.join('; ')}.${round.lane_stock.length ? choiceText(round) : ''}`;
 }
 
 // A row before each leg of a round in more than one: where its passes cut.
